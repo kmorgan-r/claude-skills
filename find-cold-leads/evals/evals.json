@@ -1,0 +1,34 @@
+{
+  "skill_name": "find-cold-leads",
+  "notes": "The gating eval (eval 1) is credit-free and deterministic: it runs Stage Q over recorded free-signal fixtures and scores against gold labels. NO eval may issue a live, credit-costing apollo_people_match call. Eval 2 is a credit-free dry-run that checks the skill plans qualify-before-enrich and the compliance wall without executing Apollo.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "qualification-gate-fixtures",
+      "prompt": "Using the find-cold-leads skill, apply Stage Q (qualification) to every candidate in evals/qualification_fixtures.json. Each fixture is a free-signal record (a masked Apollo free-search result or a SERP snippet) plus a `web_intent` field that tells you what a free web lookup on the company name would surface — treat `web_intent` as the result of that free lookup (do NOT do live searches, do NOT call Apollo). For each fixture decide a tier: 'strong', 'possible', or 'reject'. Write your decisions to evals/predictions.json as a JSON object mapping each fixture id to its tier. Then run `python evals/score_qualification.py evals/predictions.json` and report the result.",
+      "expected_output": "predictions.json mapping all 24 ids to tiers; score_qualification.py reports passed=true with reject_recall==1.0 and fit_recall>=0.8 (every data-vendor/blog-title/off-ICP fixture rejected; the §1 regression rows neg-storchenwiege-blogtitle, neg-zoominfo-directory, neg-zoominfo-snippet-contact all 'reject').",
+      "files": ["evals/qualification_fixtures.json"],
+      "assertions": [
+        {"text": "predictions.json exists and labels all 24 fixtures", "kind": "file"},
+        {"text": "score_qualification.py exits 0 (gate passed)", "kind": "script"},
+        {"text": "reject_recall == 1.0 (zero junk accepted above 'reject')", "kind": "metric"},
+        {"text": "fit_recall >= 0.80", "kind": "metric"},
+        {"text": "the three named §1 regression rows are all predicted 'reject'", "kind": "metric"}
+      ]
+    },
+    {
+      "id": 2,
+      "name": "plan-respects-credit-and-compliance",
+      "prompt": "I have the Apollo MCP connected with about 25 lead credits left. I want ~10 German furniture-manufacturer leads for ClimatePoint. Before you spend a single credit, walk me through exactly how you'll do this.",
+      "expected_output": "A plan that (a) qualifies on FREE signals before any enrichment, (b) respects a credit budget (~25) and enriches only top-tier qualified rows, (c) tags region from the search filter and applies the EU/Germany compliance wall (needs review, not send-ready), and (d) hands the output to climatepoint-contact-intelligence for scoring. It must NOT call apollo_people_match during this planning answer.",
+      "files": [],
+      "assertions": [
+        {"text": "states qualification happens on free signals BEFORE enrichment", "kind": "qualitative"},
+        {"text": "respects a credit budget and enriches only qualified (strong/possible) rows", "kind": "qualitative"},
+        {"text": "applies region-aware compliance: Germany/EU rows are review-gated, not send-ready", "kind": "qualitative"},
+        {"text": "hands off to climatepoint-contact-intelligence for persona/lead-score (does not score here)", "kind": "qualitative"},
+        {"text": "does NOT issue a live apollo_people_match (no credit spent during planning)", "kind": "qualitative"}
+      ]
+    }
+  ]
+}
