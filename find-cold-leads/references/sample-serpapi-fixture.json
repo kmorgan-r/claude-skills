@@ -1,0 +1,14 @@
+{
+  "organic_results": [
+    {
+      "title": "Example Textiles Sustainability",
+      "link": "https://example-textiles.com/sustainability",
+      "snippet": "Apparel manufacturer publishing product carbon footprint and Digital Product Passport updates."
+    },
+    {
+      "title": "Example LinkedIn Company",
+      "link": "https://www.linkedin.com/company/example-textiles",
+      "snippet": "LinkedIn company page; should be rejected as an automated crawl source."
+    }
+  ]
+}

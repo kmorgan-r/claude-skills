@@ -1,0 +1,16 @@
+# Python bytecode / test caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Run artifacts — lead exports may contain personal data (GDPR); never commit.
+# outputs/ is the documented write target; keep the dir, not its contents.
+**/outputs/*
+!**/outputs/.gitkeep
+
+# Eval scratch
+**/evals/predictions.json
+
+# OS / editor
+.DS_Store
+Thumbs.db

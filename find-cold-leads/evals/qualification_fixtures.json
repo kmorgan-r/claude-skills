@@ -1,0 +1,365 @@
+{
+  "about": "Blind qualification set (iteration-2, harder). Each item: a free-signal candidate (masked Apollo free-search record or SERP snippet) + web_intent (what a free name lookup surfaces). Decide a tier per id: strong | possible | reject. No network, no Apollo credits.",
+  "fixtures": [
+    {
+      "id": "fx-01",
+      "kind": "apollo_free",
+      "record": {
+        "id": "h9",
+        "first_name": "Petra",
+        "last_name_obfuscated": "Sc***z",
+        "title": "Partner",
+        "organization": {
+          "name": "Hauser & Klein Rechtsanw\u00e4lte",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "A law firm \u2014 provides legal services, no physical product."
+    },
+    {
+      "id": "fx-02",
+      "kind": "apollo_free",
+      "record": {
+        "id": "h3",
+        "first_name": "Ben",
+        "last_name_obfuscated": "Fo***r",
+        "title": "Sustainability Lead",
+        "organization": {
+          "name": "Pixel Toys Studio",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "A mobile/video GAME studio (digital games). Matches the keyword 'toy' but makes no physical product."
+    },
+    {
+      "id": "fx-03",
+      "kind": "apollo_free",
+      "record": {
+        "id": "h7",
+        "first_name": "Lars",
+        "last_name_obfuscated": "We***l",
+        "title": "Sustainability Manager",
+        "organization": {
+          "name": "VerpackWerk GmbH",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "A packaging MANUFACTURER (not one of the 4 named DPP sectors) whose site publishes product carbon footprints / ISO 14067. Resolved official domain."
+    },
+    {
+      "id": "fx-04",
+      "kind": "apollo_free",
+      "record": {
+        "id": "app-2",
+        "first_name": "Nadia",
+        "last_name_obfuscated": "Re***i",
+        "title": "Sustainability Director",
+        "organization": {
+          "name": "Marc O'Polo",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "Apparel brand/manufacturer; newsroom references responding to retailer PCF/LCA data requests. Resolved official domain."
+    },
+    {
+      "id": "fx-05",
+      "kind": "apollo_free",
+      "record": {
+        "id": "h10",
+        "first_name": "Anke",
+        "last_name_obfuscated": "Ho***l",
+        "title": "ESG Manager",
+        "organization": {
+          "name": "Nordbank AG",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "A retail bank \u2014 financial services, no manufactured product."
+    },
+    {
+      "id": "fx-06",
+      "kind": "apollo_free",
+      "record": {
+        "id": "fur-1",
+        "first_name": "Klara",
+        "last_name_obfuscated": "Vo***l",
+        "title": "Supply Chain Sustainability Manager",
+        "organization": {
+          "name": "M\u00f6bel Konzept",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "Generic name; a free lookup cannot resolve a single official company domain with confidence (several unrelated hits)."
+    },
+    {
+      "id": "fx-07",
+      "kind": "apollo_free",
+      "record": {
+        "id": "h8",
+        "first_name": "Greta",
+        "last_name_obfuscated": "Schm***t",
+        "title": "ESG Manager",
+        "organization": {
+          "name": "Textilwerk Reutlingen GmbH",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "A textile manufacturer whose sustainability page publishes ISO 14067 product carbon footprints and an EPD. Resolved official domain."
+    },
+    {
+      "id": "fx-08",
+      "kind": "apollo_free",
+      "record": {
+        "id": "h6",
+        "first_name": "Pia",
+        "last_name_obfuscated": "Ne***n",
+        "title": "Senior Sustainability Consultant",
+        "organization": {
+          "name": "GruenPfad Beratung GmbH",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "A sustainability CONSULTANCY that helps other firms with LCA/reporting. Services, no physical product."
+    },
+    {
+      "id": "fx-09",
+      "kind": "apollo_free",
+      "record": {
+        "id": "h11",
+        "first_name": "Tom",
+        "last_name_obfuscated": "We***r",
+        "title": "Head of Sustainability",
+        "organization": {
+          "name": "GreenLedger Software GmbH",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "A carbon-accounting SOFTWARE company \u2014 right title, but no physical product and arguably a competitor."
+    },
+    {
+      "id": "fx-10",
+      "kind": "apollo_free",
+      "record": {
+        "id": "h4",
+        "first_name": "Ravi",
+        "last_name_obfuscated": "Pa***l",
+        "title": "Product Compliance Manager",
+        "organization": {
+          "name": "Apollo Mattress Manufacturing",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "apollomattress.com is a real mattress manufacturer; product pages reference EPD. The company NAME contains 'Apollo' (a blocklist token) but the domain is a legitimate manufacturer."
+    },
+    {
+      "id": "fx-11",
+      "kind": "apollo_free",
+      "record": {
+        "id": "tex-1",
+        "first_name": "Sven",
+        "last_name_obfuscated": "Ba***r",
+        "title": "Quality Manager",
+        "organization": {
+          "name": "Gebr. Elmer Textil GmbH",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "A real textile weaving manufacturer with a resolved official domain, but no public sustainability/EPD/PCF content found."
+    },
+    {
+      "id": "fx-12",
+      "kind": "apollo_free",
+      "record": {
+        "id": "h1",
+        "first_name": "Ingo",
+        "last_name_obfuscated": "Kr***r",
+        "title": "Head of Sustainability",
+        "organization": {
+          "name": "MarktDaten Insights GmbH",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "marktdaten-insights.de is a B2B data/lead-intelligence provider (sells contact + firmographic data). No physical product."
+    },
+    {
+      "id": "fx-13",
+      "kind": "apollo_free",
+      "record": {
+        "id": "vaude-1",
+        "first_name": "Lena",
+        "last_name_obfuscated": "Br***t",
+        "title": "Head of Sustainability",
+        "organization": {
+          "name": "VAUDE Sport GmbH & Co. KG",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "vaude.com \u2014 outdoor apparel/equipment maker; publishes a sustainability report and product-level EPD/eco-data. Resolved official domain vaude.com."
+    },
+    {
+      "id": "fx-14",
+      "kind": "serp",
+      "record": {
+        "title": "The production of textile fabrics in Germany: tradition, innovation an\u2026Storchenwiege GmbH & Co. KG",
+        "url": "https://www.storchenwiege.de/blog/textile-production",
+        "snippet": "A blog post about the history of woven fabric production."
+      },
+      "web_intent": "Page is a blog article; the captured 'company name' is a sentence/title, not a clean company name."
+    },
+    {
+      "id": "fx-15",
+      "kind": "apollo_free",
+      "record": {
+        "id": "sg-1",
+        "first_name": "Lisa",
+        "last_name_obfuscated": "He***e",
+        "title": "Head of Sustainability",
+        "organization": {
+          "name": "Sun Garden GmbH",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "sun-garden.de/.eu \u2014 garden furniture manufacturer; sustainability page mentions product carbon footprint. Resolved domain sun-garden.eu."
+    },
+    {
+      "id": "fx-16",
+      "kind": "apollo_free",
+      "record": {
+        "id": "toy-1",
+        "first_name": "Marie",
+        "last_name_obfuscated": "La***g",
+        "title": "Sustainability Manager",
+        "organization": {
+          "name": "HABA Spielwaren",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "Wooden toy manufacturer; press page mentions preparing for the EU Digital Product Passport. Resolved official domain."
+    },
+    {
+      "id": "fx-17",
+      "kind": "serp",
+      "record": {
+        "title": "Top 100 Textile Manufacturing Companies in Germany (2026)",
+        "url": "https://ensun.io/search/textile-manufacturing/germany",
+        "snippet": "A ranked directory of textile manufacturers."
+      },
+      "web_intent": "Listicle/directory on a B2B aggregator domain."
+    },
+    {
+      "id": "fx-18",
+      "kind": "apollo_free",
+      "record": {
+        "id": "h2",
+        "first_name": "Sara",
+        "last_name_obfuscated": "Li***n",
+        "title": "Head of Product",
+        "organization": {
+          "name": "EcoVeritas Solutions Ltd",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "ecoveritas.com provides EPD / LCA / product-compliance SOFTWARE and consultancy - a competitor to ClimatePoint, not a manufacturer."
+    },
+    {
+      "id": "fx-19",
+      "kind": "serp",
+      "record": {
+        "title": "Textile manufacturing Companies in Germany",
+        "url": "https://www.lusha.com/company-search/textile/germany",
+        "snippet": "Find textile manufacturing companies in Germany with Lusha."
+      },
+      "web_intent": "Contact-database vendor directory page."
+    },
+    {
+      "id": "fx-20",
+      "kind": "serp",
+      "record": {
+        "title": "Top Textiles & Apparel companies in Germany",
+        "url": "https://www.zoominfo.com/companies-search/location-germany-industry-textiles",
+        "snippet": "Browse the top textiles & apparel companies in Germany on ZoomInfo."
+      },
+      "web_intent": "Data-vendor directory listing, not an operating company."
+    },
+    {
+      "id": "fx-21",
+      "kind": "apollo_free",
+      "record": {
+        "id": "h5",
+        "first_name": "Mette",
+        "last_name_obfuscated": "Ja***n",
+        "title": "CSR Manager",
+        "organization": {
+          "name": "WohnWelt Moebelhandel",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "A furniture RETAILER/reseller - sells other brands' furniture, manufactures nothing of its own (no private label)."
+    },
+    {
+      "id": "fx-22",
+      "kind": "apollo_free",
+      "record": {
+        "id": "shoe-1",
+        "first_name": "Erik",
+        "last_name_obfuscated": "Ny***m",
+        "title": "ESG Manager",
+        "organization": {
+          "name": "Lowa Sportschuhe GmbH",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "Footwear manufacturer; sustainability report mentions product carbon footprint. Resolved official domain."
+    },
+    {
+      "id": "fx-23",
+      "kind": "apollo_free",
+      "record": {
+        "id": "x-fdc-mark",
+        "first_name": "Mark",
+        "last_name_obfuscated": "Mu***n",
+        "title": "Head of Sustainability at FDC - ZoomInfo",
+        "organization": {
+          "name": "FDC",
+          "has_industry": true
+        },
+        "has_email": false
+      },
+      "web_intent": "The only evidence connecting this person to the role is a ZoomInfo snippet; no company-own page corroborates it."
+    },
+    {
+      "id": "fx-24",
+      "kind": "apollo_free",
+      "record": {
+        "id": "matt-1",
+        "first_name": "Jonas",
+        "last_name_obfuscated": "Ki***l",
+        "title": "Product Compliance Manager",
+        "organization": {
+          "name": "Schlaraffia Betten",
+          "has_industry": true
+        },
+        "has_email": true
+      },
+      "web_intent": "Mattress manufacturer; product pages reference EPD / ISO 14067. Resolved official domain."
+    }
+  ]
+}
