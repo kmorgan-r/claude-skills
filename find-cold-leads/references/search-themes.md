@@ -30,8 +30,7 @@ mattresses, toys. EU DPP deadlines 2027–2030.
 ### `eu-taxonomy-lca`
 Broader life-cycle-GHG-exposed manufacturers beyond DPP sectors (low-carbon
 technologies, chemicals/plastics in primary form, energy life-cycle thresholds,
-ICT avoided-emissions). Source workbook:
-`C:\Users\kmorg\Downloads\eu_taxonomy_lca_requirements.xlsx`.
+ICT avoided-emissions). Source: eu_taxonomy_lca_requirements.xlsx (EU Taxonomy technical screening workbook).
 
 ### `standards-triggered-prospects`
 Companies already using ClimatePoint's exact language (ISO 14067 / PEFCR / PCF /

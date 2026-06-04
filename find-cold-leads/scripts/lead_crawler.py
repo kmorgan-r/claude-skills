@@ -22,6 +22,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -512,7 +513,12 @@ def discover_candidates(
     sources: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for query in queries:
-        results = read_fixture(fixture) if fixture else run_search(query, provider, api_key, max_results)
+        try:
+            results = read_fixture(fixture) if fixture else run_search(query, provider, api_key, max_results)
+        except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            print(f"[warn] search query failed ({exc}); skipping: {query!r}", file=sys.stderr)
+            sources.append({"query": query, "result_count": 0, "source": f"error:{exc}"})
+            continue
         sources.append({"query": query, "result_count": len(results),
                         "source": "fixture" if fixture else provider})
         for r in results:
@@ -576,12 +582,12 @@ def write_workbook(
     sources: list[dict[str, Any]],
     rejected: list[dict[str, Any]],
     run_config: dict[str, Any],
-) -> Path:
+) -> Path | None:
     try:
         import openpyxl  # noqa: PLC0415
     except ImportError:
         print("[warn] openpyxl not installed; writing CSV only.", file=sys.stderr)
-        return path
+        return None
     wb = openpyxl.Workbook()
 
     ws = wb.active
@@ -623,8 +629,10 @@ def write_leads(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path = out_path.with_suffix(".csv")
     write_csv(csv_path, leads)
-    write_workbook(out_path, leads, sources or [], rejected or [], run_config or {})
-    return {"xlsx": str(out_path), "csv": str(csv_path)}
+    result: dict[str, str] = {"csv": str(csv_path)}
+    if write_workbook(out_path, leads, sources or [], rejected or [], run_config or {}) is not None:
+        result["xlsx"] = str(out_path)
+    return result
 
 
 # ---------------------------------------------------------------------------
