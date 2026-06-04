@@ -2,13 +2,18 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    types: [opened, synchronize]
     # Optional: Only run on specific file changes
     # paths:
     #   - "src/**/*.ts"
     #   - "src/**/*.tsx"
     #   - "src/**/*.js"
     #   - "src/**/*.jsx"
+
+# Prevent race conditions when multiple PRs trigger simultaneously
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 
 jobs:
   claude-review:
@@ -21,13 +26,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
       issues: read
       id-token: write
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
@@ -36,9 +41,38 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+          prompt: |
+            Review ONLY the changes in this PR. Start by running `gh pr diff ${{ github.event.pull_request.number }}` to get the diff, then ONLY review the files and lines that were changed. Do NOT review files that are not part of this PR's diff.
 
+            Report ONLY CRITICAL and HIGH severity issues found in the PR diff:
+
+            ## Review areas:
+            - **Code quality**: Violations of patterns in CLAUDE.md, anti-patterns that cause maintenance nightmares
+            - **Bugs**: Logic errors, null pointer risks, race conditions, incorrect error handling
+            - **Performance**: O(n²) in hot paths, memory leaks, missing pagination on large datasets
+            - **Security**: Injection, auth bypass, data exposure, secrets in code, XSS, CSRF
+            - **Test coverage**: Critical paths with no tests, tests that don't actually assert anything
+
+            ## Severity guide:
+            - **CRITICAL**: Will cause security breach, data loss, or production outage
+            - **HIGH**: Will cause bugs, crashes, or significant user impact
+            - **MEDIUM/LOW**: Style preferences, minor improvements, "nice to have" → DO NOT REPORT
+
+            ## How to report:
+            Write your complete review to a file called `review.md` in the repo root.
+            Include file paths and line numbers for each issue (e.g., `src/file.ts:45`).
+            If no critical/high issues found, write: "✅ No critical issues found"
+
+            IMPORTANT: Only review files shown in the PR diff. Do NOT review unrelated files in the repository.
+            Use CLAUDE.md for project conventions. Do NOT run npm, npx, or any build/test commands. Static review only.
+
+          claude_args: '--allowed-tools "Write,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*)"'
+
+      - name: Post review comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f review.md ]; then
+            gh pr comment ${{ github.event.pull_request.number }} --body-file review.md
+          fi
