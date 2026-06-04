@@ -1,4 +1,0 @@
-interface:
-  display_name: "Find Cold Leads"
-  short_description: "Discover cold leads from public web signals"
-  default_prompt: "Use $find-cold-leads to find new company-level cold leads for ClimatePoint and export them to Excel."
