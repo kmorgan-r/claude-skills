@@ -544,9 +544,11 @@ def discover_candidates(
 
 
 def fetch_text(url: str, timeout: int = 20) -> str:
+    if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+        return ""
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (find-cold-leads)"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read(500_000)
         return raw.decode("utf-8", errors="ignore")
     except Exception:  # noqa: BLE001 — fetch failure is flagged, not fatal
@@ -559,11 +561,19 @@ def fetch_text(url: str, timeout: int = 20) -> str:
 # ---------------------------------------------------------------------------
 
 
+_FORMULA_CHARS = ("=", "+", "-", "@")
+
+
 def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     out = {c: "" for c in LEADS_COLUMNS}
     for k, v in row.items():
         if k in out:
-            out[k] = "" if v is None else v
+            if v is None:
+                out[k] = ""
+            elif isinstance(v, str) and v.startswith(_FORMULA_CHARS):
+                out[k] = "'" + v
+            else:
+                out[k] = v
     return out
 
 
