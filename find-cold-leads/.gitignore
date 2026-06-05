@@ -1,0 +1,11 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Run artifacts — leads exports may contain personal data (GDPR); never distribute.
+# outputs/ is the documented write target for example commands; keep the dir, not its contents.
+outputs/*
+!outputs/.gitkeep
+
+# Eval scratch
+evals/predictions.json
