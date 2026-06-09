@@ -105,6 +105,54 @@ class LeadCrawlerTests(unittest.TestCase):
         self.assertEqual(leads[0]["domain"], "example.com")
         self.assertEqual(leads[0]["source_url"], "https://Example.com/about")
 
+    def test_blocked_domains_reject_data_vendors_and_directories(self):
+        self.assertTrue(lead_crawler.is_blocked_url("https://ensun.io/list"))
+        self.assertTrue(lead_crawler.is_blocked_url("https://zoominfo.com/c/somecompany"))
+        self.assertTrue(lead_crawler.is_blocked_url("https://www.crunchbase.com/organization/x"))
+        self.assertTrue(lead_crawler.is_blocked_url("https://europages.com/en/company"))
+        self.assertFalse(lead_crawler.is_blocked_url("https://example-textiles.com/about"))
+        self.assertFalse(lead_crawler.is_blocked_url("https://www.sun-garden.de"))
+
+    def test_bad_company_names_rejected(self):
+        bad = [
+            "The production of textile fabrics in Germany: tradition, innovation an…Storchenwiege GmbH & Co. KG",
+            "Top 100 Textile Manufacturing Companies in Germany (2026)",
+            "Textile manufacturing Companies in Germany",
+            "Setex: Home",
+            "Best 50 Furniture Brands - 2025 Guide",
+            "",
+        ]
+        for name in bad:
+            self.assertTrue(lead_crawler.looks_like_bad_company_name(name), f"expected bad: {name!r}")
+
+    def test_good_company_names_accepted(self):
+        good = [
+            "Storchenwiege GmbH & Co. KG",
+            "BRANDS Fashion GmbH",
+            "LOBERON GmbH",
+            "Sun Garden",
+            "Apollo Tyres",
+            "Vaude Sport",
+        ]
+        for name in good:
+            self.assertFalse(lead_crawler.looks_like_bad_company_name(name), f"expected good: {name!r}")
+
+    def test_leads_from_search_results_skips_listicle_and_blog_titles(self):
+        results = [
+            {"title": "Top 100 Textile Manufacturing Companies in Germany (2026)", "link": "https://top100.example.com", "snippet": "directory"},
+            {"title": "The production of textile fabrics: tradition and innovation", "link": "https://article.example.com", "snippet": "article"},
+            {"title": "Storchenwiege GmbH & Co. KG", "link": "https://storchenwiege.de", "snippet": "manufacturer"},
+        ]
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+
+        leads = lead_crawler.leads_from_search_results(results, "test query", "dpp-rollout-sectors", theme)
+
+        domains = {lead["domain"] for lead in leads}
+        self.assertNotIn("top100.example.com", domains)
+        self.assertNotIn("article.example.com", domains)
+        self.assertIn("storchenwiege.de", domains)
+        self.assertEqual(len(leads), 1)
+
     def test_public_emails_filters_placeholder_and_newsletter_emails(self):
         html = """
         Contact us at info@example-textiles.com.

@@ -108,13 +108,61 @@ ROLE_TITLE_TERMS = (
     "vp",
 )
 BLOCKED_DOMAINS = {
+    # people-data vendors / contact databases
+    "zoominfo.com",
+    "lusha.com",
+    "apollo.io",
+    "rocketreach.co",
+    "ensun.io",
+    "cognism.com",
+    "seamless.ai",
+    "leadiq.com",
+    "uplead.com",
+    "adapt.io",
+    "signalhire.com",
+    "contactout.com",
+    "snov.io",
+    "hunter.io",
+    # company directories / listicles / b2b portals
+    "kompass.com",
+    "europages.com",
+    "europages.co.uk",
+    "crunchbase.com",
+    "dnb.com",
+    "yellowpages.com",
+    "yelp.com",
+    "glassdoor.com",
+    "indeed.com",
+    "wlw.de",
+    "thomasnet.com",
+    "tradeindia.com",
+    "alibaba.com",
+    # social / encyclopedias
     "linkedin.com",
     "facebook.com",
-    "instagram.com",
-    "x.com",
     "twitter.com",
+    "x.com",
+    "instagram.com",
     "youtube.com",
+    "wikipedia.org",
+    "wikidata.org",
+    "reddit.com",
+    "pinterest.com",
+    "tiktok.com",
+    "medium.com",
+    # generic news (intent should come from the company, not press coverage)
+    "bloomberg.com",
+    "reuters.com",
+    "forbes.com",
+    "businesswire.com",
+    "prnewswire.com",
+    "globenewswire.com",
 }
+_ENTITY_SUFFIX = re.compile(
+    r"\b(gmbh|ag|kg|ug|se|ltd|limited|llc|inc|corp|plc|bv|nv|sa|spa|srl|"
+    r"oy|ab|as|aps|sas|sarl|pty)\b",
+    re.IGNORECASE,
+)
 EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![\w+-])")
 PLACEHOLDER_EMAILS = {
     "email@newsletter.com",
@@ -350,7 +398,6 @@ def prebuilt_themes() -> dict[str, dict[str, Any]]:
                 "R&D life-cycle performance evaluation",
                 "Adaptation Annex LCA-style requirement",
             ],
-            "source_workbook": "C:/Users/kmorg/Downloads/eu_taxonomy_lca_requirements.xlsx",
             "target_personas": "Sustainability / ESG / Product Compliance / LCA",
             "contact_search_titles": [
                 "Head of Sustainability",
@@ -606,9 +653,12 @@ def leads_from_search_results(results: list[dict[str, Any]], query: str, theme_i
         seen.add(domain)
         title = item.get("title") or domain
         snippet = item.get("snippet") or ""
+        company_name = clean_company_name(title, domain)
+        if looks_like_bad_company_name(company_name):
+            continue
         leads.append(
             {
-                "company_name": clean_company_name(title, domain),
+                "company_name": company_name,
                 "domain": domain,
                 "website": f"{urlparse(url).scheme or 'https'}://{urlparse(url).netloc}",
                 "country": "",
@@ -649,6 +699,37 @@ def clean_company_name(title: str, domain: str) -> str:
     title = re.split(r"\s+[-|]\s+", title.strip())[0]
     title = re.sub(r"\s+", " ", title)
     return title or domain
+
+
+def looks_like_bad_company_name(name: str) -> bool:
+    """Heuristic guard: True if `name` looks like a SERP title, not a company."""
+    if not name or not name.strip():
+        return True
+    n = name.strip()
+    if "…" in n or "..." in n:
+        return True
+    if len(n) > 80:
+        return True
+    if ":" in n or " | " in n or " — " in n or " - " in n:
+        return True
+    words = n.split()
+    if len(words) > 8:
+        return True
+    # Listicle / directory titles ("Top 100 ... Companies in Germany (2026)").
+    if re.search(r"\b(companies|list|ranking|directory|top\s+\d+|best\s+\d+)\b", n, re.IGNORECASE):
+        return True
+    if re.search(r"\(?(19|20)\d{2}\)?", n):
+        return True
+    # A legal suffix that is NOT at/near the end => the name is a phrase that
+    # happens to contain a company, e.g. "...innovation and Storchenwiege GmbH".
+    matches = list(_ENTITY_SUFFIX.finditer(n))
+    if matches:
+        last = matches[-1]
+        tail = n[last.end():].strip(" .,&")
+        tail_words = [w for w in tail.split() if w and not _ENTITY_SUFFIX.fullmatch(w.strip(".,&"))]
+        if len(tail_words) > 2:  # allow short tails like "& Co. KG"
+            return True
+    return False
 
 
 def score_lead(text: str, theme: dict[str, Any]) -> int:

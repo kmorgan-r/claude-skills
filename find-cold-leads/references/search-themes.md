@@ -24,7 +24,7 @@ Best when looking for manufacturers and brands likely to need Digital Product Pa
 
 Best when looking beyond DPP sectors for companies exposed to explicit life-cycle GHG requirements.
 
-Derived from `C:\Users\kmorg\Downloads\eu_taxonomy_lca_requirements.xlsx`.
+Derived from the EU Taxonomy climate-delegated-act annexes (product LCA, energy life-cycle GHG, digital ICT avoided-emissions, R&D, and adaptation activity criteria).
 
 - Product / manufacturing LCA: low-carbon technologies, hydrogen, chlorine, organic basic chemicals, plastics in primary form
 - Energy life-cycle GHG threshold: hydropower, geothermal, renewable fuels, nuclear, selected gas routes
