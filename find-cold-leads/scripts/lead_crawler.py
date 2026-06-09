@@ -7,6 +7,7 @@ import argparse
 import getpass
 import ipaddress
 import json
+import logging
 import os
 import re
 import sys
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import openpyxl
 import requests
@@ -181,6 +182,15 @@ PLACEHOLDER_DOMAINS = {
 }
 CONSUMER_EMAIL_DOMAINS = {"gmail.com", "hotmail.com", "outlook.com", "yahoo.com"}
 _FORMULA_CHARS = ("=", "+", "-", "@")
+_BLOCKED_HOSTNAMES = frozenset({
+    "localhost",
+    "localhost.localdomain",
+    "ip6-localhost",
+    "ip6-loopback",
+    "metadata",
+    "metadata.google.internal",
+    "metadata.google",
+})
 
 
 @dataclass
@@ -603,6 +613,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-crawl-pages", action="store_true", help="Do not fetch candidate company pages.")
     parser.add_argument("--contact-search", action="store_true", help="Run targeted person/title searches for each candidate company.")
     parser.add_argument("--contact-search-queries", type=int, default=4, help="Max contact-search queries per lead.")
+    parser.add_argument("--contact-search-budget", type=int, default=0, help="Max total contact-search queries across all leads (0 = unlimited).")
     parser.add_argument("--list-themes", action="store_true")
     parser.add_argument("--list-providers", action="store_true")
     return parser.parse_args(argv)
@@ -638,8 +649,13 @@ def normalized_domain(url: str) -> str:
 
 
 def _is_private_ip_url(url: str) -> bool:
+    host = urlparse(url).hostname or ""
+    host_lower = host.lower()
+    if host_lower in _BLOCKED_HOSTNAMES:
+        return True
+    if host_lower.endswith((".local", ".internal")):
+        return True
     try:
-        host = urlparse(url).hostname or ""
         ip = ipaddress.ip_address(host)
         return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
     except ValueError:
@@ -776,21 +792,39 @@ def enrich_contacts_via_search(
     theme: dict[str, Any],
     per_lead_queries: int = 4,
     per_query_results: int = 3,
+    budget: int = 0,
 ) -> list[SearchSource]:
+    eligible_count = sum(1 for lead in leads if lead.get("contact_data_type") != "person")
+    estimated = eligible_count * per_lead_queries
+    if budget > 0:
+        estimated = min(estimated, budget)
+        print(f"Estimated contact-search queries: {estimated} (budget: {budget})")
+    else:
+        print(f"Estimated contact-search queries: {estimated} (budget: unlimited)")
     sources: list[SearchSource] = []
+    queries_used = 0
     for lead in leads:
-        if lead.get("contact_data_type") == "person":
-            continue
-        for query in contact_search_queries(lead, theme, per_lead_queries):
-            try:
-                results = search_provider(query, provider_id, api_key, per_query_results)
-            except Exception as exc:  # noqa: BLE001 - keep other leads available
-                lead["notes"] = append_note(lead.get("notes", ""), f"Contact search failed ({query}): {exc}")
-                continue
-            sources.append(SearchSource(query, len(results), f"{provider_id}:contact_search"))
-            apply_contact_search_results(lead, results, query, theme)
+        try:
             if lead.get("contact_data_type") == "person":
-                break
+                continue
+            for query in contact_search_queries(lead, theme, per_lead_queries):
+                if budget > 0 and queries_used >= budget:
+                    print(f"Contact-search budget exhausted ({budget}); stopping.")
+                    return sources
+                queries_used += 1
+                try:
+                    results = search_provider(query, provider_id, api_key, per_query_results)
+                except Exception as exc:  # noqa: BLE001 - keep other leads available
+                    lead["notes"] = append_note(lead.get("notes", ""), f"Contact search failed ({query}): {exc}")
+                    continue
+                sources.append(SearchSource(query, len(results), f"{provider_id}:contact_search"))
+                apply_contact_search_results(lead, results, query, theme)
+                if lead.get("contact_data_type") == "person":
+                    break
+        except Exception as exc:  # noqa: BLE001 - flush partial work on unexpected failure
+            logging.warning("Unexpected error during contact search for %s: %s", lead.get("company_name", "unknown"), exc)
+            lead["notes"] = append_note(lead.get("notes", ""), f"Contact search interrupted: {exc}")
+            continue
     return sources
 
 
@@ -1002,10 +1036,13 @@ def read_manual_seeds(path: str) -> list[dict[str, Any]]:
             linkedin = url if "linkedin.com/" in url else ""
         if "linkedin.com/" in url:
             url = ""
+        if not url:
+            logging.warning("Skipping manual seed %r: no usable URL", name)
+            continue
         results.append(
             {
                 "title": name,
-                "link": url or f"https://www.google.com/search?q={requests.utils.quote(name)}",
+                "link": url,
                 "snippet": "Manual seed supplied by user; verify contact evidence on public non-LinkedIn sources.",
                 "linkedin_reference_url": linkedin,
             }
@@ -1094,8 +1131,14 @@ def extract_page(url: str, provider_id: str, api_key: str | None) -> dict[str, A
 
 
 def jina_extract(url: str, api_key: str | None) -> dict[str, Any]:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return {"url": url, "text": "", "emails": []}
+    if _is_private_ip_url(url):
+        return {"url": url, "text": "", "emails": []}
+    encoded = quote(url, safe="")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    response = requests.get(f"https://r.jina.ai/{url}", headers=headers, timeout=30)
+    response = requests.get(f"https://r.jina.ai/{encoded}", headers=headers, timeout=30)
     response.raise_for_status()
     text = response.text
     return {"url": url, "text": text, "emails": public_emails(text)}
@@ -1537,6 +1580,7 @@ def run(args: argparse.Namespace) -> Path:
                 search_api_key or "",
                 theme,
                 per_lead_queries=args.contact_search_queries,
+                budget=args.contact_search_budget,
             )
         )
 
@@ -1551,6 +1595,7 @@ def run(args: argparse.Namespace) -> Path:
         "extract_provider_env": catalog["extract"].get(extract_provider_id, {}).get("env", ""),
         "contact_search": args.contact_search,
         "contact_search_queries": args.contact_search_queries,
+        "contact_search_budget": args.contact_search_budget,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "queries": queries,
         "linkedin_guardrail": prebuilt_themes()["linkedin-assisted-cross-reference"]["guardrail"],

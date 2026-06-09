@@ -364,5 +364,97 @@ class LeadCrawlerTests(unittest.TestCase):
         self.assertEqual(links, [])
 
 
+    def test_is_private_ip_url_blocks_hostname_internal_targets(self):
+        blocked = [
+            "http://localhost/admin",
+            "http://localhost.localdomain:8080/",
+            "https://metadata.google.internal/computeMetadata/v1/",
+            "http://metadata:80/",
+            "http://internal-service.local/path",
+            "https://anything.internal/",
+        ]
+        for url in blocked:
+            self.assertTrue(lead_crawler._is_private_ip_url(url), f"expected blocked: {url}")
+
+        public = [
+            "https://example.com/about",
+            "http://www.google.com/search",
+            "https://api.serper.dev/search",
+        ]
+        for url in public:
+            self.assertFalse(lead_crawler._is_private_ip_url(url), f"expected public: {url}")
+
+    def test_jina_extract_rejects_bad_scheme_and_private_ip(self):
+        with patch.object(lead_crawler, "requests") as mock_requests:
+            result = lead_crawler.jina_extract("ftp://example.com/file", None)
+            self.assertEqual(result, {"url": "ftp://example.com/file", "text": "", "emails": []})
+            mock_requests.get.assert_not_called()
+
+            result = lead_crawler.jina_extract("http://localhost/secret", "key")
+            self.assertEqual(result, {"url": "http://localhost/secret", "text": "", "emails": []})
+            mock_requests.get.assert_not_called()
+
+            mock_requests.get.return_value.text = "Extracted text"
+            lead_crawler.jina_extract("https://example.com/page?id=1", "key")
+            call_url = mock_requests.get.call_args[0][0]
+            self.assertTrue(call_url.startswith("https://r.jina.ai/"))
+            self.assertIn("https%3A%2F%2Fexample.com%2Fpage%3Fid%3D1", call_url)
+
+    def test_read_manual_seeds_skips_entries_without_url(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            seed_path = Path(temp_dir) / "seeds.json"
+            seed_path.write_text(
+                json.dumps([
+                    {"company": "Good Corp", "url": "https://good.example.com"},
+                    {"company": "Bad Corp", "url": ""},
+                    "https://also-good.example.com",
+                    "No URL Corp",
+                ]),
+                encoding="utf-8",
+            )
+            results = lead_crawler.read_manual_seeds(str(seed_path))
+        titles = [r["title"] for r in results]
+        self.assertIn("Good Corp", titles)
+        self.assertIn("https://also-good.example.com", titles)
+        self.assertNotIn("Bad Corp", titles)
+        self.assertNotIn("No URL Corp", titles)
+        for r in results:
+            self.assertFalse(r["link"].startswith("https://www.google.com/search"))
+
+    def test_enrich_contacts_via_search_respects_budget(self):
+        leads = [
+            {"company_name": "A", "domain": "a.com"},
+            {"company_name": "B", "domain": "b.com"},
+        ]
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+
+        with patch.object(lead_crawler, "contact_search_queries", return_value=["q1", "q2"]), \
+             patch.object(lead_crawler, "search_provider", return_value=[{"link": "https://a.com"}]):
+            sources = lead_crawler.enrich_contacts_via_search(
+                leads, "serper", "key", theme, per_lead_queries=2, budget=1
+            )
+        self.assertEqual(len(sources), 1)
+
+    def test_enrich_contacts_via_search_survives_outer_exception(self):
+        leads = [
+            {"company_name": "A", "domain": "a.com"},
+            {"company_name": "B", "domain": "b.com"},
+        ]
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+
+        def side_effect(lead, theme, max_queries):
+            if lead["company_name"] == "A":
+                raise RuntimeError("boom")
+            return ["q1"]
+
+        with patch.object(lead_crawler, "contact_search_queries", side_effect=side_effect), \
+             patch.object(lead_crawler, "search_provider", return_value=[{"link": "https://b.com"}]):
+            sources = lead_crawler.enrich_contacts_via_search(
+                leads, "serper", "key", theme, per_lead_queries=1, budget=0
+            )
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(leads[0].get("notes"), "Contact search interrupted: boom")
+
+
 if __name__ == "__main__":
     unittest.main()
