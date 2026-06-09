@@ -1,287 +1,274 @@
-"""Deterministic, offline, credit-free tests for the find-cold-leads plumbing.
-
-These cover the helpers that protect against the original failures (vendor
-domains kept as leads, blog titles stored as company names, third-party-snippet
-contacts) plus the handoff-schema contract. No network, no Apollo credits.
-
-Run:  python -m pytest scripts/test_lead_crawler.py -q
-"""
-from __future__ import annotations
-
 import json
+import tempfile
+import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-import lead_crawler as lc
+import openpyxl
 
-
-# --------------------------------------------------------------------------- #
-# registrable_domain (eTLD+1)
-# --------------------------------------------------------------------------- #
-
-def test_registrable_domain_basic():
-    assert lc.registrable_domain("https://www.sun-garden.de/about") == "sun-garden.de"
-    assert lc.registrable_domain("http://shop.example.com") == "example.com"
-    assert lc.registrable_domain("EXAMPLE.COM") == "example.com"
+import lead_crawler
 
 
-def test_registrable_domain_multi_label_suffix():
-    assert lc.registrable_domain("https://www.acme.co.uk/x") == "acme.co.uk"
-    assert lc.registrable_domain("https://team.acme.co.uk") == "acme.co.uk"
-    assert lc.registrable_domain("https://acme.com.au") == "acme.com.au"
+class LeadCrawlerTests(unittest.TestCase):
+    def test_provider_catalog_has_swappable_search_and_extract_options(self):
+        catalog = lead_crawler.provider_catalog()
+
+        self.assertIn("serper", catalog["search"])
+        self.assertIn("serpapi", catalog["search"])
+        self.assertIn("codex_manual", catalog["search"])
+        self.assertIn("codex_builtin", catalog["extract"])
+        self.assertIn("jina", catalog["extract"])
+        self.assertEqual(catalog["search"]["serper"]["env"], "SERPER_API_KEY")
+        self.assertEqual(catalog["extract"]["firecrawl"]["env"], "FIRECRAWL_API_KEY")
+
+    def test_explicit_api_key_takes_precedence_over_environment(self):
+        key = lead_crawler.resolve_provider_key(
+            "serper",
+            lead_crawler.provider_catalog()["search"]["serper"],
+            explicit_key="explicit-key",
+            env={"SERPER_API_KEY": "env-key"},
+        )
+
+        self.assertEqual(key, "explicit-key")
+
+    def test_provider_key_uses_environment_when_no_explicit_key(self):
+        key = lead_crawler.resolve_provider_key(
+            "serper",
+            lead_crawler.provider_catalog()["search"]["serper"],
+            explicit_key=None,
+            env={"SERPER_API_KEY": "env-key"},
+        )
+
+        self.assertEqual(key, "env-key")
+
+    def test_provider_without_key_requirement_does_not_prompt(self):
+        prompts = []
+        key = lead_crawler.resolve_provider_key(
+            "codex_manual",
+            lead_crawler.provider_catalog()["search"]["codex_manual"],
+            explicit_key=None,
+            env={},
+            prompt_fn=lambda prompt: prompts.append(prompt) or "prompted-key",
+        )
+
+        self.assertIsNone(key)
+        self.assertEqual(prompts, [])
+
+    def test_prebuilt_themes_include_taxonomy_and_linkedin_guardrail(self):
+        themes = lead_crawler.prebuilt_themes()
+
+        self.assertIn("eu-taxonomy-lca", themes)
+        self.assertIn("linkedin-assisted-cross-reference", themes)
+        self.assertTrue(themes["linkedin-assisted-cross-reference"]["manual_seed_only"])
+        self.assertIn("Product / manufacturing LCA", themes["eu-taxonomy-lca"]["subthemes"])
+
+    def test_query_expansion_uses_theme_terms_and_location(self):
+        themes = lead_crawler.prebuilt_themes()
+        queries = lead_crawler.expand_queries(
+            themes["dpp-rollout-sectors"],
+            location="Germany",
+            max_queries=4,
+        )
+
+        self.assertGreaterEqual(len(queries), 1)
+        self.assertLessEqual(len(queries), 4)
+        self.assertTrue(any("Germany" in query for query in queries))
+        self.assertTrue(any("site:" not in query for query in queries))
+
+    def test_contact_search_queries_target_personas_and_company(self):
+        lead = {
+            "company_name": "Example Textiles",
+            "domain": "example-textiles.com",
+            "website": "https://example-textiles.com",
+        }
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+
+        queries = lead_crawler.contact_search_queries(lead, theme, max_queries=5)
+
+        self.assertLessEqual(len(queries), 5)
+        self.assertTrue(any('"Example Textiles"' in query for query in queries))
+        self.assertTrue(any("site:example-textiles.com" in query for query in queries))
+        self.assertTrue(any('"Head of Sustainability"' in query for query in queries))
+        self.assertTrue(any('"ESG Manager"' in query for query in queries))
+
+    def test_dedupe_skips_linkedin_and_normalizes_domains(self):
+        results = [
+            {"title": "A", "link": "https://Example.com/about", "snippet": "textile manufacturer"},
+            {"title": "A duplicate", "link": "https://www.example.com/contact", "snippet": "duplicate"},
+            {"title": "LinkedIn", "link": "https://www.linkedin.com/company/example", "snippet": "profile"},
+        ]
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+
+        leads = lead_crawler.leads_from_search_results(results, "test query", "dpp-rollout-sectors", theme)
+
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0]["domain"], "example.com")
+        self.assertEqual(leads[0]["source_url"], "https://Example.com/about")
+
+    def test_public_emails_filters_placeholder_and_newsletter_emails(self):
+        html = """
+        Contact us at info@example-textiles.com.
+        Demo text: you@company.com
+        Newsletter widget: email@newsletter.com
+        Placeholder account: user@gmail.com
+        """
+
+        emails = lead_crawler.public_emails(html)
+
+        self.assertEqual(emails, ["info@example-textiles.com"])
+
+    def test_find_contact_link_ignores_teamviewer_false_positive(self):
+        html = """
+        <a href="https://get.teamviewer.com/663n3ee">Remote support</a>
+        <a href="/contact">Contact</a>
+        """
+
+        contact = lead_crawler.find_contact_link(html, "https://example.com")
+
+        self.assertEqual(contact, "https://example.com/contact")
+
+    def test_extract_contact_people_finds_named_sustainability_contact(self):
+        html = """
+        <section>
+          <h2>Leadership</h2>
+          <p>Jane Miller, Head of Sustainability</p>
+          <a href="mailto:jane.miller@example-textiles.com">jane.miller@example-textiles.com</a>
+        </section>
+        """
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+
+        people = lead_crawler.extract_contact_people(html, "https://example-textiles.com/team", theme)
+
+        self.assertEqual(len(people), 1)
+        self.assertEqual(people[0]["contact_name"], "Jane Miller")
+        self.assertEqual(people[0]["contact_title"], "Head of Sustainability")
+        self.assertEqual(people[0]["contact_email"], "jane.miller@example-textiles.com")
+        self.assertEqual(people[0]["contact_source_url"], "https://example-textiles.com/team")
+        self.assertGreaterEqual(people[0]["contact_confidence"], 70)
+
+    def test_extract_contact_people_ignores_generic_topic_labels(self):
+        html = "<p>Carbon Accounting, ESG Reporting</p>"
+
+        people = lead_crawler.extract_contact_people(html, "https://example.com/blog", {})
+
+        self.assertEqual(people, [])
+
+    def test_extract_contact_people_ignores_marketing_sentence_fragments(self):
+        html = "<p>APAC. Real-time tracking of ESG performance is now available.</p>"
+
+        people = lead_crawler.extract_contact_people(html, "https://example.com/blog", {})
+
+        self.assertEqual(people, [])
+
+    def test_extract_contact_people_ignores_masked_directory_snippets(self):
+        html = "Audit Manager, ESG Coordinator. Email ****** @****.com. Phone (***) ****-****."
+
+        people = lead_crawler.extract_contact_people(html, "https://directory.example/person", {})
+
+        self.assertEqual(people, [])
+
+    def test_enrich_public_pages_follows_team_page_for_named_contacts(self):
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+        leads = lead_crawler.leads_from_search_results(
+            [
+                {
+                    "title": "Example Textiles",
+                    "link": "https://example-textiles.com",
+                    "snippet": "Textile manufacturer",
+                }
+            ],
+            "test query",
+            "dpp-rollout-sectors",
+            theme,
+        )
+        pages = {
+            "https://example-textiles.com": {
+                "url": "https://example-textiles.com",
+                "html": '<a href="/team">Team</a><a href="/contact">Contact</a>',
+                "text": "Home",
+            },
+            "https://example-textiles.com/team": {
+                "url": "https://example-textiles.com/team",
+                "html": """
+                <p>Jane Miller, Head of Sustainability</p>
+                <a href="mailto:jane.miller@example-textiles.com">Email</a>
+                """,
+                "text": "Jane Miller, Head of Sustainability",
+            },
+            "https://example-textiles.com/contact": {
+                "url": "https://example-textiles.com/contact",
+                "html": '<a href="mailto:info@example-textiles.com">Email us</a>',
+                "text": "Contact",
+            },
+        }
+
+        with patch.object(lead_crawler, "extract_page", side_effect=lambda url, *_: pages[url]):
+            lead_crawler.enrich_public_pages(leads, theme, "codex_builtin")
+
+        self.assertEqual(leads[0]["contact_name"], "Jane Miller")
+        self.assertEqual(leads[0]["contact_title"], "Head of Sustainability")
+        self.assertEqual(leads[0]["contact_email"], "jane.miller@example-textiles.com")
+        self.assertEqual(leads[0]["contact_source_url"], "https://example-textiles.com/team")
+        self.assertEqual(leads[0]["contact_data_type"], "person")
+
+    def test_fixture_export_creates_expected_workbook_sheets_and_columns(self):
+        fixture = {
+            "organic_results": [
+                {
+                    "title": "Example Textiles",
+                    "link": "https://example-textiles.com/sustainability",
+                    "snippet": "Apparel manufacturer publishing product carbon footprint details.",
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture_path = Path(temp_dir) / "fixture.json"
+            output_path = Path(temp_dir) / "leads.xlsx"
+            fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+
+            args = lead_crawler.parse_args(
+                [
+                    "--theme",
+                    "dpp-rollout-sectors",
+                    "--fixture",
+                    str(fixture_path),
+                    "--output",
+                    str(output_path),
+                    "--no-crawl-pages",
+                    "--search-provider",
+                    "serper",
+                    "--extract-provider",
+                    "codex_builtin",
+                ]
+            )
+            lead_crawler.run(args)
+
+            workbook = openpyxl.load_workbook(output_path, data_only=True)
+            self.assertEqual(
+                workbook.sheetnames,
+                ["Leads", "Sources", "Rejected", "Run Config"],
+            )
+            headers = [cell.value for cell in workbook["Leads"][1]]
+            self.assertIn("company_name", headers)
+            self.assertIn("linkedin_reference_url", headers)
+            self.assertIn("outreach_allowed_review", headers)
+            self.assertIn("target_persona", headers)
+            self.assertIn("contact_name", headers)
+            self.assertIn("contact_title", headers)
+            self.assertIn("contact_source_url", headers)
+            self.assertIn("contact_confidence", headers)
+            self.assertIn("person_source_type", headers)
+            self.assertIn("public_profile_url", headers)
+            self.assertIn("email_discovery_method", headers)
+            self.assertIn("email_verification_status", headers)
+            self.assertIn("email_confidence", headers)
+            self.assertIn("do_not_contact_reason", headers)
+            self.assertEqual(workbook["Leads"].max_row, 2)
+            config = {row[0].value: row[1].value for row in workbook["Run Config"].iter_rows(min_row=2)}
+            self.assertEqual(config["search_provider"], "fixture")
+            self.assertEqual(config["extract_provider"], "codex_builtin")
 
 
-# --------------------------------------------------------------------------- #
-# Blocklist — by registrable host only. The key near-misses.
-# --------------------------------------------------------------------------- #
-
-def test_blocklist_blocks_vendor_and_subdomains_and_case():
-    assert lc.is_blocked("https://www.zoominfo.com/c/x") is True
-    assert lc.is_blocked("https://de.zoominfo.com/c/x") is True          # subdomain
-    assert lc.is_blocked("https://ZoomInfo.COM/c/x") is True             # case
-    assert lc.is_blocked("https://apollo.io/companies") is True
-
-
-def test_blocklist_allows_legit_company_with_token_in_name_or_path():
-    # "Apollo Tyres" is a real ICP-class manufacturer; its DOMAIN is not a vendor.
-    assert lc.is_blocked("https://www.apollotyres.com/en-in/") is False
-    # A blocklist token appearing only in a URL PATH must not trigger a block.
-    assert lc.is_blocked("https://acme-furniture.de/partners/zoominfo") is False
-
-
-def test_dedupe_by_domain_keeps_first_per_registrable_domain():
-    rows = [
-        {"domain": "https://www.acme.de/a"},
-        {"domain": "https://shop.acme.de/b"},   # same registrable domain
-        {"domain": "https://other.com"},
-    ]
-    out = lc.dedupe_by_domain(rows)
-    assert [lc.registrable_domain(r["domain"]) for r in out] == ["acme.de", "other.com"]
-
-
-# --------------------------------------------------------------------------- #
-# Company-name sanity — the #1 regression (blog title stored as company).
-# --------------------------------------------------------------------------- #
-
-def test_bad_company_names_rejected():
-    bad = [
-        "The production of textile fabrics in Germany: tradition, innovation an…Storchenwiege GmbH & Co. KG",
-        "Top 100 Textile Manufacturing Companies in Germany (2026)",
-        "Textile manufacturing Companies in Germany",
-        "Setex: Home",
-        "Best 50 Furniture Brands - 2025 Guide",
-        "",
-    ]
-    for name in bad:
-        assert lc.looks_like_bad_company_name(name) is True, name
-
-
-def test_good_company_names_accepted():
-    good = [
-        "Storchenwiege GmbH & Co. KG",
-        "BRANDS Fashion GmbH",
-        "LOBERON GmbH",
-        "Sun Garden",
-        "Apollo Tyres",
-        "Vaude Sport",
-    ]
-    for name in good:
-        assert lc.looks_like_bad_company_name(name) is False, name
-
-
-# --------------------------------------------------------------------------- #
-# Region tagging from the SEARCH location filter (not enrich `country`).
-# --------------------------------------------------------------------------- #
-
-def test_region_for_location():
-    assert lc.region_for_location("Germany") == {"region": "EU", "country": "Germany", "strict": True}
-    assert lc.region_for_location("France")["strict"] is False
-    assert lc.region_for_location("United States")["region"] == "US"
-    assert lc.region_for_location("United Kingdom")["region"] == "UK"
-    assert lc.region_for_location("European Union")["region"] == "EU"
-    assert lc.region_for_location("Narnia")["region"] == "unknown"
-    # ISO codes, endonyms, and "City Country" must resolve — else a Germany pull
-    # typed as "DE"/"Deutschland" silently loses its UWG-strict posture.
-    assert lc.region_for_location("DE") == {"region": "EU", "country": "Germany", "strict": True}
-    assert lc.region_for_location("Deutschland")["strict"] is True
-    assert lc.region_for_location("Munich Germany")["country"] == "Germany"
-    assert lc.region_for_location("GB")["region"] == "UK"
-    assert lc.region_for_location("us")["region"] == "US"
-
-
-def test_compliance_posture_by_region():
-    eu = lc.compliance_fields(lc.region_for_location("Germany"))
-    assert eu["outreach_allowed_review"] == "needs review"
-    assert eu["consent_status"] == "unknown"
-    assert "UWG" in eu["legitimate_interest_basis"]            # DE strict flagged
-
-    us = lc.compliance_fields(lc.region_for_location("United States"))
-    assert "opt-out" in us["consent_status"]
-    assert "CAN-SPAM" in us["outreach_allowed_review"]
-
-    unknown = lc.compliance_fields(lc.region_for_location("Narnia"))
-    assert unknown["outreach_allowed_review"] == "needs review"  # conservative EU default
-
-
-# --------------------------------------------------------------------------- #
-# Apollo -> handoff mapping + two-domains rule.
-# --------------------------------------------------------------------------- #
-
-ENRICHED = {
-    "id": "66f67f94fd124c00010dc231",
-    "first_name": "Lisa", "last_name": "Heyde", "name": "Lisa Heyde",
-    "title": "Head of Sustainability", "headline": "Head of Sustainability at Sun Garden",
-    "seniority": "head", "email": "l.heyde@sun-garden.de", "email_status": "verified",
-    "linkedin_url": "http://www.linkedin.com/in/lisa-heyde",
-    "city": "Neuenkirchen", "state": "North Rhine-Westphalia", "country": "Germany",
-    "organization": {
-        "name": "Sun Garden", "website_url": "http://www.sun-garden.eu",
-        "primary_domain": "sun-garden.eu", "industry": "furniture",
-        "estimated_num_employees": 4600, "short_description": "Garden furniture maker.",
-    },
-}
-
-
-def test_map_apollo_person_uses_email_domain_for_outreach():
-    row = lc.map_apollo_person(ENRICHED, lc.region_for_location("Germany"))
-    # Outreach Domain comes from the EMAIL (.de), not organization.primary_domain (.eu).
-    assert row["Domain"] == "sun-garden.de"
-    assert row["Website"] == "http://www.sun-garden.eu"        # company identity
-    assert row["Email"] == "l.heyde@sun-garden.de"
-    assert row["email_verification_status"] == "verified"
-    assert row["Company"] == "Sun Garden"
-    assert row["LinkedIn"].endswith("/lisa-heyde")
-    assert row["apollo_person_id"] == ENRICHED["id"]
-    assert row["apollo_credits_consumed"] == 1
-    assert row["contact_source"] == "apollo_enriched"
-    assert row["outreach_allowed_review"] == "needs review"    # EU/DE wall stands
-
-
-def test_map_apollo_person_no_email_is_apollo_free_zero_credit():
-    # An id-bearing but email-less record reports 0 on the per-row credit field.
-    # This is how BOTH a never-paid free-search row and a budget-exhausted
-    # "apollo_free" fallback row arrive here, so counting it would phantom-charge
-    # the run total. (The model's separate live counter gates overspend on match.)
-    no_email = {**ENRICHED, "email": "", "email_status": ""}
-    row = lc.map_apollo_person(no_email, lc.region_for_location("Germany"))
-    assert row["contact_source"] == "apollo_free"
-    assert row["apollo_credits_consumed"] == 0
-    assert row["email_verification_status"] == "none"
-    assert row["Domain"] == "sun-garden.eu"                    # falls back to primary_domain
-
-
-def test_map_apollo_person_true_no_match_is_zero_credit():
-    # A genuine no-match returns neither id nor email -> nothing was looked up.
-    no_match = {**ENRICHED, "id": "", "email": "", "email_status": ""}
-    row = lc.map_apollo_person(no_match, lc.region_for_location("Germany"))
-    assert row["contact_source"] == "apollo_free"
-    assert row["apollo_credits_consumed"] == 0
-    assert row["apollo_person_id"] == ""
-
-
-# --------------------------------------------------------------------------- #
-# Contact provenance — evidence must be the company's own domain, never a vendor.
-# --------------------------------------------------------------------------- #
-
-def test_contact_provenance():
-    # Good: the contact page is on the company's own registrable domain.
-    assert lc.contact_provenance_ok("https://www.sun-garden.de/team", "sun-garden.de") is True
-    # Bad: the "evidence" is a ZoomInfo snippet (the original #3 failure).
-    assert lc.contact_provenance_ok("https://www.zoominfo.com/p/Mark-Mulingbayan", "fdc.com") is False
-    # Bad: evidence domain does not match the company.
-    assert lc.contact_provenance_ok("https://random-blog.com/x", "sun-garden.de") is False
-
-
-# --------------------------------------------------------------------------- #
-# Handoff conformance — bind to the REAL classifier ensure_headers, not a copy.
-# --------------------------------------------------------------------------- #
-
-def _load_classifier_required_columns() -> list[str] | None:
-    """Parse the classifier's ensure_headers() required list from its source, so
-    this test fails loudly if the classifier contract drifts."""
-    path = Path.home() / ".claude/skills/climatepoint-contact-intelligence/references/climatepoint_classifier.py"
-    if not path.exists():
-        return None
-    text = path.read_text(encoding="utf-8")
-    start = text.find("required = [")
-    if start == -1:
-        return None
-    end = text.find("]", start)
-    block = text[start + len("required = ["):end]
-    cols = [c.strip().strip('"').strip("'") for c in block.split(",")]
-    return [c for c in cols if c]
-
-
-# Pinned snapshot of the classifier's required columns (climatepoint-contact-
-# intelligence ensure_headers, 2026-06). Used only when the live classifier source
-# isn't on disk — e.g. this skill cloned standalone, without the classifier — so
-# the conformance check still runs instead of silently skipping. When the
-# classifier IS present, its source overrides this and also catches contract drift.
-_CLASSIFIER_COLUMNS_SNAPSHOT = [
-    "Domain", "Title", "LinkedIn", "Company", "Summary", "Headline",
-    "Department / Function", "Seniority", "Persona", "Lead Score (1-10)",
-    "Need State", "Opportunity Type", "Outreach Angle", "Next Action",
-    "Company Name", "Website", "Industry", "Company Size",
-    "Revenue / Funding Stage", "Country / HQ", "Product Type",
-    "Sustainability Claims", "Regulatory Exposure", "Has Physical Product",
-    "Has Manufacturing / Supply Chain", "Has Investors / Portfolio",
-    "Existing ESG Content", "Likely LCA Need", "Estimated Urgency",
-    "Recommended Offer",
-]
-
-
-def test_classifier_columns_match_real_contract():
-    real = _load_classifier_required_columns() or _CLASSIFIER_COLUMNS_SNAPSHOT
-    missing = [c for c in real if c not in lc.LEADS_COLUMNS]
-    assert not missing, f"handoff CSV is missing classifier columns: {missing}"
-
-
-def test_leads_columns_have_no_duplicates():
-    assert len(lc.LEADS_COLUMNS) == len(set(lc.LEADS_COLUMNS))
-
-
-# --------------------------------------------------------------------------- #
-# Query templates lead with INTENT, not generic keywords.
-# --------------------------------------------------------------------------- #
-
-def test_expand_queries_are_intent_first():
-    _, theme = lc.load_theme("dpp-rollout-sectors", None)
-    queries = lc.expand_queries(theme, "Germany", max_queries=6)
-    assert queries, "expected queries"
-    intent_tokens = ("ISO 14067", "PEFCR", "product carbon footprint", "EPD",
-                     "environmental product declaration", "Digital Product Passport",
-                     "life cycle assessment", "sustainability report")
-    for q in queries:
-        assert any(tok in q for tok in intent_tokens), q
-        assert "Germany" in q
-
-
-# --------------------------------------------------------------------------- #
-# Offline discovery via fixture — blocklist + dedup + no network.
-# --------------------------------------------------------------------------- #
-
-def test_discover_candidates_offline_fixture(tmp_path):
-    fixture = tmp_path / "fix.json"
-    fixture.write_text(json.dumps({"organic": [
-        {"title": "Sun Garden", "url": "https://www.sun-garden.de", "snippet": "garden furniture"},
-        {"title": "Top 100 Textile Companies", "url": "https://ensun.io/list", "snippet": "directory"},
-        {"title": "Vaude", "url": "https://www.vaude.com", "snippet": "outdoor gear EPD"},
-        {"title": "Dup", "url": "https://shop.sun-garden.de/x", "snippet": "dup domain"},
-    ]}), encoding="utf-8")
-    candidates, sources, rejected = lc.discover_candidates(
-        ["q"], provider="fixture", api_key=None, max_results=10, fixture=str(fixture),
-    )
-    domains = {c["domain"] for c in candidates}
-    assert domains == {"sun-garden.de", "vaude.com"}            # ensun blocked, dup removed
-    assert any(r["domain"] == "ensun.io" for r in rejected)
-    assert sources and sources[0]["result_count"] == 4
-
-
-def test_write_leads_roundtrip(tmp_path):
-    row = lc.map_apollo_person(ENRICHED, lc.region_for_location("Germany"))
-    out = tmp_path / "leads.xlsx"
-    paths = lc.write_leads([row], str(out), run_config={"region": "EU"})
-    csv_path = Path(paths["csv"])
-    assert csv_path.exists()
-    header = csv_path.read_text(encoding="utf-8-sig").splitlines()[0]
-    for col in ("Domain", "Title", "Company", "Summary", "Headline", "Email"):
-        assert col in header
+if __name__ == "__main__":
+    unittest.main()
