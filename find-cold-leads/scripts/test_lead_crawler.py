@@ -455,6 +455,46 @@ class LeadCrawlerTests(unittest.TestCase):
         self.assertEqual(len(sources), 1)
         self.assertEqual(leads[0].get("notes"), "Contact search interrupted: boom")
 
+    def test_fetch_text_rejects_redirects(self):
+        with patch.object(lead_crawler, "requests") as mock_requests:
+            mock_requests.get.return_value.is_redirect = True
+            mock_requests.get.return_value.raise_for_status = lambda: None
+            result = lead_crawler.fetch_text("https://example.com")
+            self.assertEqual(result, "")
+            mock_requests.get.assert_called_once()
+            _, kwargs = mock_requests.get.call_args
+            self.assertFalse(kwargs.get("allow_redirects", True))
+
+    def test_firecrawl_extract_rejects_bad_scheme_and_private_ip(self):
+        with patch.object(lead_crawler, "requests") as mock_requests:
+            result = lead_crawler.firecrawl_extract("ftp://example.com/file", "key")
+            self.assertEqual(result, {"url": "ftp://example.com/file", "text": "", "html": "", "emails": []})
+            mock_requests.post.assert_not_called()
+
+            result = lead_crawler.firecrawl_extract("http://localhost/secret", "key")
+            self.assertEqual(result, {"url": "http://localhost/secret", "text": "", "html": "", "emails": []})
+            mock_requests.post.assert_not_called()
+
+    def test_tavily_extract_rejects_bad_scheme_and_private_ip(self):
+        with patch.object(lead_crawler, "requests") as mock_requests:
+            result = lead_crawler.tavily_extract("ftp://example.com/file", "key")
+            self.assertEqual(result, {"url": "ftp://example.com/file", "text": "", "emails": []})
+            mock_requests.post.assert_not_called()
+
+            result = lead_crawler.tavily_extract("http://localhost/secret", "key")
+            self.assertEqual(result, {"url": "http://localhost/secret", "text": "", "emails": []})
+            mock_requests.post.assert_not_called()
+
+    def test_exa_extract_rejects_bad_scheme_and_private_ip(self):
+        with patch.object(lead_crawler, "requests") as mock_requests:
+            result = lead_crawler.exa_extract("ftp://example.com/file", "key")
+            self.assertEqual(result, {"url": "ftp://example.com/file", "text": "", "emails": []})
+            mock_requests.post.assert_not_called()
+
+            result = lead_crawler.exa_extract("http://localhost/secret", "key")
+            self.assertEqual(result, {"url": "http://localhost/secret", "text": "", "emails": []})
+            mock_requests.post.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1145,6 +1145,9 @@ def jina_extract(url: str, api_key: str | None) -> dict[str, Any]:
 
 
 def firecrawl_extract(url: str, api_key: str) -> dict[str, Any]:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or _is_private_ip_url(url):
+        return {"url": url, "text": "", "html": "", "emails": []}
     response = requests.post(
         "https://api.firecrawl.dev/v1/scrape",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -1160,6 +1163,9 @@ def firecrawl_extract(url: str, api_key: str) -> dict[str, Any]:
 
 
 def tavily_extract(url: str, api_key: str) -> dict[str, Any]:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or _is_private_ip_url(url):
+        return {"url": url, "text": "", "emails": []}
     response = requests.post(
         "https://api.tavily.com/extract",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -1174,6 +1180,9 @@ def tavily_extract(url: str, api_key: str) -> dict[str, Any]:
 
 
 def exa_extract(url: str, api_key: str) -> dict[str, Any]:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or _is_private_ip_url(url):
+        return {"url": url, "text": "", "emails": []}
     response = requests.post(
         "https://api.exa.ai/contents",
         headers={"x-api-key": api_key, "Content-Type": "application/json"},
@@ -1196,9 +1205,12 @@ def fetch_text(url: str) -> str:
     response = requests.get(
         url,
         timeout=15,
+        allow_redirects=False,
         headers={"User-Agent": "B2B lead research bot; contact via website"},
     )
     response.raise_for_status()
+    if response.is_redirect:
+        return ""
     return response.text[:500_000]
 
 
