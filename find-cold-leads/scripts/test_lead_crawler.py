@@ -318,5 +318,51 @@ class LeadCrawlerTests(unittest.TestCase):
             self.assertEqual(config["extract_provider"], "codex_builtin")
 
 
+    def test_write_table_neutralizes_formula_starters(self):
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        lead_crawler.write_table(
+            sheet,
+            ["col_a", "col_b"],
+            [
+                ["=HYPERLINK('http://attacker.com','click')", "normal"],
+                ["+1+1", "-2"],
+                ["@SUM(A1:A2)", 42],
+            ],
+        )
+        rows = list(sheet.iter_rows(min_row=2, values_only=True))
+        self.assertEqual(rows[0][0], "'=HYPERLINK('http://attacker.com','click')")
+        self.assertEqual(rows[0][1], "normal")
+        self.assertEqual(rows[1][0], "'+1+1")
+        self.assertEqual(rows[1][1], "'-2")
+        self.assertEqual(rows[2][0], "'@SUM(A1:A2)")
+        self.assertEqual(rows[2][1], 42)
+
+    def test_fetch_text_rejects_non_http_scheme(self):
+        with patch.object(lead_crawler, "requests") as mock_requests:
+            result = lead_crawler.fetch_text("ftp://example.com/file.txt")
+            self.assertEqual(result, "")
+            mock_requests.get.assert_not_called()
+
+    def test_fetch_text_rejects_private_ips(self):
+        with patch.object(lead_crawler, "requests") as mock_requests:
+            for bad_url in [
+                "http://192.168.1.1/admin",
+                "http://10.0.0.1/config",
+                "http://127.0.0.1/secret",
+                "http://169.254.169.254/latest/meta-data/",
+                "http://172.16.0.1/api",
+                "http://[::1]/admin",
+            ]:
+                result = lead_crawler.fetch_text(bad_url)
+                self.assertEqual(result, "", f"expected empty for {bad_url}")
+            mock_requests.get.assert_not_called()
+
+    def test_candidate_contact_links_rejects_private_ip_urls(self):
+        html = '<a href="http://192.168.1.1/contact">Contact</a><a href="http://192.168.1.1/about">About</a>'
+        links = lead_crawler.candidate_contact_links(html, "http://192.168.1.1")
+        self.assertEqual(links, [])
+
+
 if __name__ == "__main__":
     unittest.main()

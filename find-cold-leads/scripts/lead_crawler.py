@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import ipaddress
 import json
 import os
 import re
@@ -179,6 +180,7 @@ PLACEHOLDER_DOMAINS = {
     "newsletter.com",
 }
 CONSUMER_EMAIL_DOMAINS = {"gmail.com", "hotmail.com", "outlook.com", "yahoo.com"}
+_FORMULA_CHARS = ("=", "+", "-", "@")
 
 
 @dataclass
@@ -633,6 +635,15 @@ def normalized_domain(url: str) -> str:
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def _is_private_ip_url(url: str) -> bool:
+    try:
+        host = urlparse(url).hostname or ""
+        ip = ipaddress.ip_address(host)
+        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+    except ValueError:
+        return False
 
 
 def is_blocked_url(url: str) -> bool:
@@ -1134,6 +1145,11 @@ def exa_extract(url: str, api_key: str) -> dict[str, Any]:
 
 
 def fetch_text(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return ""
+    if _is_private_ip_url(url):
+        return ""
     response = requests.get(
         url,
         timeout=15,
@@ -1300,6 +1316,8 @@ def candidate_contact_links(html: str, base_url: str, limit: int = SECOND_HOP_PA
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
             continue
+        if _is_private_ip_url(url):
+            continue
         if normalized_domain(url) != base_domain:
             continue
         if is_blocked_url(url):
@@ -1409,7 +1427,13 @@ def export_workbook(
 def write_table(sheet: openpyxl.worksheet.worksheet.Worksheet, headers: list[str], rows: list[list[Any]]) -> None:
     sheet.append(headers)
     for row in rows:
-        sheet.append(row)
+        sanitized: list[Any] = []
+        for v in row:
+            if isinstance(v, str) and v.startswith(_FORMULA_CHARS):
+                sanitized.append("'" + v)
+            else:
+                sanitized.append(v)
+        sheet.append(sanitized)
     header_fill = PatternFill("solid", fgColor="1F4E5F")
     for cell in sheet[1]:
         cell.font = Font(bold=True, color="FFFFFF")
