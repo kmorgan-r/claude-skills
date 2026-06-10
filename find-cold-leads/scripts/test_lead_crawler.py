@@ -122,6 +122,20 @@ class LeadCrawlerTests(unittest.TestCase):
             ["acme.co.uk", "acme.de", "other.com"],
         )
 
+    def test_private_ip_results_never_become_leads(self):
+        results = [
+            {"title": "Metadata", "link": "http://169.254.169.254/company", "snippet": "instance metadata"},
+            {"title": "Internal", "link": "https://intranet.corp.internal/about", "snippet": "internal host"},
+            {"title": "Private", "link": "https://10.0.0.5/admin", "snippet": "private range"},
+            {"title": "Loopback", "link": "http://localhost:8080/x", "snippet": "loopback"},
+            {"title": "Real Corp", "link": "https://example-textiles.com/about", "snippet": "textile manufacturer"},
+        ]
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+
+        leads = lead_crawler.leads_from_search_results(results, "test query", "dpp-rollout-sectors", theme)
+
+        self.assertEqual([lead["domain"] for lead in leads], ["example-textiles.com"])
+
     def test_registrable_domain_handles_multi_label_tlds_and_ports(self):
         self.assertEqual(lead_crawler.registrable_domain("https://shop.acme.co.uk/x"), "acme.co.uk")
         self.assertEqual(lead_crawler.registrable_domain("https://www.acme.de/a"), "acme.de")
@@ -369,6 +383,49 @@ class LeadCrawlerTests(unittest.TestCase):
             self.assertEqual(config["search_provider"], "fixture")
             self.assertEqual(config["extract_provider"], "codex_builtin")
 
+
+    def test_fixture_run_with_contact_search_skips_enrichment_without_error(self):
+        fixture = {
+            "organic_results": [
+                {
+                    "title": "Example Textiles",
+                    "link": "https://example-textiles.com/sustainability",
+                    "snippet": "Apparel manufacturer publishing product carbon footprint details.",
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture_path = Path(temp_dir) / "fixture.json"
+            output_path = Path(temp_dir) / "leads.xlsx"
+            fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+
+            args = lead_crawler.parse_args(
+                [
+                    "--theme",
+                    "dpp-rollout-sectors",
+                    "--fixture",
+                    str(fixture_path),
+                    "--output",
+                    str(output_path),
+                    "--no-crawl-pages",
+                    "--contact-search",
+                    "--search-provider",
+                    "serper",
+                    "--extract-provider",
+                    "codex_builtin",
+                ]
+            )
+            # Must not raise (search_api_key is never resolved for fixture runs)
+            # and must not attempt contact-search enrichment.
+            with patch.object(
+                lead_crawler, "enrich_contacts_via_search", side_effect=AssertionError("contact search must not run for fixture provider")
+            ):
+                lead_crawler.run(args)
+
+            workbook = openpyxl.load_workbook(output_path, data_only=True)
+            source_providers = [row[2].value for row in workbook["Sources"].iter_rows(min_row=2)]
+            self.assertEqual(source_providers, [str(fixture_path)])
 
     def test_write_table_neutralizes_formula_starters(self):
         workbook = openpyxl.Workbook()

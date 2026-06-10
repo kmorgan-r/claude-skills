@@ -694,7 +694,7 @@ def leads_from_search_results(results: list[dict[str, Any]], query: str, theme_i
     leads: list[dict[str, Any]] = []
     for item in results:
         url = item.get("link") or item.get("url") or ""
-        if not url or is_blocked_url(url):
+        if not url or is_blocked_url(url) or _is_private_ip_url(url):
             continue
         domain = normalized_domain(url)
         company_key = registrable_domain(url)
@@ -1588,6 +1588,7 @@ def run(args: argparse.Namespace) -> Path:
     effective_extract_provider_id = "none" if args.no_crawl_pages else extract_provider_id
     prompt_fn = getpass.getpass if args.prompt_for_keys else None
 
+    search_api_key: str | None = None
     if args.fixture:
         fixture_results = read_fixture(args.fixture)
         raw_results.extend(fixture_results)
