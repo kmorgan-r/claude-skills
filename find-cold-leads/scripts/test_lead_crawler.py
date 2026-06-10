@@ -105,6 +105,42 @@ class LeadCrawlerTests(unittest.TestCase):
         self.assertEqual(leads[0]["domain"], "example.com")
         self.assertEqual(leads[0]["source_url"], "https://Example.com/about")
 
+    def test_dedupe_collapses_subdomains_to_one_lead_per_registrable_domain(self):
+        results = [
+            {"title": "Acme UK", "link": "https://www.acme.co.uk/", "snippet": "textile manufacturer"},
+            {"title": "Acme Shop", "link": "https://shop.acme.co.uk/products", "snippet": "duplicate company"},
+            {"title": "Acme DE", "link": "https://www.acme.de/a", "snippet": "textile manufacturer"},
+            {"title": "Acme DE Shop", "link": "https://shop.acme.de/b", "snippet": "duplicate company"},
+            {"title": "Other Corp", "link": "https://other.com/", "snippet": "different company"},
+        ]
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+
+        leads = lead_crawler.leads_from_search_results(results, "test query", "dpp-rollout-sectors", theme)
+
+        self.assertEqual(
+            [lead_crawler.registrable_domain(lead["source_url"]) for lead in leads],
+            ["acme.co.uk", "acme.de", "other.com"],
+        )
+
+    def test_registrable_domain_handles_multi_label_tlds_and_ports(self):
+        self.assertEqual(lead_crawler.registrable_domain("https://shop.acme.co.uk/x"), "acme.co.uk")
+        self.assertEqual(lead_crawler.registrable_domain("https://www.acme.de/a"), "acme.de")
+        self.assertEqual(lead_crawler.registrable_domain("https://deep.sub.acme.com.au"), "acme.com.au")
+        self.assertEqual(lead_crawler.registrable_domain("https://acme.com:8443/path"), "acme.com")
+        self.assertEqual(lead_crawler.registrable_domain("https://localhost/x"), "localhost")
+        self.assertEqual(lead_crawler.registrable_domain(""), "")
+
+    def test_normalized_domain_strips_ports_and_userinfo(self):
+        self.assertEqual(lead_crawler.normalized_domain("https://zoominfo.com:443/company"), "zoominfo.com")
+        self.assertEqual(lead_crawler.normalized_domain("https://www.Example.COM:8080/about"), "example.com")
+        self.assertEqual(lead_crawler.normalized_domain("https://user:pass@acme.com/x"), "acme.com")
+        self.assertEqual(lead_crawler.normalized_domain(""), "")
+
+    def test_blocked_domains_not_bypassed_by_explicit_port(self):
+        self.assertTrue(lead_crawler.is_blocked_url("https://zoominfo.com:443/company"))
+        self.assertTrue(lead_crawler.is_blocked_url("https://de.zoominfo.com:8443/c/x"))
+        self.assertFalse(lead_crawler.is_blocked_url("https://example-textiles.com:443/about"))
+
     def test_blocked_domains_reject_data_vendors_and_directories(self):
         self.assertTrue(lead_crawler.is_blocked_url("https://ensun.io/list"))
         self.assertTrue(lead_crawler.is_blocked_url("https://zoominfo.com/c/somecompany"))

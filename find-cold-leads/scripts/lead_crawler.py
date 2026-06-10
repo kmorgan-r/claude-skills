@@ -641,11 +641,33 @@ def expand_queries(theme: dict[str, Any], location: str, max_queries: int) -> li
     return queries[: max(1, max_queries)]
 
 
+MULTI_LABEL_SUFFIXES = {
+    "co.uk", "org.uk", "gov.uk", "ac.uk", "ltd.uk", "plc.uk", "me.uk",
+    "com.au", "net.au", "org.au", "co.nz", "co.za", "co.jp", "or.jp",
+    "com.br", "com.mx", "com.tr", "com.cn", "com.sg", "com.hk", "co.in",
+    "com.es", "com.pl", "com.ua",
+}
+
+
 def normalized_domain(url: str) -> str:
-    host = urlparse(url).netloc.lower()
+    # .hostname (not .netloc) so explicit ports and userinfo never leak into
+    # blocklist or dedup comparisons.
+    host = (urlparse(url).hostname or "").lower()
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def registrable_domain(url: str) -> str:
+    """Return the eTLD+1 (registrable domain) for a URL, lowercased."""
+    host = normalized_domain(url)
+    if not host or "." not in host:
+        return host
+    parts = host.split(".")
+    last2 = ".".join(parts[-2:])
+    if len(parts) >= 3 and last2 in MULTI_LABEL_SUFFIXES:
+        return ".".join(parts[-3:])
+    return last2
 
 
 def _is_private_ip_url(url: str) -> bool:
@@ -675,9 +697,10 @@ def leads_from_search_results(results: list[dict[str, Any]], query: str, theme_i
         if not url or is_blocked_url(url):
             continue
         domain = normalized_domain(url)
-        if not domain or domain in seen:
+        company_key = registrable_domain(url)
+        if not domain or company_key in seen:
             continue
-        seen.add(domain)
+        seen.add(company_key)
         title = item.get("title") or domain
         snippet = item.get("snippet") or ""
         company_name = clean_company_name(title, domain)
