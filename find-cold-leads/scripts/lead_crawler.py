@@ -777,7 +777,7 @@ def contact_search_queries(lead: dict[str, Any], theme: dict[str, Any], max_quer
             queries.append(f'"{company_name}" "{title}"')
         if domain and len(queries) < max_queries:
             queries.append(f"site:{domain} \"{title}\"")
-    if domain and not any(query.startswith(f"site:{domain} ") for query in queries[:max_queries]):
+    if domain and titles and not any(query.startswith(f"site:{domain} ") for query in queries[:max_queries]):
         queries.insert(1 if queries else 0, f"site:{domain} \"{titles[0]}\"")
     for title in titles:
         if domain and f"site:{domain} \"{title}\"" not in queries:
@@ -815,15 +815,17 @@ def enrich_contacts_via_search(
                 try:
                     results = search_provider(query, provider_id, api_key, per_query_results)
                 except Exception as exc:  # noqa: BLE001 - keep other leads available
-                    lead["notes"] = append_note(lead.get("notes", ""), f"Contact search failed ({query}): {exc}")
+                    safe_exc = _redact_key(str(exc), api_key)
+                    lead["notes"] = append_note(lead.get("notes", ""), f"Contact search failed ({query}): {safe_exc}")
                     continue
                 sources.append(SearchSource(query, len(results), f"{provider_id}:contact_search"))
                 apply_contact_search_results(lead, results, query, theme)
                 if lead.get("contact_data_type") == "person":
                     break
         except Exception as exc:  # noqa: BLE001 - flush partial work on unexpected failure
-            logging.warning("Unexpected error during contact search for %s: %s", lead.get("company_name", "unknown"), exc)
-            lead["notes"] = append_note(lead.get("notes", ""), f"Contact search interrupted: {exc}")
+            safe_exc = _redact_key(str(exc), api_key)
+            logging.warning("Unexpected error during contact search for %s: %s", lead.get("company_name", "unknown"), safe_exc)
+            lead["notes"] = append_note(lead.get("notes", ""), f"Contact search interrupted: {safe_exc}")
             continue
     return sources
 
@@ -1077,6 +1079,12 @@ def enrich_public_pages(leads: list[dict[str, Any]], theme: dict[str, Any], prov
             lead["notes"] = f"Page crawl failed: {exc}"
 
 
+def _redact_key(text: str, key: str) -> str:
+    if key and len(key) > 3:
+        return text.replace(key, "***")
+    return text
+
+
 def append_note(existing: str | None, note: str) -> str:
     if not existing:
         return note
@@ -1202,16 +1210,25 @@ def fetch_text(url: str) -> str:
         return ""
     if _is_private_ip_url(url):
         return ""
-    response = requests.get(
-        url,
-        timeout=15,
-        allow_redirects=False,
-        headers={"User-Agent": "B2B lead research bot; contact via website"},
-    )
-    response.raise_for_status()
-    if response.is_redirect:
-        return ""
-    return response.text[:500_000]
+    current_url = url
+    for _ in range(5):  # max redirect hops
+        parsed = urlparse(current_url)
+        if parsed.scheme not in ("http", "https"):
+            return ""
+        if _is_private_ip_url(current_url):
+            return ""
+        response = requests.get(
+            current_url,
+            timeout=15,
+            allow_redirects=False,
+            headers={"User-Agent": "B2B lead research bot; contact via website"},
+        )
+        response.raise_for_status()
+        if not response.is_redirect:
+            return response.text[:500_000]
+        location = response.headers.get("Location", "")
+        current_url = urljoin(current_url, location)
+    return ""  # too many redirects
 
 
 def public_emails(html: str) -> list[str]:

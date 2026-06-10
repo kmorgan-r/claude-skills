@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import openpyxl
 
@@ -455,15 +455,34 @@ class LeadCrawlerTests(unittest.TestCase):
         self.assertEqual(len(sources), 1)
         self.assertEqual(leads[0].get("notes"), "Contact search interrupted: boom")
 
-    def test_fetch_text_rejects_redirects(self):
+    def test_fetch_text_follows_safe_redirect(self):
         with patch.object(lead_crawler, "requests") as mock_requests:
-            mock_requests.get.return_value.is_redirect = True
-            mock_requests.get.return_value.raise_for_status = lambda: None
-            result = lead_crawler.fetch_text("https://example.com")
+            redirect_resp = Mock()
+            redirect_resp.is_redirect = True
+            redirect_resp.raise_for_status = lambda: None
+            redirect_resp.headers = {"Location": "https://example.com/"}
+
+            ok_resp = Mock()
+            ok_resp.is_redirect = False
+            ok_resp.raise_for_status = lambda: None
+            ok_resp.text = "redirected content"
+
+            mock_requests.get.side_effect = [redirect_resp, ok_resp]
+            result = lead_crawler.fetch_text("http://example.com")
+            self.assertEqual(result, "redirected content")
+            self.assertEqual(mock_requests.get.call_count, 2)
+
+    def test_fetch_text_blocks_redirect_to_private_ip(self):
+        with patch.object(lead_crawler, "requests") as mock_requests:
+            redirect_resp = Mock()
+            redirect_resp.is_redirect = True
+            redirect_resp.raise_for_status = lambda: None
+            redirect_resp.headers = {"Location": "http://192.168.1.1/secret"}
+
+            mock_requests.get.return_value = redirect_resp
+            result = lead_crawler.fetch_text("http://example.com")
             self.assertEqual(result, "")
             mock_requests.get.assert_called_once()
-            _, kwargs = mock_requests.get.call_args
-            self.assertFalse(kwargs.get("allow_redirects", True))
 
     def test_firecrawl_extract_rejects_bad_scheme_and_private_ip(self):
         with patch.object(lead_crawler, "requests") as mock_requests:
@@ -494,6 +513,33 @@ class LeadCrawlerTests(unittest.TestCase):
             result = lead_crawler.exa_extract("http://localhost/secret", "key")
             self.assertEqual(result, {"url": "http://localhost/secret", "text": "", "emails": []})
             mock_requests.post.assert_not_called()
+
+    def test_contact_search_queries_survives_empty_titles(self):
+        lead = {
+            "company_name": "Example Textiles",
+            "website": "https://example-textiles.com",
+        }
+        theme = {"contact_search_titles": []}
+
+        queries = lead_crawler.contact_search_queries(lead, theme, max_queries=5)
+
+        self.assertEqual(queries, [])
+
+    def test_enrich_contacts_via_search_redacts_api_key_in_notes(self):
+        leads = [{"company_name": "A", "domain": "a.com"}]
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+        secret_key = "sk_live_secret_12345"
+
+        def side_effect(query, provider, key, max_results):
+            raise RuntimeError(f"403 for url: https://serpapi.com/search?api_key={key}")
+
+        with patch.object(lead_crawler, "contact_search_queries", return_value=["q1"]), \
+             patch.object(lead_crawler, "search_provider", side_effect=side_effect):
+            lead_crawler.enrich_contacts_via_search(
+                leads, "serpapi", secret_key, theme, per_lead_queries=1, budget=0
+            )
+        self.assertNotIn(secret_key, leads[0].get("notes", ""))
+        self.assertIn("***", leads[0].get("notes", ""))
 
 
 if __name__ == "__main__":
