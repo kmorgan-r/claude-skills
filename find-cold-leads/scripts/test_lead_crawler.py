@@ -557,6 +557,87 @@ class LeadCrawlerTests(unittest.TestCase):
         self.assertNotIn(secret_key, leads[0].get("notes", ""))
         self.assertIn("***", leads[0].get("notes", ""))
 
+    def test_read_fixture_supports_multiple_provider_formats(self):
+        item = {"title": "Example", "link": "https://example.com", "snippet": "s"}
+        payloads = [
+            {"organic_results": [item]},  # SerpApi / SearchApi
+            {"organic": [item]},  # Serper
+            {"results": [item]},  # Tavily
+            [item],  # bare list
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for index, payload in enumerate(payloads):
+                fixture_path = Path(temp_dir) / f"fixture_{index}.json"
+                fixture_path.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertEqual(
+                    lead_crawler.read_fixture(str(fixture_path)),
+                    [item],
+                    msg=f"payload format {index} should yield results",
+                )
+
+    def test_run_survives_failed_query_and_redacts_key_in_sources(self):
+        secret_key = "sk_live_secret_12345"
+        calls = {"count": 0}
+
+        def side_effect(query, provider_id, api_key, max_results):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError(
+                    f"429 Too Many Requests for url: https://serpapi.com/search.json?api_key={api_key}"
+                )
+            return [
+                {
+                    "title": "Example Textiles",
+                    "link": "https://example-textiles.com/sustainability",
+                    "snippet": "Apparel manufacturer publishing product carbon footprint details.",
+                }
+            ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "leads.xlsx"
+            args = lead_crawler.parse_args(
+                [
+                    "--theme",
+                    "dpp-rollout-sectors",
+                    "--search-provider",
+                    "serpapi",
+                    "--search-api-key",
+                    secret_key,
+                    "--extract-provider",
+                    "codex_builtin",
+                    "--no-crawl-pages",
+                    "--max-queries",
+                    "2",
+                    "--output",
+                    str(output_path),
+                ]
+            )
+            with patch.object(lead_crawler, "search_provider", side_effect=side_effect):
+                lead_crawler.run(args)
+
+            workbook = openpyxl.load_workbook(output_path, data_only=True)
+            self.assertEqual(workbook["Leads"].max_row, 2)
+            source_rows = list(workbook["Sources"].iter_rows(min_row=2, values_only=True))
+            error_rows = [row for row in source_rows if str(row[2]).startswith("error:")]
+            self.assertEqual(len(error_rows), 1)
+            self.assertNotIn(secret_key, str(error_rows[0][2]))
+            self.assertIn("***", str(error_rows[0][2]))
+            ok_rows = [row for row in source_rows if row[2] == "serpapi"]
+            self.assertEqual(len(ok_rows), 1)
+
+    def test_raise_for_status_redacted_strips_key_from_http_error(self):
+        secret_key = "sk_live_secret_12345"
+        response = Mock()
+        response.raise_for_status.side_effect = lead_crawler.requests.HTTPError(
+            f"400 Client Error: Bad Request for url: https://serpapi.com/search.json?q=x&api_key={secret_key}"
+        )
+
+        with self.assertRaises(lead_crawler.requests.HTTPError) as ctx:
+            lead_crawler._raise_for_status_redacted(response, secret_key)
+
+        self.assertNotIn(secret_key, str(ctx.exception))
+        self.assertIn("***", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

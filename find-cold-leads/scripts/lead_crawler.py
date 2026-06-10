@@ -870,6 +870,20 @@ def classify_person_source(url: str) -> str:
     return "public_web"
 
 
+def _raise_for_status_redacted(response: requests.Response, api_key: str) -> None:
+    """raise_for_status, but scrub the API key from the error message.
+
+    requests.HTTPError includes the full request URL, which leaks keys passed
+    as query params (SerpApi api_key=, SearchApi api_key=, Google CSE key=).
+    """
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise requests.HTTPError(
+            _redact_key(str(exc), api_key), response=response
+        ) from None
+
+
 def serpapi_search(query: str, api_key: str, max_results: int) -> list[dict[str, Any]]:
     collected: list[dict[str, Any]] = []
     start = 0
@@ -885,7 +899,7 @@ def serpapi_search(query: str, api_key: str, max_results: int) -> list[dict[str,
             },
             timeout=30,
         )
-        response.raise_for_status()
+        _raise_for_status_redacted(response, api_key)
         payload = response.json()
         page_results = payload.get("organic_results") or []
         if not page_results:
@@ -934,7 +948,7 @@ def searchapi_search(query: str, api_key: str, max_results: int) -> list[dict[st
         params={"engine": "google", "q": query, "api_key": api_key, "num": min(max_results, 100)},
         timeout=30,
     )
-    response.raise_for_status()
+    _raise_for_status_redacted(response, api_key)
     payload = response.json()
     return payload.get("organic_results") or []
 
@@ -1005,7 +1019,7 @@ def google_cse_search(query: str, api_key: str, max_results: int) -> list[dict[s
         params={"key": api_key, "cx": cse_id, "q": query, "num": min(max_results, 10)},
         timeout=30,
     )
-    response.raise_for_status()
+    _raise_for_status_redacted(response, api_key)
     payload = response.json()
     return payload.get("items") or []
 
@@ -1014,7 +1028,7 @@ def read_fixture(path: str) -> list[dict[str, Any]]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if isinstance(payload, list):
         return payload
-    return payload.get("organic_results") or []
+    return payload.get("organic_results") or payload.get("organic") or payload.get("results") or []
 
 
 def read_manual_seeds(path: str) -> list[dict[str, Any]]:
@@ -1571,7 +1585,13 @@ def run(args: argparse.Namespace) -> Path:
             raise SystemExit(f"Set {env_name}, pass --search-api-key, or use --prompt-for-keys.")
         per_query = max(1, args.max_results // max(1, len(queries)))
         for query in queries:
-            results = search_provider(query, search_provider_id, search_api_key or "", per_query)
+            try:
+                results = search_provider(query, search_provider_id, search_api_key or "", per_query)
+            except Exception as exc:  # noqa: BLE001 - one failed query should not lose the whole run
+                safe_exc = _redact_key(str(exc), search_api_key or "")
+                print(f"[warn] query failed ({safe_exc}); skipping: {query!r}", file=sys.stderr)
+                sources.append(SearchSource(query, 0, f"error:{safe_exc}"))
+                continue
             raw_results.extend(results)
             sources.append(SearchSource(query, len(results), search_provider_id))
         effective_search_provider = search_provider_id
