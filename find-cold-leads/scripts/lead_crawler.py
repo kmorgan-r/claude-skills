@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sys
 import time
 from dataclasses import dataclass
@@ -684,6 +685,35 @@ def _is_private_ip_url(url: str) -> bool:
         return False
 
 
+def _resolves_to_private_ip(hostname: str) -> bool:
+    """True if any DNS answer for hostname is private/loopback/link-local/reserved.
+
+    Guards against DNS rebinding: a public-looking hostname can resolve to an
+    internal or cloud-metadata address (e.g. 169.254.169.254) at request time,
+    which the string-level _is_private_ip_url check cannot catch. Best-effort:
+    the request that follows re-resolves DNS, so a rebinding server with a
+    zero TTL can still race this check; requests offers no practical way to
+    pin the validated IP for the actual connection.
+    """
+    if not hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except (socket.gaierror, OSError):
+        # Unresolvable now -> the request itself fails the same way; nothing
+        # to leak by letting it proceed.
+        return False
+    for info in infos:
+        address = str(info[4][0]).split("%", 1)[0]  # strip IPv6 zone id
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return True
+    return False
+
+
 def is_blocked_url(url: str) -> bool:
     domain = normalized_domain(url)
     return any(domain == blocked or domain.endswith(f".{blocked}") for blocked in BLOCKED_DOMAINS)
@@ -1253,6 +1283,10 @@ def fetch_text(url: str) -> str:
         if parsed.scheme not in ("http", "https"):
             return ""
         if _is_private_ip_url(current_url):
+            return ""
+        # Re-check after DNS resolution: hostname-string matching cannot catch
+        # a public-looking domain that resolves to a private/metadata IP.
+        if _resolves_to_private_ip(parsed.hostname or ""):
             return ""
         response = requests.get(
             current_url,

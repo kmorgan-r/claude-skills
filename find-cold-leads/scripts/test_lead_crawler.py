@@ -564,8 +564,13 @@ class LeadCrawlerTests(unittest.TestCase):
         self.assertEqual(len(sources), 1)
         self.assertEqual(leads[0].get("notes"), "Contact search interrupted: boom")
 
+    @staticmethod
+    def _getaddrinfo_result(ip: str) -> list[tuple]:
+        return [(2, 1, 6, "", (ip, 0))]
+
     def test_fetch_text_follows_safe_redirect(self):
-        with patch.object(lead_crawler, "requests") as mock_requests:
+        with patch.object(lead_crawler, "requests") as mock_requests, \
+             patch.object(lead_crawler.socket, "getaddrinfo", return_value=self._getaddrinfo_result("93.184.216.34")):
             redirect_resp = Mock()
             redirect_resp.is_redirect = True
             redirect_resp.raise_for_status = lambda: None
@@ -582,7 +587,8 @@ class LeadCrawlerTests(unittest.TestCase):
             self.assertEqual(mock_requests.get.call_count, 2)
 
     def test_fetch_text_blocks_redirect_to_private_ip(self):
-        with patch.object(lead_crawler, "requests") as mock_requests:
+        with patch.object(lead_crawler, "requests") as mock_requests, \
+             patch.object(lead_crawler.socket, "getaddrinfo", return_value=self._getaddrinfo_result("93.184.216.34")):
             redirect_resp = Mock()
             redirect_resp.is_redirect = True
             redirect_resp.raise_for_status = lambda: None
@@ -591,6 +597,49 @@ class LeadCrawlerTests(unittest.TestCase):
             mock_requests.get.return_value = redirect_resp
             result = lead_crawler.fetch_text("http://example.com")
             self.assertEqual(result, "")
+            mock_requests.get.assert_called_once()
+
+    def test_fetch_text_refuses_hostname_resolving_to_private_ip(self):
+        # DNS rebinding: hostname looks public but resolves to an internal or
+        # cloud-metadata address. Must be refused before any connection.
+        for rebound_ip in ["169.254.169.254", "10.0.0.5", "127.0.0.1", "::1"]:
+            with patch.object(lead_crawler, "requests") as mock_requests, \
+                 patch.object(lead_crawler.socket, "getaddrinfo", return_value=self._getaddrinfo_result(rebound_ip)):
+                result = lead_crawler.fetch_text("https://attacker-seo-domain.com/")
+                self.assertEqual(result, "", f"expected refusal for hostname resolving to {rebound_ip}")
+                mock_requests.get.assert_not_called()
+
+    def test_fetch_text_blocks_redirect_to_hostname_resolving_private(self):
+        def fake_getaddrinfo(hostname, *args, **kwargs):
+            if hostname == "rebind.example.net":
+                return self._getaddrinfo_result("169.254.169.254")
+            return self._getaddrinfo_result("93.184.216.34")
+
+        with patch.object(lead_crawler, "requests") as mock_requests, \
+             patch.object(lead_crawler.socket, "getaddrinfo", side_effect=fake_getaddrinfo):
+            redirect_resp = Mock()
+            redirect_resp.is_redirect = True
+            redirect_resp.raise_for_status = lambda: None
+            redirect_resp.headers = {"Location": "https://rebind.example.net/meta"}
+
+            mock_requests.get.return_value = redirect_resp
+            result = lead_crawler.fetch_text("http://example.com")
+            self.assertEqual(result, "")
+            mock_requests.get.assert_called_once()
+
+    def test_fetch_text_proceeds_when_hostname_unresolvable(self):
+        # Fail-open on resolution errors: the request itself would fail the
+        # same way for a truly unresolvable host, so nothing can leak.
+        with patch.object(lead_crawler, "requests") as mock_requests, \
+             patch.object(lead_crawler.socket, "getaddrinfo", side_effect=lead_crawler.socket.gaierror("no such host")):
+            ok_resp = Mock()
+            ok_resp.is_redirect = False
+            ok_resp.raise_for_status = lambda: None
+            ok_resp.text = "content"
+
+            mock_requests.get.return_value = ok_resp
+            result = lead_crawler.fetch_text("https://example.com/")
+            self.assertEqual(result, "content")
             mock_requests.get.assert_called_once()
 
     def test_firecrawl_extract_rejects_bad_scheme_and_private_ip(self):
