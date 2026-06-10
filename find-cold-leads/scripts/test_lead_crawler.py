@@ -259,6 +259,22 @@ class LeadCrawlerTests(unittest.TestCase):
         self.assertEqual(leads[0]["contact_source_url"], "https://example-textiles.com/team")
         self.assertEqual(leads[0]["contact_data_type"], "person")
 
+    def test_enrich_public_pages_outer_failure_preserves_existing_notes(self):
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+        leads = [
+            {
+                "company_name": "Example Textiles",
+                "website": "https://example-textiles.com",
+                "notes": "Earlier pipeline note",
+            }
+        ]
+
+        with patch.object(lead_crawler, "extract_page", side_effect=RuntimeError("primary fetch boom")):
+            lead_crawler.enrich_public_pages(leads, theme, "codex_builtin")
+
+        self.assertIn("Earlier pipeline note", leads[0]["notes"])
+        self.assertIn("Page crawl failed: primary fetch boom", leads[0]["notes"])
+
     def test_fixture_export_creates_expected_workbook_sheets_and_columns(self):
         fixture = {
             "organic_results": [

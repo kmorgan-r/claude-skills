@@ -1076,7 +1076,7 @@ def enrich_public_pages(leads: list[dict[str, Any]], theme: dict[str, Any], prov
                 if lead.get("contact_data_type") == "person" and lead.get("contact_email"):
                     break
         except Exception as exc:  # noqa: BLE001 - enrichment should not stop export
-            lead["notes"] = f"Page crawl failed: {exc}"
+            lead["notes"] = append_note(lead.get("notes", ""), f"Page crawl failed: {exc}")
 
 
 def _redact_key(text: str, key: str) -> str:

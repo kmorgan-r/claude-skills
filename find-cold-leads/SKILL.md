@@ -45,7 +45,7 @@ Recommend `generic-b2b` when the user hasn't specified a niche and wants to expe
 
 Recommend `dpp-rollout-sectors` for ClimatePoint's legacy ICP: textiles/apparel, furniture, mattresses, and toys.
 
-Recommend `eu-taxonomy-lca` when the user wants broader LCA-driven opportunities from the EU Taxonomy workbook at `C:\Users\kmorg\Downloads\eu_taxonomy_lca_requirements.xlsx`. This includes manufacturing LCA, energy life-cycle GHG thresholds, digital avoided-emissions LCA, R&D life-cycle performance, and adaptation-annex requirements.
+Recommend `eu-taxonomy-lca` when the user wants broader LCA-driven opportunities derived from the EU Taxonomy climate delegated-act annexes. This includes manufacturing LCA, energy life-cycle GHG thresholds, digital avoided-emissions LCA, R&D life-cycle performance, and adaptation-annex requirements.
 
 Recommend `standards-triggered-prospects` when the user wants companies already mentioning standards such as ISO 14067, ISO 14064-1, PEFCR, product environmental footprint, or product carbon footprint.
 
