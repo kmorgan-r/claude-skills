@@ -680,7 +680,16 @@ def _is_private_ip_url(url: str) -> bool:
         return True
     try:
         ip = ipaddress.ip_address(host)
-        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+        # is_unspecified covers 0.0.0.0 and :: on Python <= 3.10, where
+        # is_private does not yet include 0.0.0.0/8 (changed in 3.11). On
+        # Linux, connecting to 0.0.0.0 reaches loopback services.
+        return (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_unspecified
+        )
     except ValueError:
         return False
 
@@ -709,7 +718,13 @@ def _resolves_to_private_ip(hostname: str) -> bool:
             ip = ipaddress.ip_address(address)
         except ValueError:
             continue
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
             return True
     return False
 

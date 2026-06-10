@@ -462,6 +462,11 @@ class LeadCrawlerTests(unittest.TestCase):
                 "http://169.254.169.254/latest/meta-data/",
                 "http://172.16.0.1/api",
                 "http://[::1]/admin",
+                # 0.0.0.0 routes to loopback on Linux; on Python <= 3.10 only
+                # is_unspecified flags it (is_private gained 0.0.0.0/8 in 3.11).
+                "http://0.0.0.0/admin",
+                "http://0.0.0.0:8080/internal",
+                "http://[::]/admin",
             ]:
                 result = lead_crawler.fetch_text(bad_url)
                 self.assertEqual(result, "", f"expected empty for {bad_url}")
@@ -602,7 +607,7 @@ class LeadCrawlerTests(unittest.TestCase):
     def test_fetch_text_refuses_hostname_resolving_to_private_ip(self):
         # DNS rebinding: hostname looks public but resolves to an internal or
         # cloud-metadata address. Must be refused before any connection.
-        for rebound_ip in ["169.254.169.254", "10.0.0.5", "127.0.0.1", "::1"]:
+        for rebound_ip in ["169.254.169.254", "10.0.0.5", "127.0.0.1", "::1", "0.0.0.0", "::"]:
             with patch.object(lead_crawler, "requests") as mock_requests, \
                  patch.object(lead_crawler.socket, "getaddrinfo", return_value=self._getaddrinfo_result(rebound_ip)):
                 result = lead_crawler.fetch_text("https://attacker-seo-domain.com/")
