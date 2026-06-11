@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import getpass
+import io
 import ipaddress
 import json
 import logging
@@ -44,6 +46,32 @@ SECOND_HOP_PAGE_LIMIT = 5
 # cannot exhaust memory, then bound the decoded text (chars) we hand to parsers.
 MAX_FETCH_BYTES = 2_000_000
 MAX_FETCH_CHARS = 500_000
+
+# Single source of truth for the lead record schema and the export column order.
+# Both producers (search results, manual seeds) build rows via new_lead() and the
+# workbook writer reads LEAD_COLUMNS, so the two cannot drift apart.
+LEAD_COLUMNS = [
+    "company_name", "domain", "website", "country", "region", "sector", "theme",
+    "matched_signal", "target_persona", "contact_name", "contact_title",
+    "contact_email", "contact_page", "contact_link", "contact_source_url",
+    "contact_confidence", "contact_data_type", "person_source_type",
+    "public_profile_url", "email_discovery_method", "email_verification_status",
+    "email_confidence", "do_not_contact_reason", "linkedin_reference_url",
+    "lead_score", "source_url", "evidence_snippet", "business_relevance_basis",
+    "consent_status", "outreach_allowed_review", "legitimate_interest_basis",
+    "delete_if_not_used_by", "notes", "odoo_ready",
+]
+_LEAD_NONEMPTY_DEFAULTS = {"contact_data_type": "company", "odoo_ready": "no"}
+
+
+def new_lead(**overrides: Any) -> dict[str, Any]:
+    """Build a lead row with every schema column defaulted, then apply overrides."""
+    lead = {col: "" for col in LEAD_COLUMNS}
+    lead.update(_LEAD_NONEMPTY_DEFAULTS)
+    lead.update(overrides)
+    return lead
+
+
 def theme_target_personas(theme: dict[str, Any]) -> str:
     return theme.get("target_personas", "Decision Maker / Department Head / Buyer")
 
@@ -868,42 +896,23 @@ def leads_from_search_results(results: list[dict[str, Any]], query: str, theme_i
             continue
         seen.add(company_key)
         leads.append(
-            {
-                "company_name": company_name,
-                "domain": domain,
-                "website": f"{urlparse(url).scheme or 'https'}://{urlparse(url).netloc}",
-                "country": region.get("country", ""),
-                "region": region.get("region", "unknown"),
-                "sector": "",
-                "theme": theme_id,
-                "matched_signal": snippet[:500],
-                "target_persona": theme_target_personas(theme),
-                "contact_name": "",
-                "contact_title": "",
-                "contact_email": "",
-                "contact_page": "",
-                "contact_link": "",
-                "contact_source_url": "",
-                "contact_confidence": "",
-                "contact_data_type": "company",
-                "person_source_type": "",
-                "public_profile_url": "",
-                "email_discovery_method": "",
-                "email_verification_status": "",
-                "email_confidence": "",
-                "do_not_contact_reason": "",
-                "linkedin_reference_url": "",
-                "lead_score": score_lead(snippet, theme),
-                "source_url": url,
-                "evidence_snippet": snippet,
-                "business_relevance_basis": query,
-                "consent_status": posture["consent_status"],
-                "outreach_allowed_review": posture["outreach_allowed_review"],
-                "legitimate_interest_basis": posture["legitimate_interest_basis"],
-                "delete_if_not_used_by": "",
-                "notes": "",
-                "odoo_ready": "no",
-            }
+            new_lead(
+                company_name=company_name,
+                domain=domain,
+                website=f"{urlparse(url).scheme or 'https'}://{urlparse(url).netloc}",
+                country=region.get("country", ""),
+                region=region.get("region", "unknown"),
+                theme=theme_id,
+                matched_signal=snippet[:500],
+                target_persona=theme_target_personas(theme),
+                lead_score=score_lead(snippet, theme),
+                source_url=url,
+                evidence_snippet=snippet,
+                business_relevance_basis=query,
+                consent_status=posture["consent_status"],
+                outreach_allowed_review=posture["outreach_allowed_review"],
+                legitimate_interest_basis=posture["legitimate_interest_basis"],
+            )
         )
     return leads
 
@@ -1230,45 +1239,167 @@ def google_cse_search(query: str, api_key: str, max_results: int) -> list[dict[s
 
 
 def read_fixture(path: str) -> list[dict[str, Any]]:
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise SystemExit(f"Fixture file not found: {path}")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Fixture file is not valid JSON ({path}): {exc}")
     if isinstance(payload, list):
         return payload
     return payload.get("organic_results") or payload.get("organic") or payload.get("results") or []
 
 
-def read_manual_seeds(path: str) -> list[dict[str, Any]]:
+MANUAL_SEED_SNIPPET = "Manual seed supplied by user; verify contact evidence on public non-LinkedIn sources."
+
+
+def _linkedin_company_name(url: str) -> str:
+    """Best-effort readable company name from a LinkedIn company/school slug."""
+    match = re.search(r"linkedin\.com/(?:company|school)/([^/?#]+)", url, re.IGNORECASE)
+    if not match:
+        return ""
+    slug = match.group(1).replace("-", " ").replace("_", " ").strip()
+    return slug.title()
+
+
+def _normalize_seed(company: str, raw_url: str, linkedin: str) -> dict[str, str] | None:
+    """Normalize one seed into {company, website, linkedin}. website is a
+    crawlable http(s) URL or "" (LinkedIn URLs are never crawlable; bare
+    domains gain an https:// scheme; bare names carry no website)."""
+    company = (company or "").strip()
+    raw_url = (raw_url or "").strip()
+    linkedin = (linkedin or "").strip()
+    website = raw_url
+    if "linkedin.com/" in website.lower():
+        linkedin = linkedin or website
+        website = ""
+    if website and not website.startswith(("http://", "https://")):
+        if "." in website and " " not in website:
+            website = "https://" + website  # bare domain -> assume https
+        else:
+            company = company or website  # bare company name, not a URL
+            website = ""
+    if linkedin and not company:
+        company = _linkedin_company_name(linkedin)
+    if not company and not website and not linkedin:
+        return None
+    return {"company": company, "website": website, "linkedin": linkedin}
+
+
+def _parse_csv_seeds(text: str) -> list[Any]:
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
+        return []
+    header = [cell.strip().lower() for cell in rows[0]]
+    known = {"company", "name", "url", "website", "domain", "linkedin"}
+    if known & set(header):
+        entries: list[Any] = []
+        for row in rows[1:]:
+            rec = {header[i]: row[i].strip() for i in range(min(len(header), len(row))) if row[i].strip()}
+            if rec:
+                entries.append(
+                    {
+                        "company": rec.get("company") or rec.get("name") or "",
+                        "url": rec.get("website") or rec.get("url") or rec.get("domain") or "",
+                        "linkedin": rec.get("linkedin") or "",
+                    }
+                )
+        return entries
+    # Headerless CSV: treat every non-empty cell as a seed string.
+    return [cell.strip() for row in rows for cell in row if cell.strip()]
+
+
+def read_manual_seeds(path: str) -> list[dict[str, str]]:
+    """Parse a CSV/JSON/TXT seed file into normalized {company, website,
+    linkedin} records. Accepts company names, bare domains, and LinkedIn URLs
+    (stored as references, never crawled)."""
     source = Path(path)
-    text = source.read_text(encoding="utf-8")
-    if source.suffix.lower() == ".json":
-        raw = json.loads(text)
-        entries = raw if isinstance(raw, list) else raw.get("seeds", [])
+    try:
+        text = source.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise SystemExit(f"Manual seeds file not found: {path}")
+    suffix = source.suffix.lower()
+    if suffix == ".json":
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Manual seeds file is not valid JSON ({path}): {exc}")
+        entries: list[Any] = raw if isinstance(raw, list) else raw.get("seeds", [])
+    elif suffix == ".csv":
+        entries = _parse_csv_seeds(text)
     else:
         entries = [line.strip() for line in text.splitlines() if line.strip()]
 
-    results: list[dict[str, Any]] = []
+    records: list[dict[str, str]] = []
     for entry in entries:
         if isinstance(entry, dict):
-            name = entry.get("company") or entry.get("name") or entry.get("url") or "Manual seed"
-            url = entry.get("website") or entry.get("url") or ""
+            company = entry.get("company") or entry.get("name") or ""
+            raw_url = entry.get("website") or entry.get("url") or entry.get("domain") or ""
             linkedin = entry.get("linkedin") or ""
         else:
-            name = str(entry)
-            url = str(entry) if str(entry).startswith(("http://", "https://")) else ""
-            linkedin = url if "linkedin.com/" in url else ""
-        if "linkedin.com/" in url:
-            url = ""
-        if not url:
-            logging.warning("Skipping manual seed %r: no usable URL", name)
+            company, raw_url, linkedin = "", str(entry), ""
+        record = _normalize_seed(company, raw_url, linkedin)
+        if record is None:
+            logging.warning("Skipping manual seed %r: no usable company, URL, or LinkedIn reference", entry)
             continue
-        results.append(
+        records.append(record)
+    return records
+
+
+def seeds_as_search_items(records: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Crawlable seeds (those with a website) as search-result items so they
+    flow through the normal qualify/score/enrich path."""
+    items = []
+    for record in records:
+        if not record["website"]:
+            continue
+        items.append(
             {
-                "title": name,
-                "link": url,
-                "snippet": "Manual seed supplied by user; verify contact evidence on public non-LinkedIn sources.",
-                "linkedin_reference_url": linkedin,
+                "title": record["company"] or normalized_domain(record["website"]),
+                "link": record["website"],
+                "snippet": MANUAL_SEED_SNIPPET,
+                "linkedin_reference_url": record["linkedin"],
             }
         )
-    return results
+    return items
+
+
+def leads_from_manual_seeds(records: list[dict[str, str]], theme_id: str, theme: dict[str, Any], region: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Company-level rows for seeds with no crawlable website (LinkedIn-only or
+    name-only). They carry the LinkedIn reference and await domain/verification."""
+    region = region or {"region": "unknown", "country": "", "strict": False}
+    posture = compliance_fields(region)
+    leads: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record in records:
+        if record["website"]:
+            continue  # handled via the search-result path
+        company = record["company"]
+        if not company or company.lower() in seen:
+            continue
+        seen.add(company.lower())
+        leads.append(
+            new_lead(
+                company_name=company,
+                country=region.get("country", ""),
+                region=region.get("region", "unknown"),
+                theme=theme_id,
+                target_persona=theme_target_personas(theme),
+                linkedin_reference_url=record["linkedin"],
+                person_source_type="linkedin_reference" if record["linkedin"] else "",
+                evidence_snippet=MANUAL_SEED_SNIPPET,
+                business_relevance_basis="Manual seed (user-provided); awaiting public-web verification.",
+                consent_status=posture["consent_status"],
+                outreach_allowed_review=posture["outreach_allowed_review"],
+                legitimate_interest_basis=posture["legitimate_interest_basis"],
+                notes=(
+                    "LinkedIn reference seed; find contact evidence on the company's own site."
+                    if record["linkedin"]
+                    else "Manual seed without crawlable website; supply a domain to enable enrichment."
+                ),
+            )
+        )
+    return leads
 
 
 def enrich_public_pages(leads: list[dict[str, Any]], theme: dict[str, Any], provider_id: str = "codex_builtin", api_key: str | None = None) -> None:
@@ -1662,15 +1793,17 @@ def candidate_contact_links(html: str, base_url: str, limit: int = SECOND_HOP_PA
     return [url for _, url in sorted(candidates, key=lambda item: item[0])[:limit]]
 
 
-def merge_linkedin_references(leads: list[dict[str, Any]], manual_results: list[dict[str, Any]]) -> None:
+def merge_linkedin_references(leads: list[dict[str, Any]], records: list[dict[str, str]]) -> None:
+    """Attach a seed's LinkedIn reference to its crawled (website-bearing) lead.
+    Website-less seeds already carry the reference from leads_from_manual_seeds."""
     linkedin_by_name = {
-        (item.get("title") or "").lower(): item.get("linkedin_reference_url") or ""
-        for item in manual_results
-        if item.get("linkedin_reference_url")
+        (record.get("company") or "").lower(): record["linkedin"]
+        for record in records
+        if record.get("linkedin") and record.get("website") and record.get("company")
     }
     for lead in leads:
         key = lead["company_name"].lower()
-        if key in linkedin_by_name:
+        if key in linkedin_by_name and not lead.get("linkedin_reference_url"):
             lead["linkedin_reference_url"] = linkedin_by_name[key]
 
 
@@ -1688,43 +1821,7 @@ def export_workbook(
     rejected_sheet = workbook.create_sheet("Rejected")
     config_sheet = workbook.create_sheet("Run Config")
 
-    lead_columns = [
-        "company_name",
-        "domain",
-        "website",
-        "country",
-        "region",
-        "sector",
-        "theme",
-        "matched_signal",
-        "target_persona",
-        "contact_name",
-        "contact_title",
-        "contact_email",
-        "contact_page",
-        "contact_link",
-        "contact_source_url",
-        "contact_confidence",
-        "contact_data_type",
-        "person_source_type",
-        "public_profile_url",
-        "email_discovery_method",
-        "email_verification_status",
-        "email_confidence",
-        "do_not_contact_reason",
-        "linkedin_reference_url",
-        "lead_score",
-        "source_url",
-        "evidence_snippet",
-        "business_relevance_basis",
-        "consent_status",
-        "outreach_allowed_review",
-        "legitimate_interest_basis",
-        "delete_if_not_used_by",
-        "notes",
-        "odoo_ready",
-    ]
-    write_table(leads_sheet, lead_columns, [[lead.get(col, "") for col in lead_columns] for lead in leads])
+    write_table(leads_sheet, LEAD_COLUMNS, [[lead.get(col, "") for col in LEAD_COLUMNS] for lead in leads])
 
     source_columns = ["query", "result_count", "source"]
     write_table(source_sheet, source_columns, [[s.query, s.result_count, s.source] for s in sources])
@@ -1782,7 +1879,8 @@ def list_providers() -> None:
         print(f"{category} providers:")
         for provider_id, provider in catalog[category].items():
             env_name = provider.get("env") or "no key"
-            print(f"  {provider_id}: {provider['label']} ({env_name})")
+            extra = f" + {provider['extra_env']}" if provider.get("extra_env") else ""
+            print(f"  {provider_id}: {provider['label']} ({env_name}{extra})")
             if provider.get("caveat"):
                 print(f"    WARNING: {provider['caveat']}")
 
@@ -1796,6 +1894,11 @@ def run(args: argparse.Namespace) -> Path:
         return Path(args.output)
 
     theme_id, theme = load_theme(args)
+    if theme.get("manual_seed_only") and not args.manual_seeds:
+        raise SystemExit(
+            f"Theme {theme_id!r} is manual-seed only (do not crawl LinkedIn): "
+            f"provide --manual-seeds with user-supplied LinkedIn/company data."
+        )
     queries = expand_queries(theme, args.location, args.max_queries)
     sources: list[SearchSource] = []
     rejected: list[dict[str, Any]] = []
@@ -1812,9 +1915,12 @@ def run(args: argparse.Namespace) -> Path:
         raw_results.extend(fixture_results)
         sources.append(SearchSource("fixture", len(fixture_results), args.fixture))
         effective_search_provider = "fixture"
+    elif search_provider_id == "codex_manual":
+        # No automated search: discovery comes entirely from --manual-seeds.
+        if not args.manual_seeds:
+            raise SystemExit("Provide --manual-seeds (or --fixture) with --search-provider codex_manual.")
+        effective_search_provider = "codex_manual"
     else:
-        if search_provider_id == "codex_manual":
-            raise SystemExit("Use --manual-seeds or --fixture with --search-provider codex_manual.")
         deprecated_serpapi_key = args.serpapi_key if search_provider_id == "serpapi" else None
         search_api_key = resolve_provider_key(
             search_provider_id,
@@ -1825,6 +1931,15 @@ def run(args: argparse.Namespace) -> Path:
         if catalog["search"][search_provider_id].get("requires_key") and not search_api_key:
             env_name = catalog["search"][search_provider_id]["env"]
             raise SystemExit(f"Set {env_name}, pass --search-api-key, or use --prompt-for-keys.")
+        # Some providers need a second secret (e.g. google_cse needs a search
+        # engine id). Resolve it upfront with a clear message instead of failing
+        # mid-loop with an uncatchable SystemExit.
+        extra_env = catalog["search"][search_provider_id].get("extra_env")
+        if extra_env and not os.environ.get(extra_env):
+            if prompt_fn:
+                os.environ[extra_env] = prompt_fn(f"Enter {extra_env} for {search_provider_id}: ")
+            if not os.environ.get(extra_env):
+                raise SystemExit(f"Set {extra_env} (or use --prompt-for-keys) for --search-provider {search_provider_id}.")
         per_query = max(1, args.max_results // max(1, len(queries)))
         for query in queries:
             try:
@@ -1838,11 +1953,13 @@ def run(args: argparse.Namespace) -> Path:
             sources.append(SearchSource(query, len(results), search_provider_id))
         effective_search_provider = search_provider_id
 
-    manual_results: list[dict[str, Any]] = []
+    manual_records: list[dict[str, str]] = []
     if args.manual_seeds:
-        manual_results = read_manual_seeds(args.manual_seeds)
-        raw_results.extend(manual_results)
-        sources.append(SearchSource("manual seeds", len(manual_results), args.manual_seeds))
+        manual_records = read_manual_seeds(args.manual_seeds)
+        # Seeds with a crawlable website join the normal qualify/enrich path;
+        # LinkedIn-only / name-only seeds become company-level reference rows.
+        raw_results.extend(seeds_as_search_items(manual_records))
+        sources.append(SearchSource("manual seeds", len(manual_records), args.manual_seeds))
 
     for item in raw_results:
         url = item.get("link") or item.get("url") or ""
@@ -1851,7 +1968,8 @@ def run(args: argparse.Namespace) -> Path:
 
     region = region_for_location(args.location)
     leads = leads_from_search_results(raw_results, " | ".join(queries), theme_id, theme, region)
-    merge_linkedin_references(leads, manual_results)
+    leads.extend(leads_from_manual_seeds(manual_records, theme_id, theme, region))
+    merge_linkedin_references(leads, manual_records)
     leads = leads[: args.max_results]
 
     extract_api_key = resolve_provider_key(

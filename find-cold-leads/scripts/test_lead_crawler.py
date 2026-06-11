@@ -572,26 +572,77 @@ class LeadCrawlerTests(unittest.TestCase):
             self.assertTrue(call_url.startswith("https://r.jina.ai/"))
             self.assertIn("https%3A%2F%2Fexample.com%2Fpage%3Fid%3D1", call_url)
 
-    def test_read_manual_seeds_skips_entries_without_url(self):
+    def test_read_manual_seeds_normalizes_record_shapes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             seed_path = Path(temp_dir) / "seeds.json"
             seed_path.write_text(
                 json.dumps([
                     {"company": "Good Corp", "url": "https://good.example.com"},
-                    {"company": "Bad Corp", "url": ""},
-                    "https://also-good.example.com",
-                    "No URL Corp",
+                    {"company": "Ref Corp", "linkedin": "https://www.linkedin.com/company/ref-corp"},
+                    "acme.de",
+                    "https://www.linkedin.com/company/acme",
+                    "Name Only Corp",
+                    "   ",
                 ]),
                 encoding="utf-8",
             )
-            results = lead_crawler.read_manual_seeds(str(seed_path))
-        titles = [r["title"] for r in results]
-        self.assertIn("Good Corp", titles)
-        self.assertIn("https://also-good.example.com", titles)
-        self.assertNotIn("Bad Corp", titles)
-        self.assertNotIn("No URL Corp", titles)
-        for r in results:
-            self.assertFalse(r["link"].startswith("https://www.google.com/search"))
+            records = lead_crawler.read_manual_seeds(str(seed_path))
+
+        by_company = {r["company"]: r for r in records}
+        # Website seed kept as a crawlable site.
+        self.assertEqual(by_company["Good Corp"]["website"], "https://good.example.com")
+        # LinkedIn URL never becomes a crawl target; stored as a reference.
+        self.assertEqual(by_company["Ref Corp"]["website"], "")
+        self.assertIn("linkedin.com/company/ref-corp", by_company["Ref Corp"]["linkedin"])
+        # Bare domain gains a scheme.
+        self.assertEqual(by_company[""]["website"], "https://acme.de")
+        # Bare LinkedIn URL -> company name derived from the slug, no website.
+        self.assertEqual(by_company["Acme"]["website"], "")
+        self.assertIn("linkedin.com/company/acme", by_company["Acme"]["linkedin"])
+        # Name-only seed is kept (company list input), no website.
+        self.assertEqual(by_company["Name Only Corp"]["website"], "")
+        # Blank entry dropped.
+        self.assertNotIn("   ", by_company)
+
+    def test_read_manual_seeds_parses_csv(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            seed_path = Path(temp_dir) / "seeds.csv"
+            seed_path.write_text(
+                "company,url,linkedin\n"
+                "Acme GmbH,acme.de,https://www.linkedin.com/company/acme\n"
+                "Bravo Ltd,https://bravo.example.com,\n",
+                encoding="utf-8",
+            )
+            records = lead_crawler.read_manual_seeds(str(seed_path))
+
+        by_company = {r["company"]: r for r in records}
+        self.assertEqual(by_company["Acme GmbH"]["website"], "https://acme.de")
+        self.assertIn("linkedin.com/company/acme", by_company["Acme GmbH"]["linkedin"])
+        self.assertEqual(by_company["Bravo Ltd"]["website"], "https://bravo.example.com")
+
+    def test_leads_from_manual_seeds_creates_linkedin_reference_rows(self):
+        theme = lead_crawler.prebuilt_themes()["linkedin-assisted-cross-reference"]
+        records = [
+            {"company": "Acme", "website": "", "linkedin": "https://www.linkedin.com/company/acme"},
+            {"company": "Bravo", "website": "https://bravo.com", "linkedin": ""},
+        ]
+        leads = lead_crawler.leads_from_manual_seeds(records, "linkedin-assisted-cross-reference", theme, None)
+        # Only the website-less seed becomes a reference row here.
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0]["company_name"], "Acme")
+        self.assertIn("linkedin.com/company/acme", leads[0]["linkedin_reference_url"])
+        self.assertEqual(leads[0]["person_source_type"], "linkedin_reference")
+        self.assertEqual(leads[0]["contact_data_type"], "company")
+
+    def test_seeds_as_search_items_only_crawlable(self):
+        records = [
+            {"company": "Acme", "website": "https://acme.com", "linkedin": "https://linkedin.com/company/acme"},
+            {"company": "Ref", "website": "", "linkedin": "https://linkedin.com/company/ref"},
+        ]
+        items = lead_crawler.seeds_as_search_items(records)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["link"], "https://acme.com")
+        self.assertEqual(items[0]["linkedin_reference_url"], "https://linkedin.com/company/acme")
 
     def test_enrich_contacts_via_search_respects_budget(self):
         leads = [
@@ -946,6 +997,98 @@ class LeadCrawlerTests(unittest.TestCase):
             workbook.save(out)
             reopened = openpyxl.load_workbook(out)
             self.assertEqual(reopened.active["A2"].value, "cleantext")
+
+    def test_lead_schema_matches_export_columns(self):
+        # new_lead() and the export column list must stay in lockstep.
+        self.assertEqual(set(lead_crawler.new_lead().keys()), set(lead_crawler.LEAD_COLUMNS))
+
+    def test_codex_manual_requires_seeds_or_fixture(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "out.xlsx"
+            args = lead_crawler.parse_args(
+                [
+                    "--theme", "dpp-rollout-sectors",
+                    "--search-provider", "codex_manual",
+                    "--output", str(output_path),
+                ]
+            )
+            with self.assertRaises(SystemExit):
+                lead_crawler.run(args)
+
+    def test_codex_manual_with_seeds_produces_leads(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            seed_path = Path(temp_dir) / "seeds.txt"
+            seed_path.write_text(
+                "acme.de\nhttps://www.linkedin.com/company/bravo\n", encoding="utf-8"
+            )
+            output_path = Path(temp_dir) / "out.xlsx"
+            args = lead_crawler.parse_args(
+                [
+                    "--theme", "linkedin-assisted-cross-reference",
+                    "--search-provider", "codex_manual",
+                    "--manual-seeds", str(seed_path),
+                    "--no-crawl-pages",
+                    "--output", str(output_path),
+                ]
+            )
+            lead_crawler.run(args)
+            workbook = openpyxl.load_workbook(output_path, data_only=True)
+            ws = workbook["Leads"]
+            hdr = [c.value for c in ws[1]]
+            rows = [dict(zip(hdr, [c.value for c in r])) for r in ws.iter_rows(min_row=2)]
+            companies = {r["company_name"] for r in rows}
+            # bare domain -> crawlable lead; LinkedIn URL -> reference row.
+            self.assertIn("acme.de", companies)
+            self.assertIn("Bravo", companies)
+            bravo = next(r for r in rows if r["company_name"] == "Bravo")
+            self.assertIn("linkedin.com/company/bravo", bravo["linkedin_reference_url"])
+
+    def test_manual_seed_only_theme_requires_seeds(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "out.xlsx"
+            args = lead_crawler.parse_args(
+                [
+                    "--theme", "linkedin-assisted-cross-reference",
+                    "--search-provider", "serper",
+                    "--search-api-key", "x",
+                    "--output", str(output_path),
+                ]
+            )
+            with self.assertRaises(SystemExit):
+                lead_crawler.run(args)
+
+    def test_google_cse_requires_cse_id_upfront(self):
+        import os as _os
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "out.xlsx"
+            args = lead_crawler.parse_args(
+                [
+                    "--theme", "dpp-rollout-sectors",
+                    "--search-provider", "google_cse",
+                    "--search-api-key", "x",
+                    "--output", str(output_path),
+                ]
+            )
+            env = {k: v for k, v in _os.environ.items() if k != "GOOGLE_CSE_ID"}
+            with patch.dict(lead_crawler.os.environ, env, clear=True):
+                with self.assertRaises(SystemExit):
+                    lead_crawler.run(args)
+
+    def test_run_rejects_malformed_fixture(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture_path = Path(temp_dir) / "broken.json"
+            fixture_path.write_text('{"organic_results": [', encoding="utf-8")
+            output_path = Path(temp_dir) / "out.xlsx"
+            args = lead_crawler.parse_args(
+                [
+                    "--theme", "dpp-rollout-sectors",
+                    "--fixture", str(fixture_path),
+                    "--no-crawl-pages",
+                    "--output", str(output_path),
+                ]
+            )
+            with self.assertRaises(SystemExit):
+                lead_crawler.run(args)
 
     def test_enrich_public_pages_redacts_key_in_error_notes(self):
         secret_key = "sk_extract_secret_98765"

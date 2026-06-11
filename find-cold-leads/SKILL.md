@@ -99,6 +99,14 @@ Run with manual LinkedIn/company seeds:
 python .\scripts\lead_crawler.py --theme linkedin-assisted-cross-reference --search-provider codex_manual --manual-seeds ".\seeds.txt" --location "European Union" --output ".\outputs\linkedin-assisted-leads.xlsx"
 ```
 
+The seeds file is CSV, JSON, or TXT and accepts three kinds of entry:
+
+- **Company website / bare domain** (`acme.de` or `https://acme.de`) — becomes a crawlable lead that is qualified, scored, and enriched like a search hit. A bare domain gains an `https://` scheme automatically.
+- **LinkedIn URL** (`https://www.linkedin.com/company/acme`) — stored as `linkedin_reference_url` on a company-level row; never crawled. The company name is taken from the seed's `company` field, or derived from the LinkedIn slug if absent. Find contact evidence on the company's own non-LinkedIn pages.
+- **Company name only** — kept as a company-level row awaiting a domain.
+
+JSON/CSV rows may combine fields, e.g. `{"company": "Acme GmbH", "url": "acme.de", "linkedin": "https://www.linkedin.com/company/acme"}`, so a single seed is both crawled and carries its LinkedIn reference. The `linkedin-assisted-cross-reference` theme refuses to run without `--manual-seeds` (it must never crawl LinkedIn).
+
 Run offline with a SerpApi-style fixture:
 
 ```powershell
