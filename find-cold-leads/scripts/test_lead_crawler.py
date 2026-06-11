@@ -1195,6 +1195,23 @@ class LeadCrawlerTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 lead_crawler.run(args)
 
+    def test_load_theme_rejects_missing_custom_theme_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "nope.json"
+            args = lead_crawler.parse_args(["--custom-theme-file", str(missing)])
+            with self.assertRaises(SystemExit) as cm:
+                lead_crawler.load_theme(args)
+            self.assertIn("Custom theme file not found", str(cm.exception))
+
+    def test_load_theme_rejects_malformed_custom_theme_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            broken = Path(temp_dir) / "broken.json"
+            broken.write_text('{"id": "x",', encoding="utf-8")
+            args = lead_crawler.parse_args(["--custom-theme-file", str(broken)])
+            with self.assertRaises(SystemExit) as cm:
+                lead_crawler.load_theme(args)
+            self.assertIn("not valid JSON", str(cm.exception))
+
     def test_enrich_public_pages_redacts_key_in_error_notes(self):
         secret_key = "sk_extract_secret_98765"
         theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]

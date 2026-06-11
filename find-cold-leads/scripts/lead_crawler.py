@@ -666,7 +666,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def load_theme(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
     if args.custom_theme_file:
-        data = json.loads(Path(args.custom_theme_file).read_text(encoding="utf-8"))
+        path = Path(args.custom_theme_file)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise SystemExit(f"Custom theme file not found: {path}")
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Custom theme file is not valid JSON ({path}): {exc}")
         return data.get("id", "custom"), data
     if args.theme:
         return args.theme, prebuilt_themes()[args.theme]
