@@ -53,6 +53,25 @@ Recommend `standards-triggered-prospects` when the user wants companies already 
 
 Use `linkedin-assisted-cross-reference` only when the user provides LinkedIn URLs or licensed/manual LinkedIn data. Do not crawl LinkedIn. Store LinkedIn only as a reference and find contact evidence from non-LinkedIn public web sources.
 
+## Qualification (Stage Q)
+
+Qualification is the skill's core job: decide, from **free** signals only (search snippets, the company's own pages, a free name lookup), whether a candidate genuinely fits the target ICP. Never spend enrichment credits to qualify. Assign each candidate one tier:
+
+- **strong** — in a named ICP sector (for ClimatePoint's DPP ICP: a physical-product manufacturer in textiles, apparel, footwear, furniture, mattresses, or toys) **and** carrying an intent signal (ISO 14067, EPD/environmental product declaration, PCF/product carbon footprint, Digital Product Passport, LCA, sustainability report) **and** corroborated to a single resolved official domain.
+- **possible** — sector fit but one leg missing: no intent signal yet, an ICP-adjacent product (e.g. packaging), or identity not pinned to one official domain (name-disambiguation guard).
+- **reject** — off-ICP (services, finance, SaaS, consultancy, retailer/reseller, competitor selling LCA/EPD tooling), keyword false positives (a "toy" company making digital games), data vendors/directories (even with normal-looking names on non-blocklisted domains), listicle/aggregator titles ("Top 100 … (2026)"), SERP/blog titles captured as a company name, and any contact whose evidence is a third-party data-vendor snippet rather than the company's own pages.
+
+The blocklist is domain-only and will not catch a novel data-vendor domain or a name-token collision (e.g. a real "Apollo" mattress maker) — Stage Q judgment must. Record the tier and the evidence (`evidence_snippet`, `source_url`, `business_relevance_basis`) so the decision is auditable.
+
+## Credit Gate (Apollo enrichment)
+
+When the Apollo MCP is used for people/identity enrichment, treat credits as scarce:
+
+- **Iron rule: never enrich to qualify.** Qualify on free signals (Stage Q) first; spend a credit (`apollo_people_match`) only on rows already tiered `strong` or `possible`.
+- Read the credit balance at run start (`apollo_usage_stats_credit_usage_stats`) and enforce a per-run budget (**default 25**). Stop enriching when the budget is exhausted; keep the remaining qualified rows company-level for review.
+- Page through free search (`apollo_mixed_people_api_search`); a small `per_page` silently caps results at page 1.
+- A no-match `apollo_people_match` costs 0; a matched person costs 1. Record the spend per row so the Run Config total reconciles against the usage delta.
+
 ## Script Usage
 
 From the skill folder:

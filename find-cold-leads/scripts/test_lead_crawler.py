@@ -1068,6 +1068,41 @@ class LeadCrawlerTests(unittest.TestCase):
             reopened = openpyxl.load_workbook(out)
             self.assertEqual(reopened.active["A2"].value, "cleantext")
 
+    def test_expand_queries_interleaves_sectors_under_cap(self):
+        theme = {"sectors": ["a", "b", "c"], "keywords": ["k1", "k2"]}
+        queries = lead_crawler.expand_queries(theme, "EU", 3)
+        # First len(sectors) queries must cover every sector once, not all
+        # keywords of sector "a" before "b" is ever queried.
+        self.assertEqual(len(queries), 3)
+        sectors_hit = {q.split('"')[1] for q in queries}
+        self.assertEqual(sectors_hit, {"a", "b", "c"})
+
+    def test_is_linkedin_url_rejects_lookalikes(self):
+        self.assertTrue(lead_crawler.is_linkedin_url("https://www.linkedin.com/company/acme"))
+        self.assertFalse(lead_crawler.is_linkedin_url("https://fakelinkedin.com/acme"))
+        self.assertFalse(lead_crawler.is_linkedin_url("https://acme.com/linkedin.com/x"))
+
+    def test_resolve_provider_key_empty_env_does_not_fall_back(self):
+        # An explicit empty env must NOT leak the real process environment.
+        with patch.dict(lead_crawler.os.environ, {"SERPER_API_KEY": "real-key"}):
+            key = lead_crawler.resolve_provider_key(
+                "serper",
+                lead_crawler.provider_catalog()["search"]["serper"],
+                explicit_key=None,
+                env={},
+            )
+        self.assertIsNone(key)
+
+    def test_classify_person_source_rejects_lookalike_linkedin(self):
+        self.assertEqual(
+            lead_crawler.classify_person_source("https://fakelinkedin.com/jane"),
+            "public_web",
+        )
+        self.assertEqual(
+            lead_crawler.classify_person_source("https://www.linkedin.com/in/jane"),
+            "linkedin_reference",
+        )
+
     def test_lead_schema_matches_export_columns(self):
         # new_lead() and the export column list must stay in lockstep.
         self.assertEqual(set(lead_crawler.new_lead().keys()), set(lead_crawler.LEAD_COLUMNS))

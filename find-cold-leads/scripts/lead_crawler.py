@@ -253,52 +253,36 @@ def provider_catalog() -> dict[str, dict[str, dict[str, Any]]]:
             "serper": {
                 "label": "Serper.dev Google Search API",
                 "env": "SERPER_API_KEY",
-                "requires_key": True,
-                "supports_inline_enrichment": True,
-            },
+                "requires_key": True,            },
             "serpapi": {
                 "label": "SerpApi Google Search API",
                 "env": "SERPAPI_KEY",
-                "requires_key": True,
-                "supports_inline_enrichment": True,
-            },
+                "requires_key": True,            },
             "searchapi": {
                 "label": "SearchApi.io Google Search API",
                 "env": "SEARCHAPI_API_KEY",
-                "requires_key": True,
-                "supports_inline_enrichment": True,
-            },
+                "requires_key": True,            },
             "brave": {
                 "label": "Brave Search API",
                 "env": "BRAVE_SEARCH_API_KEY",
-                "requires_key": True,
-                "supports_inline_enrichment": True,
-            },
+                "requires_key": True,            },
             "tavily": {
                 "label": "Tavily Search API",
                 "env": "TAVILY_API_KEY",
-                "requires_key": True,
-                "supports_inline_enrichment": True,
-            },
+                "requires_key": True,            },
             "exa": {
                 "label": "Exa Search API",
                 "env": "EXA_API_KEY",
-                "requires_key": True,
-                "supports_inline_enrichment": True,
-            },
+                "requires_key": True,            },
             "google_cse": {
                 "label": "Google Custom Search JSON API",
                 "env": "GOOGLE_API_KEY",
-                "requires_key": True,
-                "supports_inline_enrichment": True,
-                "extra_env": "GOOGLE_CSE_ID",
+                "requires_key": True,                "extra_env": "GOOGLE_CSE_ID",
             },
             "codex_manual": {
                 "label": "Codex/manual web research",
                 "env": None,
-                "requires_key": False,
-                "supports_inline_enrichment": True,
-            },
+                "requires_key": False,            },
         },
         "extract": {
             "codex_builtin": {
@@ -355,7 +339,10 @@ def resolve_provider_key(
 ) -> str | None:
     if explicit_key:
         return explicit_key
-    env = env or os.environ
+    # `is None`, not falsy: an explicitly passed empty dict means "no env",
+    # not "fall back to the real process environment" (which would leak a
+    # developer's exported key into a caller simulating a keyless run).
+    env = os.environ if env is None else env
     env_name = provider.get("env")
     if env_name and env.get(env_name):
         return env[env_name]
@@ -690,11 +677,15 @@ def expand_queries(theme: dict[str, Any], location: str, max_queries: int) -> li
     sectors = theme.get("sectors") or ["company"]
     keywords = theme.get("keywords") or []
     queries: list[str] = []
-    for sector in sectors:
-        if keywords:
-            for keyword in keywords:
+    if keywords:
+        # Keyword-outer / sector-inner so the first len(sectors) queries cover
+        # every sector once. A sector-major order would let max_queries truncate
+        # whole sectors (6 sectors x 6 keywords cut to 12 = only 2 sectors).
+        for keyword in keywords:
+            for sector in sectors:
                 queries.append(f'"{sector}" "{keyword}" {location}')
-        else:
+    else:
+        for sector in sectors:
             queries.append(f'"{sector}" {location}')
     return queries[: max(1, max_queries)]
 
@@ -714,6 +705,14 @@ def normalized_domain(url: str) -> str:
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def is_linkedin_url(url: str) -> bool:
+    """True only for real linkedin.com URLs (registrable-domain match), so a
+    look-alike host like fakelinkedin.com is not treated as LinkedIn."""
+    if "linkedin.com" not in (url or "").lower():
+        return False
+    return registrable_domain(url) == "linkedin.com"
 
 
 def registrable_domain(url: str) -> str:
@@ -1099,9 +1098,8 @@ def apply_contact_search_results(lead: dict[str, Any], results: list[dict[str, A
 
 
 def classify_person_source(url: str) -> str:
-    domain = normalized_domain(url)
     path = urlparse(url).path.lower()
-    if "linkedin.com" in domain:
+    if is_linkedin_url(url):
         return "linkedin_reference"
     if any(part in path for part in ("event", "speaker", "conference", "webinar")):
         return "event_or_speaker_page"
@@ -1296,15 +1294,17 @@ def _normalize_seed(company: str, raw_url: str, linkedin: str) -> dict[str, str]
     raw_url = (raw_url or "").strip()
     linkedin = (linkedin or "").strip()
     website = raw_url
-    if "linkedin.com/" in website.lower():
-        linkedin = linkedin or website
-        website = ""
     if website and not website.startswith(("http://", "https://")):
         if "." in website and " " not in website:
-            website = "https://" + website  # bare domain -> assume https
+            website = "https://" + website  # bare domain/URL -> assume https
         else:
             company = company or website  # bare company name, not a URL
             website = ""
+    # A LinkedIn URL is a reference, never a crawl target (registrable-domain
+    # match, so a look-alike host is not misclassified).
+    if website and is_linkedin_url(website):
+        linkedin = linkedin or website
+        website = ""
     if linkedin and not company:
         company = _linkedin_company_name(linkedin)
     if not company and not website and not linkedin:
@@ -1940,6 +1940,13 @@ def run(args: argparse.Namespace) -> Path:
             f"provide --manual-seeds with user-supplied LinkedIn/company data."
         )
     queries = expand_queries(theme, args.location, args.max_queries)
+    if not theme.get("keywords") and set(theme.get("sectors") or []) <= {"company", "business"}:
+        print(
+            "[warn] this theme has placeholder sectors and no keywords; queries will be "
+            "broad and may return listicles/directories. Define sectors and keywords via "
+            "--custom-theme-file or the discovery interview for useful results.",
+            file=sys.stderr,
+        )
     sources: list[SearchSource] = []
     rejected: list[dict[str, Any]] = []
     raw_results: list[dict[str, Any]] = []
