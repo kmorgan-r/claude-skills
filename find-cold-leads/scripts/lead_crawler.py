@@ -22,6 +22,7 @@ from urllib.parse import quote, urljoin, urlparse
 import openpyxl
 import requests
 from bs4 import BeautifulSoup
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -39,6 +40,10 @@ CONTACT_HINTS = (
     "legal",
 )
 SECOND_HOP_PAGE_LIMIT = 5
+# Cap a single page fetch: bound the network read (bytes) so a hostile/huge body
+# cannot exhaust memory, then bound the decoded text (chars) we hand to parsers.
+MAX_FETCH_BYTES = 2_000_000
+MAX_FETCH_CHARS = 500_000
 def theme_target_personas(theme: dict[str, Any]) -> str:
     return theme.get("target_personas", "Decision Maker / Department Head / Buyer")
 
@@ -745,7 +750,107 @@ def is_blocked_url(url: str) -> bool:
     return any(domain == blocked or domain.endswith(f".{blocked}") for blocked in BLOCKED_DOMAINS)
 
 
-def leads_from_search_results(results: list[dict[str, Any]], query: str, theme_id: str, theme: dict[str, Any]) -> list[dict[str, Any]]:
+# ---------------------------------------------------------------------------
+# Region + compliance posture. Region is derived from the SEARCH location filter
+# (a free, search-time input), so every row — including never-enriched ones —
+# gets the right posture. See references/source-compliance.md.
+# ---------------------------------------------------------------------------
+EU_COUNTRIES = {
+    "germany", "france", "netherlands", "italy", "spain", "portugal", "belgium",
+    "austria", "poland", "sweden", "denmark", "finland", "ireland", "greece",
+    "czechia", "czech republic", "hungary", "romania", "bulgaria", "croatia",
+    "slovakia", "slovenia", "estonia", "latvia", "lithuania", "luxembourg",
+    "malta", "cyprus", "norway", "iceland", "liechtenstein",  # EEA
+}
+UK_NAMES = {"united kingdom", "uk", "great britain", "england", "scotland", "wales"}
+US_NAMES = {"united states", "usa", "us", "u.s.", "united states of america", "america"}
+STRICT_EU = {"germany"}  # UWG-strict (consent-leaning even B2B)
+
+# ISO 3166-1 alpha-2 codes and common endonyms -> the canonical English name. A
+# user (or downstream location field) may pass "DE", "Deutschland", or "Munich
+# Germany" rather than "Germany"; without these, those fall through to
+# region=unknown/strict=False, i.e. Germany silently loses its UWG-strict
+# posture. The failure direction (permissive) is the wrong one for a compliance
+# guard, so normalise aggressively.
+COUNTRY_ALIASES = {
+    "de": "germany", "fr": "france", "nl": "netherlands", "it": "italy",
+    "es": "spain", "pt": "portugal", "be": "belgium", "at": "austria",
+    "pl": "poland", "se": "sweden", "dk": "denmark", "fi": "finland",
+    "ie": "ireland", "gr": "greece", "cz": "czechia", "hu": "hungary",
+    "ro": "romania", "bg": "bulgaria", "hr": "croatia", "sk": "slovakia",
+    "si": "slovenia", "ee": "estonia", "lv": "latvia", "lt": "lithuania",
+    "lu": "luxembourg", "mt": "malta", "cy": "cyprus", "no": "norway",
+    "is": "iceland", "li": "liechtenstein",
+    "gb": "united kingdom", "uk": "united kingdom",
+    "us": "united states", "usa": "united states",
+    "deutschland": "germany", "allemagne": "germany", "alemania": "germany",
+    "frankreich": "france", "österreich": "austria", "oesterreich": "austria",
+    "españa": "spain", "espana": "spain", "italia": "italy",
+    "nederland": "netherlands", "sverige": "sweden", "danmark": "denmark",
+    "suomi": "finland", "polska": "poland",
+}
+
+
+def _classify_country(name: str) -> dict[str, Any] | None:
+    """Return a region descriptor for a single canonical country token, or None."""
+    n = COUNTRY_ALIASES.get(name, name)
+    if n in US_NAMES:
+        return {"region": "US", "country": "United States", "strict": False}
+    if n in UK_NAMES:
+        return {"region": "UK", "country": "United Kingdom", "strict": False}
+    if n in EU_COUNTRIES:
+        return {"region": "EU", "country": n.title(), "strict": n in STRICT_EU}
+    return None
+
+
+def region_for_location(location: str | None) -> dict[str, Any]:
+    """Map a location filter string to a compliance region descriptor."""
+    loc = (location or "").strip().lower()
+    if not loc or loc in {"european union", "eu", "eea", "europe"}:
+        # An EU-wide or empty filter => conservative EU posture, no single country.
+        return {"region": "EU", "country": "", "strict": False}
+    # Check each delimited segment whole first (so multi-word names like
+    # "united kingdom"/"czech republic" survive), then each word inside it (so
+    # "Munich Germany" and a bare "DE" both resolve).
+    for segment in re.split(r"[,/;]| and | or ", loc):
+        seg = segment.strip()
+        if not seg:
+            continue
+        hit = _classify_country(seg)
+        if hit:
+            return hit
+        for word in seg.split():
+            hit = _classify_country(word)
+            if hit:
+                return hit
+    return {"region": "unknown", "country": "", "strict": False}
+
+
+def compliance_fields(region: dict[str, Any]) -> dict[str, str]:
+    """Region-aware compliance posture. Unknown defaults to conservative EU."""
+    if region.get("region") == "US":
+        return {
+            "consent_status": "n/a (opt-out)",
+            "outreach_allowed_review": "ok with working unsubscribe + sender ID (CAN-SPAM)",
+            "legitimate_interest_basis": "",
+        }
+    # EU / UK / unknown -> conservative.
+    basis = (
+        "B2B sustainability-software relevance to the contact's role; "
+        "Art.14 source notice + opt-out required."
+    )
+    if region.get("strict"):
+        basis = "STRICT (UWG §7 — express consent generally required even B2B). " + basis
+    return {
+        "consent_status": "unknown",
+        "outreach_allowed_review": "needs review",
+        "legitimate_interest_basis": basis,
+    }
+
+
+def leads_from_search_results(results: list[dict[str, Any]], query: str, theme_id: str, theme: dict[str, Any], region: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    region = region or {"region": "unknown", "country": "", "strict": False}
+    posture = compliance_fields(region)
     seen: set[str] = set()
     leads: list[dict[str, Any]] = []
     for item in results:
@@ -756,18 +861,19 @@ def leads_from_search_results(results: list[dict[str, Any]], query: str, theme_i
         company_key = registrable_domain(url)
         if not domain or company_key in seen:
             continue
-        seen.add(company_key)
         title = item.get("title") or domain
         snippet = item.get("snippet") or ""
         company_name = clean_company_name(title, domain)
         if looks_like_bad_company_name(company_name):
             continue
+        seen.add(company_key)
         leads.append(
             {
                 "company_name": company_name,
                 "domain": domain,
                 "website": f"{urlparse(url).scheme or 'https'}://{urlparse(url).netloc}",
-                "country": "",
+                "country": region.get("country", ""),
+                "region": region.get("region", "unknown"),
                 "sector": "",
                 "theme": theme_id,
                 "matched_signal": snippet[:500],
@@ -791,8 +897,9 @@ def leads_from_search_results(results: list[dict[str, Any]], query: str, theme_i
                 "source_url": url,
                 "evidence_snippet": snippet,
                 "business_relevance_basis": query,
-                "consent_status": "unknown",
-                "outreach_allowed_review": "needs review",
+                "consent_status": posture["consent_status"],
+                "outreach_allowed_review": posture["outreach_allowed_review"],
+                "legitimate_interest_basis": posture["legitimate_interest_basis"],
                 "delete_if_not_used_by": "",
                 "notes": "",
                 "odoo_ready": "no",
@@ -909,10 +1016,29 @@ def enrich_contacts_via_search(
     return sources
 
 
+def contact_provenance_ok(contact_source_url: str, company_website: str) -> bool:
+    """A contact's evidence must come from the company's OWN registrable domain
+    and never a blocklisted vendor. Open-web search can surface a person on a
+    data-vendor page (theorg.com, datanyze, ...) that is not in BLOCKED_DOMAINS;
+    pairing that snippet with the lead would attribute an unverified third-party
+    address to the company (the ZoomInfo-snippet failure). Enforced per
+    references/source-compliance.md ("never a data-vendor snippet")."""
+    if not contact_source_url or not company_website:
+        return False
+    if is_blocked_url(contact_source_url):
+        return False
+    return registrable_domain(contact_source_url) == registrable_domain(company_website)
+
+
 def apply_contact_search_results(lead: dict[str, Any], results: list[dict[str, Any]], query: str, theme: dict[str, Any]) -> None:
     for item in results:
         url = item.get("link") or item.get("url") or ""
-        if not url or is_blocked_url(url):
+        if not url or is_blocked_url(url) or _is_private_ip_url(url):
+            continue
+        # Only accept contact evidence from the company's own domain. A search
+        # hit on any other site (vendor directory, conference page, news) is not
+        # acceptable provenance for a named contact.
+        if not contact_provenance_ok(url, lead.get("website", "")):
             continue
         title = item.get("title") or ""
         snippet = item.get("snippet") or item.get("content") or item.get("text") or ""
@@ -1163,13 +1289,15 @@ def enrich_public_pages(leads: list[dict[str, Any]], theme: dict[str, Any], prov
                 try:
                     linked_page = extract_page(url, provider_id, api_key)
                 except Exception as exc:  # noqa: BLE001 - keep other pages available
-                    lead["notes"] = append_note(lead.get("notes", ""), f"Linked page crawl failed ({url}): {exc}")
+                    safe_exc = _redact_key(str(exc), api_key or "")
+                    lead["notes"] = append_note(lead.get("notes", ""), f"Linked page crawl failed ({url}): {safe_exc}")
                     continue
                 apply_page_enrichment(lead, linked_page, theme)
                 if lead.get("contact_data_type") == "person" and lead.get("contact_email"):
                     break
         except Exception as exc:  # noqa: BLE001 - enrichment should not stop export
-            lead["notes"] = append_note(lead.get("notes", ""), f"Page crawl failed: {exc}")
+            safe_exc = _redact_key(str(exc), api_key or "")
+            lead["notes"] = append_note(lead.get("notes", ""), f"Page crawl failed: {safe_exc}")
 
 
 def _redact_key(text: str, key: str) -> str:
@@ -1241,7 +1369,7 @@ def jina_extract(url: str, api_key: str | None) -> dict[str, Any]:
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     response = requests.get(f"https://r.jina.ai/{encoded}", headers=headers, timeout=30)
     response.raise_for_status()
-    text = response.text
+    text = response.text[:MAX_FETCH_CHARS]
     return {"url": url, "text": text, "emails": public_emails(text)}
 
 
@@ -1258,8 +1386,8 @@ def firecrawl_extract(url: str, api_key: str) -> dict[str, Any]:
     response.raise_for_status()
     payload = response.json()
     data = payload.get("data") or payload
-    text = data.get("markdown") or data.get("content") or ""
-    html = data.get("html") or ""
+    text = (data.get("markdown") or data.get("content") or "")[:MAX_FETCH_CHARS]
+    html = (data.get("html") or "")[:MAX_FETCH_CHARS]
     return {"url": url, "text": text, "html": html, "emails": public_emails(" ".join([text, html]))}
 
 
@@ -1276,7 +1404,7 @@ def tavily_extract(url: str, api_key: str) -> dict[str, Any]:
     response.raise_for_status()
     payload = response.json()
     item = (payload.get("results") or [{}])[0]
-    text = item.get("raw_content") or item.get("content") or ""
+    text = (item.get("raw_content") or item.get("content") or "")[:MAX_FETCH_CHARS]
     return {"url": url, "text": text, "emails": public_emails(text)}
 
 
@@ -1293,7 +1421,7 @@ def exa_extract(url: str, api_key: str) -> dict[str, Any]:
     response.raise_for_status()
     payload = response.json()
     item = (payload.get("results") or [{}])[0]
-    text = item.get("text") or ""
+    text = (item.get("text") or "")[:MAX_FETCH_CHARS]
     return {"url": url, "text": text, "emails": public_emails(text)}
 
 
@@ -1308,23 +1436,40 @@ def fetch_text(url: str) -> str:
         parsed = urlparse(current_url)
         if parsed.scheme not in ("http", "https"):
             return ""
-        if _is_private_ip_url(current_url):
+        # Blocklisted domains (LinkedIn, data vendors, ...) are filtered when a
+        # URL first enters the pipeline, but a redirect can point at one; re-check
+        # every hop so a lead site cannot bounce us onto a no-scrape domain.
+        if is_blocked_url(current_url) or _is_private_ip_url(current_url):
             return ""
         # Re-check after DNS resolution: hostname-string matching cannot catch
         # a public-looking domain that resolves to a private/metadata IP.
         if _resolves_to_private_ip(parsed.hostname or ""):
             return ""
-        response = requests.get(
+        with requests.get(
             current_url,
             timeout=15,
             allow_redirects=False,
+            stream=True,
             headers={"User-Agent": "B2B lead research bot; contact via website"},
-        )
-        response.raise_for_status()
-        if not response.is_redirect:
-            return response.text[:500_000]
-        location = response.headers.get("Location", "")
-        current_url = urljoin(current_url, location)
+        ) as response:
+            response.raise_for_status()
+            if response.is_redirect:
+                location = response.headers.get("Location", "")
+                current_url = urljoin(current_url, location)
+                continue
+            # stream=True + a capped read so a hostile or misconfigured server
+            # cannot exhaust memory: requests would otherwise buffer the whole
+            # body before we slice it. Decode with the response encoding,
+            # falling back to apparent (sniffed) encoding for charset-less pages.
+            raw = response.raw.read(MAX_FETCH_BYTES + 1, decode_content=True)
+            encoding = response.encoding
+            if not encoding or encoding.lower() == "iso-8859-1":
+                # requests defaults text/* without a charset to ISO-8859-1
+                # (RFC 2616); that mangles UTF-8 pages (Müller -> MÃ¼ller),
+                # which then breaks name extraction. Prefer the sniffed charset.
+                encoding = response.apparent_encoding or encoding or "utf-8"
+            text = raw.decode(encoding, errors="replace")
+            return text[:MAX_FETCH_CHARS]
     return ""  # too many redirects
 
 
@@ -1548,6 +1693,7 @@ def export_workbook(
         "domain",
         "website",
         "country",
+        "region",
         "sector",
         "theme",
         "matched_signal",
@@ -1573,6 +1719,7 @@ def export_workbook(
         "business_relevance_basis",
         "consent_status",
         "outreach_allowed_review",
+        "legitimate_interest_basis",
         "delete_if_not_used_by",
         "notes",
         "odoo_ready",
@@ -1603,10 +1750,14 @@ def write_table(sheet: openpyxl.worksheet.worksheet.Worksheet, headers: list[str
     for row in rows:
         sanitized: list[Any] = []
         for v in row:
-            if isinstance(v, str) and v.startswith(_FORMULA_CHARS):
-                sanitized.append("'" + v)
-            else:
-                sanitized.append(v)
+            if isinstance(v, str):
+                # Strip XML-illegal control chars (e.g. \x0c from PDF-derived
+                # text); openpyxl raises IllegalCharacterError on them, which
+                # would destroy the whole workbook at save time.
+                v = ILLEGAL_CHARACTERS_RE.sub("", v)
+                if v.startswith(_FORMULA_CHARS):
+                    v = "'" + v
+            sanitized.append(v)
         sheet.append(sanitized)
     header_fill = PatternFill("solid", fgColor="1F4E5F")
     for cell in sheet[1]:
@@ -1698,7 +1849,8 @@ def run(args: argparse.Namespace) -> Path:
         if url and is_blocked_url(url):
             rejected.append({"url": url, "reason": "blocked source; use as manual reference only"})
 
-    leads = leads_from_search_results(raw_results, " | ".join(queries), theme_id, theme)
+    region = region_for_location(args.location)
+    leads = leads_from_search_results(raw_results, " | ".join(queries), theme_id, theme, region)
     merge_linkedin_references(leads, manual_results)
     leads = leads[: args.max_results]
 
@@ -1728,6 +1880,7 @@ def run(args: argparse.Namespace) -> Path:
         "theme_id": theme_id,
         "theme_label": theme.get("label", theme_id),
         "location": args.location,
+        "region": region.get("region", "unknown"),
         "search_provider": effective_search_provider,
         "extract_provider": extract_provider_id,
         "effective_extract_provider": effective_extract_provider_id,

@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import openpyxl
 
@@ -631,18 +631,26 @@ class LeadCrawlerTests(unittest.TestCase):
     def _getaddrinfo_result(ip: str) -> list[tuple]:
         return [(2, 1, 6, "", (ip, 0))]
 
+    @staticmethod
+    def _fetch_response(body: str = "", *, is_redirect: bool = False, location: str = "", encoding: str = "utf-8"):
+        # fetch_text uses `with requests.get(...) as response` and reads
+        # response.raw, so the mock must be a context manager exposing raw.read.
+        resp = MagicMock()
+        resp.is_redirect = is_redirect
+        resp.raise_for_status.return_value = None
+        resp.headers = {"Location": location} if location else {}
+        resp.encoding = encoding
+        resp.apparent_encoding = encoding
+        resp.raw.read.return_value = body.encode(encoding)
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = False
+        return resp
+
     def test_fetch_text_follows_safe_redirect(self):
         with patch.object(lead_crawler, "requests") as mock_requests, \
              patch.object(lead_crawler.socket, "getaddrinfo", return_value=self._getaddrinfo_result("93.184.216.34")):
-            redirect_resp = Mock()
-            redirect_resp.is_redirect = True
-            redirect_resp.raise_for_status = lambda: None
-            redirect_resp.headers = {"Location": "https://example.com/"}
-
-            ok_resp = Mock()
-            ok_resp.is_redirect = False
-            ok_resp.raise_for_status = lambda: None
-            ok_resp.text = "redirected content"
+            redirect_resp = self._fetch_response(is_redirect=True, location="https://example.com/")
+            ok_resp = self._fetch_response("redirected content")
 
             mock_requests.get.side_effect = [redirect_resp, ok_resp]
             result = lead_crawler.fetch_text("http://example.com")
@@ -652,15 +660,42 @@ class LeadCrawlerTests(unittest.TestCase):
     def test_fetch_text_blocks_redirect_to_private_ip(self):
         with patch.object(lead_crawler, "requests") as mock_requests, \
              patch.object(lead_crawler.socket, "getaddrinfo", return_value=self._getaddrinfo_result("93.184.216.34")):
-            redirect_resp = Mock()
-            redirect_resp.is_redirect = True
-            redirect_resp.raise_for_status = lambda: None
-            redirect_resp.headers = {"Location": "http://192.168.1.1/secret"}
+            redirect_resp = self._fetch_response(is_redirect=True, location="http://192.168.1.1/secret")
 
             mock_requests.get.return_value = redirect_resp
             result = lead_crawler.fetch_text("http://example.com")
             self.assertEqual(result, "")
             mock_requests.get.assert_called_once()
+
+    def test_fetch_text_blocks_redirect_to_blocked_domain(self):
+        # A lead site that 301s to a no-scrape domain (LinkedIn) must not be
+        # followed, even though linkedin.com is a public host.
+        with patch.object(lead_crawler, "requests") as mock_requests, \
+             patch.object(lead_crawler.socket, "getaddrinfo", return_value=self._getaddrinfo_result("93.184.216.34")):
+            redirect_resp = self._fetch_response(is_redirect=True, location="https://www.linkedin.com/company/acme")
+            mock_requests.get.return_value = redirect_resp
+            result = lead_crawler.fetch_text("https://acme.com")
+            self.assertEqual(result, "")
+            mock_requests.get.assert_called_once()
+
+    def test_fetch_text_decodes_charsetless_utf8_pages(self):
+        # text/html without a charset: requests defaults encoding to
+        # ISO-8859-1, which would mojibake UTF-8 names. fetch_text must fall
+        # back to the sniffed encoding instead.
+        with patch.object(lead_crawler, "requests") as mock_requests, \
+             patch.object(lead_crawler.socket, "getaddrinfo", return_value=self._getaddrinfo_result("93.184.216.34")):
+            resp = MagicMock()
+            resp.is_redirect = False
+            resp.raise_for_status.return_value = None
+            resp.headers = {}
+            resp.encoding = "ISO-8859-1"
+            resp.apparent_encoding = "utf-8"
+            resp.raw.read.return_value = "Jürgen Müller".encode("utf-8")
+            resp.__enter__.return_value = resp
+            resp.__exit__.return_value = False
+            mock_requests.get.return_value = resp
+            result = lead_crawler.fetch_text("https://example.com/team")
+            self.assertEqual(result, "Jürgen Müller")
 
     def test_fetch_text_refuses_hostname_resolving_to_private_ip(self):
         # DNS rebinding: hostname looks public but resolves to an internal or
@@ -680,10 +715,7 @@ class LeadCrawlerTests(unittest.TestCase):
 
         with patch.object(lead_crawler, "requests") as mock_requests, \
              patch.object(lead_crawler.socket, "getaddrinfo", side_effect=fake_getaddrinfo):
-            redirect_resp = Mock()
-            redirect_resp.is_redirect = True
-            redirect_resp.raise_for_status = lambda: None
-            redirect_resp.headers = {"Location": "https://rebind.example.net/meta"}
+            redirect_resp = self._fetch_response(is_redirect=True, location="https://rebind.example.net/meta")
 
             mock_requests.get.return_value = redirect_resp
             result = lead_crawler.fetch_text("http://example.com")
@@ -695,10 +727,7 @@ class LeadCrawlerTests(unittest.TestCase):
         # same way for a truly unresolvable host, so nothing can leak.
         with patch.object(lead_crawler, "requests") as mock_requests, \
              patch.object(lead_crawler.socket, "getaddrinfo", side_effect=lead_crawler.socket.gaierror("no such host")):
-            ok_resp = Mock()
-            ok_resp.is_redirect = False
-            ok_resp.raise_for_status = lambda: None
-            ok_resp.text = "content"
+            ok_resp = self._fetch_response("content")
 
             mock_requests.get.return_value = ok_resp
             result = lead_crawler.fetch_text("https://example.com/")
@@ -842,6 +871,96 @@ class LeadCrawlerTests(unittest.TestCase):
 
         self.assertNotIn(secret_key, str(ctx.exception))
         self.assertIn("***", str(ctx.exception))
+
+    def test_region_for_location_classifies_countries(self):
+        self.assertEqual(lead_crawler.region_for_location("United States")["region"], "US")
+        self.assertEqual(lead_crawler.region_for_location("us")["region"], "US")
+        germany = lead_crawler.region_for_location("Munich, Germany")
+        self.assertEqual(germany["region"], "EU")
+        self.assertTrue(germany["strict"])  # UWG strict
+        self.assertEqual(lead_crawler.region_for_location("DE")["country"], "Germany")
+        self.assertEqual(lead_crawler.region_for_location("France")["region"], "EU")
+        self.assertFalse(lead_crawler.region_for_location("France")["strict"])
+        self.assertEqual(lead_crawler.region_for_location("")["region"], "EU")
+        self.assertEqual(lead_crawler.region_for_location("Brazil")["region"], "unknown")
+
+    def test_compliance_fields_posture_by_region(self):
+        us = lead_crawler.compliance_fields({"region": "US"})
+        self.assertEqual(us["consent_status"], "n/a (opt-out)")
+        self.assertIn("CAN-SPAM", us["outreach_allowed_review"])
+
+        de = lead_crawler.compliance_fields({"region": "EU", "strict": True})
+        self.assertEqual(de["consent_status"], "unknown")
+        self.assertEqual(de["outreach_allowed_review"], "needs review")
+        self.assertIn("UWG", de["legitimate_interest_basis"])
+
+        unknown = lead_crawler.compliance_fields({"region": "unknown"})
+        self.assertEqual(unknown["outreach_allowed_review"], "needs review")
+        self.assertNotIn("UWG", unknown["legitimate_interest_basis"])
+
+    def test_leads_carry_region_aware_compliance_posture(self):
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+        results = [{"title": "Acme Inc", "link": "https://acme.com", "snippet": "Manufacturer"}]
+        leads = lead_crawler.leads_from_search_results(
+            results, "q", "dpp-rollout-sectors", theme, lead_crawler.region_for_location("United States")
+        )
+        self.assertEqual(leads[0]["region"], "US")
+        self.assertEqual(leads[0]["consent_status"], "n/a (opt-out)")
+        self.assertEqual(leads[0]["country"], "United States")
+
+    def test_contact_provenance_ok_requires_company_domain(self):
+        self.assertTrue(
+            lead_crawler.contact_provenance_ok("https://acme.com/team", "https://acme.com")
+        )
+        self.assertTrue(
+            lead_crawler.contact_provenance_ok("https://www.acme.com/about/jane", "https://acme.com")
+        )
+        # Data-vendor / third-party page: not acceptable provenance.
+        self.assertFalse(
+            lead_crawler.contact_provenance_ok("https://theorg.com/org/acme/jane", "https://acme.com")
+        )
+        self.assertFalse(lead_crawler.contact_provenance_ok("", "https://acme.com"))
+
+    def test_apply_contact_search_results_rejects_offdomain_evidence(self):
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+        lead = {"company_name": "Acme", "domain": "acme.com", "website": "https://acme.com"}
+        results = [
+            {
+                "title": "Jane Miller, Head of Sustainability",
+                "link": "https://datanyze.com/companies/acme/jane-miller",
+                "snippet": "Jane Miller, Head of Sustainability at Acme",
+            }
+        ]
+        lead_crawler.apply_contact_search_results(lead, results, "q", theme)
+        # Off-domain vendor snippet must not promote the lead to a named person.
+        self.assertNotEqual(lead.get("contact_data_type"), "person")
+        self.assertEqual(lead.get("contact_name", ""), "")
+
+    def test_write_table_strips_xml_illegal_characters(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out = Path(temp_dir) / "out.xlsx"
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            # \x0c (form feed) is XML-illegal; openpyxl raises on save without scrubbing.
+            lead_crawler.write_table(sheet, ["col"], [["clean\x0ctext"]])
+            workbook.save(out)
+            reopened = openpyxl.load_workbook(out)
+            self.assertEqual(reopened.active["A2"].value, "cleantext")
+
+    def test_enrich_public_pages_redacts_key_in_error_notes(self):
+        secret_key = "sk_extract_secret_98765"
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+        leads = [{"company_name": "Acme", "domain": "acme.com", "website": "https://acme.com"}]
+
+        def boom(url, provider_id, api_key):
+            raise RuntimeError(f"auth failed for header Bearer {secret_key}")
+
+        with patch.object(lead_crawler, "extract_page", side_effect=boom):
+            lead_crawler.enrich_public_pages(leads, theme, "firecrawl", secret_key)
+
+        notes = leads[0].get("notes", "")
+        self.assertNotIn(secret_key, notes)
+        self.assertIn("***", notes)
 
 
 if __name__ == "__main__":
