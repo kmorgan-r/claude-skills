@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -264,6 +266,62 @@ class LeadCrawlerTests(unittest.TestCase):
         people = lead_crawler.extract_contact_people(html, "https://directory.example/person", {})
 
         self.assertEqual(people, [])
+
+    def test_best_email_for_name_matches_full_name_local_part(self):
+        emails = ["info@acme.com", "jane.miller@acme.com"]
+
+        self.assertEqual(
+            lead_crawler.best_email_for_name("Jane Miller", emails),
+            "jane.miller@acme.com",
+        )
+
+    def test_best_email_for_name_matches_any_name_part(self):
+        emails = ["info@acme.com", "miller@acme.com"]
+
+        self.assertEqual(
+            lead_crawler.best_email_for_name("Jane Miller", emails),
+            "miller@acme.com",
+        )
+
+    def test_best_email_for_name_returns_empty_when_no_match(self):
+        # emails[0] here belongs to someone else; attributing it to an
+        # unmatched person would send outreach to the wrong inbox.
+        emails = ["bob.schmidt@acme.com", "office@acme.com"]
+
+        self.assertEqual(lead_crawler.best_email_for_name("Jane Miller", emails), "")
+
+    def test_best_email_for_name_handles_degenerate_names(self):
+        emails = ["info@acme.com"]
+
+        self.assertEqual(lead_crawler.best_email_for_name("", emails), "")
+        self.assertEqual(lead_crawler.best_email_for_name("J X", emails), "")
+
+    def test_extract_contact_people_does_not_misattribute_emails_on_team_page(self):
+        html = """
+        <section>
+          <p>Jane Miller, Head of Sustainability</p>
+          <p>Bob Schmidt, Sustainability Manager</p>
+          <a href="mailto:bob.schmidt@acme.com">bob.schmidt@acme.com</a>
+        </section>
+        """
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+
+        people = lead_crawler.extract_contact_people(html, "https://acme.com/team", theme)
+
+        by_name = {person["contact_name"]: person["contact_email"] for person in people}
+        self.assertEqual(by_name["Bob Schmidt"], "bob.schmidt@acme.com")
+        self.assertEqual(by_name["Jane Miller"], "")
+
+    def test_list_providers_warns_about_codex_builtin_in_cloud(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            lead_crawler.list_providers()
+
+        output = stdout.getvalue()
+        self.assertIn("codex_builtin", output)
+        self.assertIn("WARNING:", output)
+        self.assertIn("cloud", output)
+        self.assertIn("DNS rebinding", output)
 
     def test_enrich_public_pages_follows_team_page_for_named_contacts(self):
         theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]

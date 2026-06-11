@@ -259,6 +259,17 @@ def provider_catalog() -> dict[str, dict[str, dict[str, Any]]]:
                 "label": "Built-in requests + BeautifulSoup extraction",
                 "env": None,
                 "requires_key": False,
+                # Direct fetches run from this machine. The private-IP guard
+                # re-resolves DNS, so a zero-TTL rebinding domain can still
+                # race it (see _resolves_to_private_ip); surfaced to users via
+                # list_providers and SKILL.md.
+                "caveat": (
+                    "fetches pages directly from this machine; do not use on "
+                    "cloud VMs (AWS/GCP/Azure) or hosts on sensitive internal "
+                    "networks - a malicious site can use DNS rebinding to "
+                    "reach metadata/internal services. Use jina/firecrawl/"
+                    "tavily/exa there instead."
+                ),
             },
             "jina": {
                 "label": "Jina Reader",
@@ -1433,6 +1444,8 @@ def best_email_for_name(name: str, emails: list[str]) -> str:
     if not emails:
         return ""
     parts = [part.lower() for part in re.split(r"\s+", name) if len(part) > 1]
+    if not parts:
+        return ""
     for email in emails:
         local = email.split("@", 1)[0].lower()
         if all(part in local for part in (parts[0], parts[-1])):
@@ -1441,7 +1454,10 @@ def best_email_for_name(name: str, emails: list[str]) -> str:
         local = email.split("@", 1)[0].lower()
         if any(part in local for part in parts):
             return email
-    return emails[0]
+    # No name-based match: return nothing rather than guessing. On a team page
+    # with several people, emails[0] would attribute someone else's address to
+    # this person; callers fall back to the lead's company-level email instead.
+    return ""
 
 
 def contact_confidence(title: str, has_email: bool, theme: dict[str, Any]) -> int:
@@ -1616,6 +1632,8 @@ def list_providers() -> None:
         for provider_id, provider in catalog[category].items():
             env_name = provider.get("env") or "no key"
             print(f"  {provider_id}: {provider['label']} ({env_name})")
+            if provider.get("caveat"):
+                print(f"    WARNING: {provider['caveat']}")
 
 
 def run(args: argparse.Namespace) -> Path:

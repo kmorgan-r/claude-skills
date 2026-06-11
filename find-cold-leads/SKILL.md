@@ -19,6 +19,8 @@ Find cold leads from public web search signals and export them to Excel for revi
    - custom
 3. Ask which search provider to use. Recommend `serper` if the user is unsure.
 4. Ask which extraction provider to use. Recommend `codex_builtin` for no-key local extraction or `jina` / `firecrawl` when the user wants an API extractor.
+
+   > **Warning — do not use `codex_builtin` in cloud environments.** `codex_builtin` fetches lead websites directly from the machine running the script. Its private-IP guard re-resolves DNS, so a malicious domain using zero-TTL DNS rebinding can race the check and reach internal services — on AWS/GCP/Azure that includes the instance-metadata endpoint (IAM credentials). On cloud VMs or hosts attached to sensitive internal networks, use `jina`, `firecrawl`, `tavily`, or `exa` instead: they fetch pages from the provider's infrastructure, so no request originates from your machine.
 5. Ask for the required API key only if the chosen provider needs one and no matching environment variable is already set. Do not save API keys into files.
 6. Ask for geography, max leads, and output filename if not provided.
 7. Confirm whether to run `--contact-search` for targeted named-contact discovery after account discovery.
