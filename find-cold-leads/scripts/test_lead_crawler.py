@@ -923,6 +923,76 @@ class LeadCrawlerTests(unittest.TestCase):
         self.assertNotIn(secret_key, str(ctx.exception))
         self.assertIn("***", str(ctx.exception))
 
+    def test_extract_contact_people_handles_diacritics_and_dashes(self):
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+        html = """
+        <p>Jürgen Müller, Head of Sustainability</p>
+        <p>Anna Larsen – Sustainability Manager</p>
+        """
+        people = lead_crawler.extract_contact_people(html, "https://acme.de/team", theme)
+        names = {p["contact_name"] for p in people}
+        self.assertIn("Jürgen Müller", names)
+        self.assertIn("Anna Larsen", names)
+
+    def test_clean_company_name_splits_en_dash(self):
+        self.assertEqual(
+            lead_crawler.clean_company_name("Möbelwerk Huber GmbH – Nachhaltige Möbel", "huber.de"),
+            "Möbelwerk Huber GmbH",
+        )
+
+    def test_leads_from_search_results_reads_content_key(self):
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+        # Tavily/Exa-shaped item: text under 'content', url under 'url'.
+        results = [{"title": "Acme", "url": "https://acme.com", "content": "ISO 14067 product carbon footprint"}]
+        leads = lead_crawler.leads_from_search_results(results, "q", "dpp-rollout-sectors", theme)
+        self.assertEqual(leads[0]["evidence_snippet"], "ISO 14067 product carbon footprint")
+        self.assertGreater(leads[0]["lead_score"], 30)
+
+    def test_per_lead_query_attribution(self):
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+        results = [
+            {"title": "Acme", "link": "https://acme.com", "snippet": "m", "_query": "query-A"},
+            {"title": "Bravo", "link": "https://bravo.com", "snippet": "m", "_query": "query-B"},
+        ]
+        leads = lead_crawler.leads_from_search_results(results, "joined | queries", "dpp-rollout-sectors", theme)
+        basis = {lead["company_name"]: lead["business_relevance_basis"] for lead in leads}
+        self.assertEqual(basis["Acme"], "query-A")
+        self.assertEqual(basis["Bravo"], "query-B")
+
+    def test_apply_page_enrichment_sets_provenance_fields(self):
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+        lead = lead_crawler.new_lead(company_name="Acme", domain="acme.de", website="https://acme.de")
+        page = {
+            "url": "https://acme.de/team",
+            "html": '<p>Jane Miller, Head of Sustainability</p><a href="mailto:jane.miller@acme.de">x</a>',
+            "text": "Jane Miller, Head of Sustainability",
+        }
+        lead_crawler.apply_page_enrichment(lead, page, theme)
+        self.assertEqual(lead["contact_data_type"], "person")
+        self.assertEqual(lead["person_source_type"], "company_page")
+        self.assertEqual(lead["email_discovery_method"], "public_page")
+        self.assertEqual(lead["email_verification_status"], "unverified")
+
+    def test_candidate_contact_links_follows_markdown_links(self):
+        markdown = "Welcome. [Our Team](/team) and [Contact us](/contact)."
+        links = lead_crawler.candidate_contact_links(markdown, "https://acme.de")
+        self.assertIn("https://acme.de/team", links)
+        self.assertIn("https://acme.de/contact", links)
+
+    def test_merge_linkedin_references_matches_cleaned_name(self):
+        theme = lead_crawler.prebuilt_themes()["dpp-rollout-sectors"]
+        records = [
+            {"company": "Acme GmbH - Official Site", "website": "https://acme.de",
+             "linkedin": "https://www.linkedin.com/company/acme"}
+        ]
+        leads = lead_crawler.leads_from_search_results(
+            [{"title": "Acme GmbH - Official Site", "link": "https://acme.de", "snippet": "m"}],
+            "q", "dpp-rollout-sectors", theme,
+        )
+        self.assertEqual(leads[0]["company_name"], "Acme GmbH")
+        lead_crawler.merge_linkedin_references(leads, records)
+        self.assertIn("linkedin.com/company/acme", leads[0]["linkedin_reference_url"])
+
     def test_region_for_location_classifies_countries(self):
         self.assertEqual(lead_crawler.region_for_location("United States")["region"], "US")
         self.assertEqual(lead_crawler.region_for_location("us")["region"], "US")

@@ -200,6 +200,19 @@ _ENTITY_SUFFIX = re.compile(
     re.IGNORECASE,
 )
 EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![\w+-])")
+
+# "Name, Title" / "Name | Title" / "Name - Title" / "Name – Title" lines. A name
+# token is a Unicode letter followed by letters or .'- so diacritic names
+# (Jürgen Müller, Sørensen) match, not just ASCII. The separator allows comma,
+# pipe, hyphen, en dash (U+2013), and em dash (U+2014); the capitalization
+# requirement is enforced afterward by looks_like_person_name.
+_PERSON_TOKEN = r"[^\W\d_](?:[^\W\d_]|['’.\-])+"
+PERSON_LINE_RE = re.compile(
+    rf"\b({_PERSON_TOKEN}(?:\s+{_PERSON_TOKEN}){{1,3}})\s*[,|–—\-]\s*([^|\n,]{{3,90}})"
+)
+# Markdown link syntax [label](href) so candidate_contact_links can follow
+# links in markdown/plain-text pages from jina/tavily/exa extract providers.
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((\S+?)\)")
 PLACEHOLDER_EMAILS = {
     "email@newsletter.com",
     "you@company.com",
@@ -890,7 +903,9 @@ def leads_from_search_results(results: list[dict[str, Any]], query: str, theme_i
         if not domain or company_key in seen:
             continue
         title = item.get("title") or domain
-        snippet = item.get("snippet") or ""
+        # Providers/fixtures vary: Tavily/Exa-shaped payloads carry the text
+        # under content/text rather than snippet.
+        snippet = item.get("snippet") or item.get("content") or item.get("text") or ""
         company_name = clean_company_name(title, domain)
         if looks_like_bad_company_name(company_name):
             continue
@@ -908,7 +923,10 @@ def leads_from_search_results(results: list[dict[str, Any]], query: str, theme_i
                 lead_score=score_lead(snippet, theme),
                 source_url=url,
                 evidence_snippet=snippet,
-                business_relevance_basis=query,
+                # Per-lead query attribution: run() tags each provider result
+                # with the query that surfaced it; fall back to the run-level
+                # query string for fixtures/seeds.
+                business_relevance_basis=item.get("_query") or query,
                 consent_status=posture["consent_status"],
                 outreach_allowed_review=posture["outreach_allowed_review"],
                 legitimate_interest_basis=posture["legitimate_interest_basis"],
@@ -918,7 +936,9 @@ def leads_from_search_results(results: list[dict[str, Any]], query: str, theme_i
 
 
 def clean_company_name(title: str, domain: str) -> str:
-    title = re.split(r"\s+[-|]\s+", title.strip())[0]
+    # Split on a spaced hyphen/pipe/en dash/em dash (the SERP "Name - tagline"
+    # pattern); en dash is the separator most EU/German titles use.
+    title = re.split(r"\s+[-|–—]\s+", title.strip())[0]
     title = re.sub(r"\s+", " ", title)
     return title or domain
 
@@ -932,7 +952,7 @@ def looks_like_bad_company_name(name: str) -> bool:
         return True
     if len(n) > 80:
         return True
-    if ":" in n or " | " in n or " — " in n or " - " in n:
+    if ":" in n or " | " in n or " — " in n or " – " in n or " - " in n:
         return True
     words = n.split()
     if len(words) > 8:
@@ -1055,13 +1075,19 @@ def apply_contact_search_results(lead: dict[str, Any], results: list[dict[str, A
         if not people:
             continue
         person = people[0]
-        if should_replace_person(lead, person):
-            lead["contact_name"] = person["contact_name"]
-            lead["contact_title"] = person["contact_title"]
-            lead["contact_email"] = person.get("contact_email") or lead.get("contact_email", "")
-            lead["contact_link"] = person.get("contact_link") or url
+        # A search snippet is weaker evidence than a rendered page, so penalize
+        # its confidence BEFORE deciding whether to replace an existing contact;
+        # otherwise a snippet could overwrite a page-verified person and then
+        # store a lower confidence than the one it displaced.
+        penalized = dict(person)
+        penalized["contact_confidence"] = max(0, int(person.get("contact_confidence") or 0) - 10)
+        if should_replace_person(lead, penalized):
+            lead["contact_name"] = penalized["contact_name"]
+            lead["contact_title"] = penalized["contact_title"]
+            lead["contact_email"] = penalized.get("contact_email") or lead.get("contact_email", "")
+            lead["contact_link"] = penalized.get("contact_link") or url
             lead["contact_source_url"] = url
-            lead["contact_confidence"] = max(0, int(person.get("contact_confidence") or 0) - 10)
+            lead["contact_confidence"] = penalized["contact_confidence"]
             lead["contact_data_type"] = "person"
             lead["person_source_type"] = classify_person_source(url)
             lead["public_profile_url"] = url
@@ -1359,6 +1385,7 @@ def seeds_as_search_items(records: list[dict[str, str]]) -> list[dict[str, Any]]
                 "link": record["website"],
                 "snippet": MANUAL_SEED_SNIPPET,
                 "linkedin_reference_url": record["linkedin"],
+                "_query": "manual seed (user-provided)",
             }
         )
     return items
@@ -1455,6 +1482,7 @@ def apply_page_enrichment(lead: dict[str, Any], page: dict[str, Any], theme: dic
     people = extract_contact_people(html, page_url, theme)
     if people and should_replace_person(lead, people[0]):
         person = people[0]
+        has_email = bool(person.get("contact_email"))
         lead["contact_name"] = person["contact_name"]
         lead["contact_title"] = person["contact_title"]
         lead["contact_email"] = person.get("contact_email") or lead.get("contact_email", "")
@@ -1462,6 +1490,12 @@ def apply_page_enrichment(lead: dict[str, Any], page: dict[str, Any], theme: dic
         lead["contact_source_url"] = person["contact_source_url"]
         lead["contact_confidence"] = person["contact_confidence"]
         lead["contact_data_type"] = "person"
+        # Provenance metadata, parallel to the contact-search path. A contact
+        # found on the company's own page is the strongest source.
+        lead["person_source_type"] = "company_page"
+        lead["email_discovery_method"] = "public_page" if has_email else "none"
+        lead["email_verification_status"] = "unverified" if has_email else ""
+        lead["email_confidence"] = 55 if has_email else ""
     if page.get("text") and not lead.get("evidence_snippet"):
         lead["evidence_snippet"] = page["text"][:500]
 
@@ -1636,10 +1670,7 @@ def extract_contact_people(html: str, source_url: str, theme: dict[str, Any]) ->
             continue
         if not any(term in line.lower() for term in buyer_terms):
             continue
-        match = re.search(
-            r"\b([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})\s*[,|-]\s*([^|\n,]{3,90})",
-            line,
-        )
+        match = PERSON_LINE_RE.search(line)
         if not match:
             continue
         name = match.group(1).strip()
@@ -1760,8 +1791,14 @@ def candidate_contact_links(html: str, base_url: str, limit: int = SECOND_HOP_PA
     base_domain = normalized_domain(base_url)
     candidates: list[tuple[int, str]] = []
     seen: set[str] = set()
-    for anchor in soup.find_all("a", href=True):
-        href = anchor["href"]
+    # Gather (link text, href) from HTML anchors AND markdown links, so the
+    # second-hop crawl also works for providers that return markdown/plain text
+    # (jina, tavily, exa) instead of HTML.
+    pairs: list[tuple[str, str]] = [
+        (anchor.get_text(" ", strip=True), anchor["href"]) for anchor in soup.find_all("a", href=True)
+    ]
+    pairs.extend((match.group(1), match.group(2)) for match in MARKDOWN_LINK_RE.finditer(html))
+    for link_text_raw, href in pairs:
         url = urljoin(base_url, href)
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
@@ -1774,7 +1811,7 @@ def candidate_contact_links(html: str, base_url: str, limit: int = SECOND_HOP_PA
             continue
         if re.search(r"\.(pdf|jpg|jpeg|png|gif|webp|svg|zip)(\?|$)", parsed.path.lower()):
             continue
-        link_text = anchor.get_text(" ", strip=True).lower()
+        link_text = link_text_raw.lower()
         path = parsed.path.lower()
         label = f"{link_text} {path}"
         matched_hints = [
@@ -1796,11 +1833,14 @@ def candidate_contact_links(html: str, base_url: str, limit: int = SECOND_HOP_PA
 def merge_linkedin_references(leads: list[dict[str, Any]], records: list[dict[str, str]]) -> None:
     """Attach a seed's LinkedIn reference to its crawled (website-bearing) lead.
     Website-less seeds already carry the reference from leads_from_manual_seeds."""
-    linkedin_by_name = {
-        (record.get("company") or "").lower(): record["linkedin"]
-        for record in records
-        if record.get("linkedin") and record.get("website") and record.get("company")
-    }
+    # Key on the cleaned company name (same transform leads_from_search_results
+    # applies), so a seed company like "Acme GmbH - Official Site" still matches
+    # the lead whose company_name was trimmed to "Acme GmbH".
+    linkedin_by_name = {}
+    for record in records:
+        if record.get("linkedin") and record.get("website") and record.get("company"):
+            name = clean_company_name(record["company"], normalized_domain(record["website"])).lower()
+            linkedin_by_name[name] = record["linkedin"]
     for lead in leads:
         key = lead["company_name"].lower()
         if key in linkedin_by_name and not lead.get("linkedin_reference_url"):
@@ -1949,6 +1989,9 @@ def run(args: argparse.Namespace) -> Path:
                 print(f"[warn] query failed ({safe_exc}); skipping: {query!r}", file=sys.stderr)
                 sources.append(SearchSource(query, 0, f"error:{safe_exc}"))
                 continue
+            for result in results:
+                if isinstance(result, dict):
+                    result.setdefault("_query", query)
             raw_results.extend(results)
             sources.append(SearchSource(query, len(results), search_provider_id))
         effective_search_provider = search_provider_id
