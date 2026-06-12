@@ -17,7 +17,7 @@ Gate (the spec's measurable criterion):
 
 Usage:
   python score_qualification.py predictions.json
-  python score_qualification.py predictions.json --fixtures qualification_fixtures.json
+  python score_qualification.py predictions.json --gold qualification_gold.json
 """
 from __future__ import annotations
 
