@@ -59,9 +59,17 @@ LEAD_COLUMNS = [
     "email_confidence", "do_not_contact_reason", "linkedin_reference_url",
     "lead_score", "source_url", "evidence_snippet", "business_relevance_basis",
     "consent_status", "outreach_allowed_review", "legitimate_interest_basis",
-    "delete_if_not_used_by", "notes", "odoo_ready",
+    "delete_if_not_used_by", "notes", "odoo_ready", "odoo_duplicate",
+    "odoo_duplicate_status", "odoo_duplicate_model", "odoo_duplicate_id",
+    "odoo_duplicate_reason", "odoo_import_eligible",
 ]
-_LEAD_NONEMPTY_DEFAULTS = {"contact_data_type": "company", "odoo_ready": "no"}
+_LEAD_NONEMPTY_DEFAULTS = {
+    "contact_data_type": "company",
+    "odoo_ready": "no",
+    "odoo_duplicate": "no",
+    "odoo_duplicate_status": "not_screened",
+    "odoo_import_eligible": "yes",
+}
 
 
 def new_lead(**overrides: Any) -> dict[str, Any]:
