@@ -1107,6 +1107,53 @@ class LeadCrawlerTests(unittest.TestCase):
         # new_lead() and the export column list must stay in lockstep.
         self.assertEqual(set(lead_crawler.new_lead().keys()), set(lead_crawler.LEAD_COLUMNS))
 
+    def test_new_lead_defaults_odoo_duplicate_screen_fields(self):
+        lead = lead_crawler.new_lead()
+
+        self.assertEqual(lead["odoo_duplicate"], "no")
+        self.assertEqual(lead["odoo_duplicate_status"], "not_screened")
+        self.assertEqual(lead["odoo_duplicate_model"], "")
+        self.assertEqual(lead["odoo_duplicate_id"], "")
+        self.assertEqual(lead["odoo_duplicate_reason"], "")
+        self.assertEqual(lead["odoo_import_eligible"], "yes")
+
+    def test_export_workbook_preserves_odoo_duplicate_annotations(self):
+        lead = lead_crawler.new_lead(
+            company_name="Example Textiles",
+            domain="example-textiles.com",
+            website="https://example-textiles.com",
+            contact_email="jane@example-textiles.com",
+            odoo_ready="yes",
+            odoo_duplicate="yes",
+            odoo_duplicate_status="duplicate",
+            odoo_duplicate_model="mailing.contact,crm.lead",
+            odoo_duplicate_id="mailing.contact:42,crm.lead:84",
+            odoo_duplicate_reason="email match, domain match",
+            odoo_import_eligible="no",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "annotated.xlsx"
+            lead_crawler.export_workbook(
+                [lead],
+                [lead_crawler.SearchSource("fixture", 1, "fixture")],
+                [],
+                {},
+                str(output_path),
+            )
+
+            workbook = openpyxl.load_workbook(output_path, data_only=True)
+            headers = [cell.value for cell in workbook["Leads"][1]]
+            values = [cell.value for cell in workbook["Leads"][2]]
+            row = dict(zip(headers, values))
+
+            self.assertEqual(row["odoo_duplicate"], "yes")
+            self.assertEqual(row["odoo_duplicate_status"], "duplicate")
+            self.assertEqual(row["odoo_duplicate_model"], "mailing.contact,crm.lead")
+            self.assertEqual(row["odoo_duplicate_id"], "mailing.contact:42,crm.lead:84")
+            self.assertEqual(row["odoo_duplicate_reason"], "email match, domain match")
+            self.assertEqual(row["odoo_import_eligible"], "no")
+
     def test_codex_manual_requires_seeds_or_fixture(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "out.xlsx"

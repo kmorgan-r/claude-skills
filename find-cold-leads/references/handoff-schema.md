@@ -19,8 +19,15 @@ The **Leads** sheet carries, in order: `company_name`, `domain`, `website`,
 `email_verification_status`, `email_confidence`, `do_not_contact_reason`,
 `linkedin_reference_url`, `lead_score`, `source_url`, `evidence_snippet`,
 `business_relevance_basis`, `consent_status`, `outreach_allowed_review`,
-`legitimate_interest_basis`, `delete_if_not_used_by`, `notes`, `odoo_ready`.
+`legitimate_interest_basis`, `delete_if_not_used_by`, `notes`, `odoo_ready`,
+`odoo_duplicate`, `odoo_duplicate_status`, `odoo_duplicate_model`,
+`odoo_duplicate_id`, `odoo_duplicate_reason`, `odoo_import_eligible`.
 Plus sheets: **Sources**, **Rejected**, **Run Config**.
+
+The Odoo duplicate fields are agent-annotated. `odoo_duplicate_status=not_screened`
+means no completed Odoo screen has been recorded; `clear` means the read-only
+screen found no match; `duplicate`, `possible_duplicate`, `blacklisted`, and
+`screen_error` block or pause import through `odoo_import_eligible`.
 
 To feed the classifier, save the Leads sheet to CSV and map columns
 (`company_name`→Company, `website`/`domain`→Website/Domain, `contact_name`→Name,
