@@ -150,7 +150,7 @@ Before handing leads to cold email or Odoo work:
 3. Check `contact_name`, `contact_title`, `contact_email`, `contact_source_url`, and `contact_page`.
 4. Keep `outreach_allowed_review` as `needs review` until the user confirms outreach basis.
 5. Review `odoo_duplicate`, `odoo_duplicate_status`, `odoo_duplicate_model`, `odoo_duplicate_id`, `odoo_duplicate_reason`, and `odoo_import_eligible`.
-6. Mark `odoo_ready=yes` only after review, and only leave `odoo_import_eligible=yes` for rows that are not duplicate, blacklisted, or pending possible-duplicate review.
+6. Mark `odoo_ready=yes` only after review, and only leave `odoo_import_eligible=yes` for rows that are not duplicate, blacklisted, blocked by `screen_error`, or pending possible-duplicate review.
 
 ## Odoo Duplicate Screen
 
@@ -177,6 +177,7 @@ Annotate the workbook fields:
 - `odoo_duplicate_status=duplicate` for hard duplicates.
 - `odoo_duplicate_status=blacklisted` and `odoo_import_eligible=no` for active blacklist matches.
 - `odoo_duplicate_status=possible_duplicate`, `odoo_duplicate=no`, and `odoo_import_eligible=no` for distinctive name-only matches pending manual review.
+- `odoo_duplicate_status=screen_error` and `odoo_import_eligible=no` when a screening call fails or partially fails.
 - `odoo_duplicate_status=clear` when a completed screen finds no match.
 - `odoo_duplicate_model`, `odoo_duplicate_id`, and `odoo_duplicate_reason` with concise audit details for every match.
 
