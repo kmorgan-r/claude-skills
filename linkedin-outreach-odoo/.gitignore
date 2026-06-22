@@ -1,0 +1,6 @@
+# Local outreach working files — contain lead PII (names, emails, LinkedIn URLs,
+# per-lead pitches). NEVER commit. The skill writes both the exported lead CSV and
+# the outreach log into this directory; this .gitignore keeps them out of git so a
+# stray `git add .` can't stage or push personal contact data.
+odoo_leads_*.csv
+*_outreach_*.csv

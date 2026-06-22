@@ -136,6 +136,15 @@ You get back an array of records. Convert each to a CSV row with these columns
 Use the Write tool to create the CSV. Keep the `odoo_id` for every row — it's
 how step 7 finds the record to flip to `Attempting contact`.
 
+**PII — do not commit.** This CSV (and the outreach log from step 5) carry real
+contact data: names, emails, LinkedIn URLs, per-lead pitches. They land in this
+skill dir, which sits inside the home git repo working tree. A committed
+`.gitignore` in this dir already excludes `odoo_leads_*.csv` and `*_outreach_*.csv`
+so a stray `git add .` can't stage them — **keep that `.gitignore`; never write
+these CSVs to a path it doesn't cover, and never force-add them.** If the user asks
+to put the working CSV elsewhere, pick a path outside any git tree (or one that's
+git-ignored), not an arbitrary tracked folder.
+
 **Data caveat:** Apollo enrichment sometimes mis-tags `country_id` (e.g. a
 US/France fund shows "Gabon"). Don't rely on `location` for anything load-bearing;
 it's note color only.
@@ -181,9 +190,10 @@ python .\linkedin_outreach.py `
   --msg-col customMessage --limit 25
 ```
 `linkedin_outreach.py` is **dry-run by default**. It prints each note preview and
-writes a `*_outreach_<ts>.csv` log (in the marketing repo root) with
+writes a `*_outreach_<ts>.csv` log **next to the input CSV** (the script derives the
+log path from `--csv`, so it lands in this skill dir, not the repo root) with
 `outreach_status` = `dry_run` and all input columns preserved (so `odoo_id`
-flows through).
+flows through). Both files are git-ignored — see the PII note in step 3.
 
 Show the user the preview. **Get explicit confirmation** before sending —
 sending connection requests is irreversible.
@@ -255,6 +265,11 @@ rarely hit 100.)
   `sent/done/skip`.
 - ConnectSafely rate headers land in `cs.last_rate`; the outreach log records
   them per send. If `remaining` is low, stop and resume next week.
+- **PII stays local.** The lead CSV and outreach log hold real contact data. They
+  live in this skill dir and are covered by its committed `.gitignore`
+  (`odoo_leads_*.csv`, `*_outreach_*.csv`). Don't relocate them to a tracked path,
+  don't `git add -f` them, and don't paste their rows into commits, PRs, or chat
+  logs that leave the machine.
 
 ## What this skill does NOT do
 
