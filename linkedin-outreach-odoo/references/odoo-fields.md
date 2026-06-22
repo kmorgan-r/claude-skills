@@ -2,8 +2,8 @@
 
 The skill reads and writes `mailing.contact` in the local Odoo DB (`ClimatePoint`)
 through the **climatepoint-odoo MCP** (registered as `mcpServers.climatepoint-odoo`
-in `C:\Users\kmorg\.claude.json`). No `odoo shell`, no XML-RPC config — Claude calls
-the MCP tools directly.
+in `~\.claude.json`; paths in this skill are machine-specific — see the note atop
+SKILL.md). No `odoo shell`, no XML-RPC config — Claude calls the MCP tools directly.
 
 This table is **verified against the live DB** (June 2026). If a future
 `fields_get` differs, trust the live result.

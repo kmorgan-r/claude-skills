@@ -52,6 +52,12 @@ cp -r find-cold-leads ~/.claude/skills/
 - **Safety:** outreach is dry-run by default (`--send` to actually send, 90/week cap);
   Odoo write-back is gated by the MCP's two-step confirmation code. Both require
   explicit user confirmation before anything irreversible happens.
+- **Install the whole directory** (`cp -r linkedin-outreach-odoo …`), not just
+  `SKILL.md`: the bundled `.gitignore` is load-bearing — it's the backstop that keeps
+  exported lead PII out of git if you ever point the working files back into a repo.
+  Lead CSVs and the outreach log default to `%TEMP%\linkedin-outreach\` (outside any
+  git tree) regardless. Paths inside `SKILL.md` are machine-specific (`~\marketing`,
+  `~\climatepoint-odoo-mcp`, …) — adjust them to your own layout on install.
 - Invoke by asking to reach out to your Odoo cold leads on LinkedIn.
 
 ### fix-pr-reviews

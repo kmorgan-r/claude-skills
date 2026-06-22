@@ -17,11 +17,21 @@ This skill talks to Odoo through the **climatepoint-odoo MCP server** (registere
 Read-only tools run immediately; `write` (and non-read `execute_action` methods) use
 a **two-step confirmation** built into the MCP — see step 7.
 
+> **Paths here are machine-specific.** This skill was authored on the maintainer's
+> machine, where `~` (the home dir) is `C:\Users\kmorg`, the marketing repo lives at
+> `~\marketing`, and the Odoo MCP source at `~\climatepoint-odoo-mcp`. The absolute
+> paths below (`~\.claude.json`, `~\marketing\linkedin_outreach.py`, etc.) assume
+> that layout — **adjust them to your own paths on install.** The PowerShell commands
+> in steps 5–6 require the current directory to be the marketing repo root so
+> `.\linkedin_outreach.py` resolves; they `cd ~\marketing` first. Lead working files
+> default to `%TEMP%\linkedin-outreach\` (outside any git tree), never the repo —
+> see step 3.
+
 ## Prerequisites (verify once, then skip)
 
-1. **climatepoint-odoo MCP loaded.** It's registered in `C:\Users\kmorg\.claude.json`
+1. **climatepoint-odoo MCP loaded.** It's registered in `~\.claude.json`
    under `mcpServers.climatepoint-odoo`, pointing at `dist\server.js`. It needs Odoo
-   up locally (`docker compose -f C:\Users\kmorg\odoo-docker-compose-fixed.yml up -d`,
+   up locally (`docker compose -f ~\odoo-docker-compose-fixed.yml up -d`,
    Odoo on `http://localhost:8069`) and two User-scope env vars set before Claude Code
    launched: `ODOO_LOGIN` + `ODOO_API_KEY` (Odoo API key from User Preferences → API
    Keys, NOT the postgres password). If the MCP tools aren't present, the server
@@ -30,7 +40,7 @@ a **two-step confirmation** built into the MCP — see step 7.
    registry-env gotcha as above — must be set before Claude Code launched. Read it
    via PowerShell `[Environment]::GetEnvironmentVariable("CONNECTSAFELY_API_KEY","User")`
    only if you need to pass it to a subprocess; don't echo it.
-3. **Repo scripts present** at `C:\Users\kmorg\marketing\`:
+3. **Repo scripts present** at `~\marketing\`:
    `connectsafely.py` (API client) and `linkedin_outreach.py` (CSV → connection
    requests, **dry-run by default**). This skill feeds them; it does not duplicate
    them. See memory `project_connectsafely-linkedin.md`.
@@ -115,9 +125,12 @@ large (hundreds). Add a persona filter if the user asked for one, e.g.
 `["x_persona", "=", "sustainability"]`.
 
 You get back an array of records. Convert each to a CSV row with these columns
-(what `linkedin_outreach.py` expects) and write it to
-`C:\Users\kmorg\marketing\.claude\skills\linkedin-outreach-odoo\odoo_leads_<ts>.csv`
-(utf-8-sig):
+(what `linkedin_outreach.py` expects) and write it to a working dir **outside any
+git tree** — default `%TEMP%\linkedin-outreach\odoo_leads_<ts>.csv` (utf-8-sig). On
+this machine `%TEMP%` resolves to `C:\Users\kmorg\AppData\Local\Temp`; the Write
+tool creates the `linkedin-outreach\` subdir if it doesn't exist. Use this default
+unless the user explicitly asks for the file elsewhere — and if they do, see the
+PII note below for where "elsewhere" may be.
 
 | CSV column      | From record field      | Notes |
 |---|---|---|
@@ -137,13 +150,13 @@ Use the Write tool to create the CSV. Keep the `odoo_id` for every row — it's
 how step 7 finds the record to flip to `Attempting contact`.
 
 **PII — do not commit.** This CSV (and the outreach log from step 5) carry real
-contact data: names, emails, LinkedIn URLs, per-lead pitches. They land in this
-skill dir, which sits inside the home git repo working tree. A committed
-`.gitignore` in this dir already excludes `odoo_leads_*.csv` and `*_outreach_*.csv`
-so a stray `git add .` can't stage them — **keep that `.gitignore`; never write
-these CSVs to a path it doesn't cover, and never force-add them.** If the user asks
-to put the working CSV elsewhere, pick a path outside any git tree (or one that's
-git-ignored), not an arbitrary tracked folder.
+contact data: names, emails, LinkedIn URLs, per-lead pitches. The default location
+`%TEMP%\linkedin-outreach\` sits **outside any git working tree**, so a `git add .`
+in the marketing repo can't reach it. If the user overrides the path *into* a git
+tree — e.g. back into this skill dir — the skill dir ships a committed `.gitignore`
+excluding `odoo_leads_*.csv` and `*_outreach_*.csv` as a backstop: **keep that
+`.gitignore`, never write these CSVs to a tracked path it doesn't cover, and never
+`git add -f` them.** Never relocate them to an arbitrary tracked folder.
 
 **Data caveat:** Apollo enrichment sometimes mis-tags `country_id` (e.g. a
 US/France fund shows "Gabon"). Don't rely on `location` for anything load-bearing;
@@ -184,24 +197,27 @@ modes and let them pick:
 Always dry-run first and show the user the preview before any send:
 
 ```powershell
-# from C:\Users\kmorg\marketing (where connectsafely.py lives)
+# cd to the marketing repo root first — `.\linkedin_outreach.py` is relative to it.
+cd ~\marketing            # = C:\Users\kmorg\marketing on this machine
 python .\linkedin_outreach.py `
-  --csv .\.claude\skills\linkedin-outreach-odoo\odoo_leads_<ts>.csv `
+  --csv "$env:TEMP\linkedin-outreach\odoo_leads_<ts>.csv" `
   --msg-col customMessage --limit 25
 ```
 `linkedin_outreach.py` is **dry-run by default**. It prints each note preview and
 writes a `*_outreach_<ts>.csv` log **next to the input CSV** (the script derives the
-log path from `--csv`, so it lands in this skill dir, not the repo root) with
-`outreach_status` = `dry_run` and all input columns preserved (so `odoo_id`
-flows through). Both files are git-ignored — see the PII note in step 3.
+log path from `--csv`, so it lands in the same `%TEMP%\linkedin-outreach\` dir, not
+the repo) with `outreach_status` = `dry_run` and all input columns preserved (so
+`odoo_id` flows through). Both files sit outside any git tree — see the PII note in
+step 3.
 
 Show the user the preview. **Get explicit confirmation** before sending —
 sending connection requests is irreversible.
 
 ### 6. Actually send (only after the user confirms)
 ```powershell
+# still from ~\marketing
 python .\linkedin_outreach.py `
-  --csv .\.claude\skills\linkedin-outreach-odoo\odoo_leads_<ts>.csv `
+  --csv "$env:TEMP\linkedin-outreach\odoo_leads_<ts>.csv" `
   --msg-col customMessage --limit 25 --send
 ```
 Sends real connection requests via ConnectSafely. The log CSV now has
@@ -266,10 +282,10 @@ rarely hit 100.)
 - ConnectSafely rate headers land in `cs.last_rate`; the outreach log records
   them per send. If `remaining` is low, stop and resume next week.
 - **PII stays local.** The lead CSV and outreach log hold real contact data. They
-  live in this skill dir and are covered by its committed `.gitignore`
-  (`odoo_leads_*.csv`, `*_outreach_*.csv`). Don't relocate them to a tracked path,
-  don't `git add -f` them, and don't paste their rows into commits, PRs, or chat
-  logs that leave the machine.
+  default to `%TEMP%\linkedin-outreach\` — outside any git tree. If overridden into
+  the skill dir, its committed `.gitignore` (`odoo_leads_*.csv`, `*_outreach_*.csv`)
+  is the backstop. Don't relocate them to a tracked path, don't `git add -f` them,
+  and don't paste their rows into commits, PRs, or chat logs that leave the machine.
 
 ## What this skill does NOT do
 
@@ -284,8 +300,7 @@ rarely hit 100.)
 ## References
 - `references/odoo-fields.md` — verified field map, the `x_lead_status` state
   machine, discovery via MCP `fields_get`/`read_group`, import column map.
-- Repo: `C:\Users\kmorg\marketing\linkedin_outreach.py`,
-  `C:\Users\kmorg\marketing\connectsafely.py`.
-- MCP: `C:\Users\kmorg\climatepoint-odoo-mcp\` (source), registered as
-  `mcpServers.climatepoint-odoo` in `C:\Users\kmorg\.claude.json`.
+- Repo: `~\marketing\linkedin_outreach.py`, `~\marketing\connectsafely.py`.
+- MCP: `~\climatepoint-odoo-mcp\` (source), registered as
+  `mcpServers.climatepoint-odoo` in `~\.claude.json`.
 - Memory: `project_connectsafely-linkedin.md` (plan, key, base-URL gotcha, limits).
