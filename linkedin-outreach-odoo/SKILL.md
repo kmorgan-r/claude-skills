@@ -142,7 +142,7 @@ PII note below for where "elsewhere" may be.
 | `profileUrl`    | `x_linkedin_url`       | |
 | `profileId`     | parsed from profileUrl | vanity slug: `url.split("/in/")[-1].rstrip("/").split("?")[0]` |
 | `email`         | `email`                | context only |
-| `location`      | `country_id[1]`        | many2one → take the name (2nd element) |
+| `location`      | `country_id[1] if country_id else ""` | many2one → name (2nd element). `country_id` is **not required** and comes back `false` when unset — guard it or `country_id[1]` raises `TypeError` and the row crashes |
 | `matched_signal`| `x_outreach_angle` (fallback `x_need_state`) | the per-lead pitch is the richest seed |
 | `customMessage` | (blank)                | you fill in step 4 |
 
@@ -226,8 +226,16 @@ Sends real connection requests via ConnectSafely. The log CSV now has
 and caps if `--limit` exceeds it.
 
 If `CONNECTSAFELY_API_KEY` isn't visible to the shell, the script exits with a
-clear message. Run the send in a fresh shell, or set `$env:CONNECTSAFELY_API_KEY`
-from the registry first.
+clear message. Fix it by setting the env var in the terminal, then re-invoke the
+send command. **Do not run the assignment as a Bash/PowerShell tool call** — reading
+the key with `[Environment]::GetEnvironmentVariable(...)` inside a tool prints the
+raw key into the conversation transcript. Instead, tell the user to run this in
+**their own terminal** before re-running the send:
+
+```powershell
+# USER runs this — NOT a Claude tool call (would leak the key into the transcript):
+$env:CONNECTSAFELY_API_KEY = [Environment]::GetEnvironmentVariable("CONNECTSAFELY_API_KEY","User")
+```
 
 ### 7. Write the result back to Odoo (MCP `write` — two-step confirmation)
 Read the outreach log CSV (BOM-stripped). Collect the `odoo_id` of every row with
