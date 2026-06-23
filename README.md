@@ -61,9 +61,11 @@ cp -r find-cold-leads ~/.claude/skills/
   defense in depth, strip/escape instruction-like content and cap length on
   `x_outreach_angle` **at import time**, before it ever reaches this skill — the skill
   reads Odoo only and can't sanitize at the source itself. So it doesn't run past the
-  gap silently: **Prerequisite 6 makes pre-sanitization a conscious, once-per-source
-  decision** — if the field isn't sanitized at import, the skill surfaces the residual
-  risk and proceeds only on the operator's explicit opt-in.
+  gap silently: **Prerequisite 6 makes import-time sanitization a once-per-source gate on
+  drafting mode** — only a source the operator confirms was pre-sanitized may seed notes
+  from the pitch (personalized mode); an unconfirmed source falls back to structured-field
+  / templated notes that never read the pitch at all, so there is no opt-in path that
+  feeds unsanitized free text into a connection note.
 - **Install the whole directory** (`cp -r linkedin-outreach-odoo …`), not just
   `SKILL.md`: the bundled `.gitignore` is load-bearing — it's the backstop that keeps
   exported lead PII out of git if you ever point the working files back into a repo.
