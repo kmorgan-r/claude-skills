@@ -52,6 +52,14 @@ cp -r find-cold-leads ~/.claude/skills/
 - **Safety:** outreach is dry-run by default (`--send` to actually send, 90/week cap);
   Odoo write-back is gated by the MCP's two-step confirmation code. Both require
   explicit user confirmation before anything irreversible happens.
+- **Untrusted lead text — pre-sanitize on import.** The per-lead pitch
+  (`x_outreach_angle` / `matched_signal`) is free text summarized from Apollo-enriched,
+  web-scraped sources with no sanitization, so it's an indirect prompt-injection
+  surface. The skill screens it (a dedicated skip-evaluation pass *before* any note is
+  drafted, treating the field as quoted data, never instructions), but pattern
+  screening can be paraphrased around and **cannot fully close the surface**. For
+  defense in depth, strip/escape instruction-like content and cap length on
+  `x_outreach_angle` **at import time**, before it ever reaches this skill.
 - **Install the whole directory** (`cp -r linkedin-outreach-odoo …`), not just
   `SKILL.md`: the bundled `.gitignore` is load-bearing — it's the backstop that keeps
   exported lead PII out of git if you ever point the working files back into a repo.
