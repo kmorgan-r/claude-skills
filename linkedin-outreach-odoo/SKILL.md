@@ -36,6 +36,16 @@ a **two-step confirmation** built into the MCP — see step 7.
    launched: `ODOO_LOGIN` + `ODOO_API_KEY` (Odoo API key from User Preferences → API
    Keys, NOT the postgres password). If the MCP tools aren't present, the server
    isn't loaded — tell the user to set the env vars and restart Claude Code.
+   **Never echo `ODOO_API_KEY` (or `ODOO_LOGIN`) in a tool call** — running
+   `[Environment]::GetEnvironmentVariable("ODOO_API_KEY","User")` or echoing
+   `$env:ODOO_API_KEY` prints the raw key into the conversation transcript. The MCP reads
+   them itself from its environment; you never need the values. To confirm presence, test
+   for non-empty only — this returns a boolean, never the value:
+   ```powershell
+   $env:ODOO_API_KEY -ne ""   # True / False — does not reveal the key
+   ```
+   If Odoo connectivity fails, do **not** probe the key from a tool — tell the user to
+   verify it in their own terminal and restart Claude Code.
 2. **ConnectSafely API key** in User-scope env var `CONNECTSAFELY_API_KEY`. Same
    registry-env gotcha as above — must be set before Claude Code launched. The send
    script (`linkedin_outreach.py`) reads the key itself from the process environment;
@@ -178,6 +188,25 @@ PII note below for where "elsewhere" may be.
 
 Use the Write tool to create the CSV. Keep the `odoo_id` for every row — it's
 how step 7 finds the record to flip to `Attempting contact`.
+
+**Guard `country_id` when you build `location`.** It's an optional many2one that comes
+back `false` when unset (113 eligible leads carry no country), so emit
+`country_id[1] if country_id else ""`. A bare `country_id[1]` raises `TypeError` and the
+row never reaches the CSV — that lead stays `New`, gets re-exported every run, and is
+retried indefinitely. This guard belongs in the prose flow, not just the column table above.
+
+**Quote and escape every field — the Write tool emits literal text and does no CSV
+escaping for you.** Build each row as RFC 4180: wrap **every** value in double-quotes and
+double any internal `"` as `""`. Skip this and a comma, newline, or quote inside `headline`
+or `matched_signal` shifts the later columns, so `linkedin_outreach.py` reads fields from
+the wrong column (e.g. a pitch lands in `profileId`). **Neutralize spreadsheet formula
+injection** on the Odoo-sourced text fields (`firstName`, `lastName`, `headline`,
+`currentCompany`, `location`, `matched_signal`, `email`): if a value starts with `=`, `+`,
+`-`, or `@`, prefix it with a tab (`\t`) inside the quotes so Excel/Sheets treats it as
+text when the operator opens the file to review. A crafted lead — e.g.
+`firstName` = `=HYPERLINK("http://evil","click")` from a tampered Apollo source — would
+otherwise execute silently on open. Such a value is already anomalous: screen it in step 4a
+and set `status` = `skip` for that row as well.
 
 Rows you marked `status` = `skip` (bad `profileId`, or the injection check in step 4)
 stay in the CSV but the send script drops them. Call these out in the step-5 dry-run
@@ -340,8 +369,15 @@ prints the raw key into the transcript. Tell the user to, in **their own termina
    value.
 
 ### 7. Write the result back to Odoo (MCP `write` — two-step confirmation)
-Read the outreach log CSV (BOM-stripped). Collect the `odoo_id` of every row with
-`outreach_status == "sent"` — those are the IDs to advance. Errored or unsent rows
+Read the **send log produced by step 6** — the `*_outreach_<ts>.csv` written during the
+`--send` run, whose rows carry `outreach_status` = `sent` or `error`. **Do not read the
+dry-run log from step 5** (its rows are all `outreach_status` = `dry_run`): both files land
+in the same `%TEMP%\linkedin-outreach\` dir with different timestamps, so open the one the
+`--send` run wrote (the newest), not the dry-run one. Reading the dry-run log finds zero
+`sent` rows, silently skips this write-back, and leaves every just-sent lead at
+`New`/unset — so the next run re-exports them, sends a **second** connection request, and
+burns the weekly cap (irreversible). Strip the BOM, then collect the `odoo_id` of every
+row with `outreach_status == "sent"` — those are the IDs to advance. Errored or unsent rows
 are left untouched so they stay eligible to retry.
 
 Write-back = flip `x_lead_status` from `New`/unset → `Attempting contact`. That's
@@ -378,7 +414,11 @@ rarely hit 100.)
 ## Rate limits & safety
 
 - **90 connection requests / week** per LinkedIn account (ConnectSafely cap).
-  `linkedin_outreach.py` enforces this on `--limit`. Reset UTC midnight.
+  `linkedin_outreach.py` enforces this on `--limit`. It's a **rolling 7-day window, not a
+  nightly reset** — sending 90 today does **not** free up another 90 tomorrow. Check the
+  `cs.last_rate` `remaining` header before each run and stop when it's low; never assume the
+  block cleared overnight (that path leads to 90×7 = exceeding the real cap → LinkedIn
+  restrictions or a ban).
 - **Always dry-run outreach before `--send`.** `linkedin_outreach.py` defaults to
   dry-run; `--send` opts into real sends.
 - **Confirm with the user before `--send`.** Sending is irreversible.

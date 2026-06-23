@@ -19,7 +19,7 @@ This table is **verified against the live DB** (June 2026). If a future
 | Job title | `x_job_title` | char | |
 | Headline (richer, optional) | `x_headline` | char | fallback for headline |
 | Company | `company_name` | char | NOT `x_company` |
-| Country | `country_id` | many2one | returned as `[id, "Name"]`; use the name |
+| Country | `country_id` | many2one | returned as `[id, "Name"]` when set, **`false` when unset** (113 eligible leads). Use `country_id[1] if country_id else ""` — a bare `country_id[1]` raises `TypeError` and crashes the row |
 | Pre-written pitch | `x_outreach_angle` | text | per-lead angle from `/find-cold-leads` — best note seed |
 | Need state | `x_need_state` | char | e.g. "Scope 3 / Supplier Footprint" |
 | Persona | `x_persona` | selection | investor / sustainability / … — filter target |
@@ -89,7 +89,9 @@ filter.
     limit: 25
     order: "x_lead_score desc, id asc"
   ```
-  Max `limit` is 200. `false` = Odoo False/unset.
+  Max `limit` is 200. `false` = Odoo False/unset. **`country_id` returns `false` when
+  unset** — when building a row's location, use `country_id[1] if country_id else ""`, never
+  a bare `country_id[1]` (it raises `TypeError` and drops the lead from the CSV).
 - **`execute_action`** with `method: "fields_get"` (read-only, immediate) — schema
   discovery. Also `method: "read_group"` with `groupby: ["x_lead_status"]` to count
   the eligible pool.
