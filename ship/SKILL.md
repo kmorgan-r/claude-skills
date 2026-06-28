@@ -91,14 +91,18 @@ Action:
 # master/trunk/develop). Record it in state as `default_branch`; later phases
 # (rollback, P4 merge-base) read it from state rather than hardcoding a name.
 DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null \
-  || git symbolic-ref --short refs/remotes/origin/HEAD | sed 's@^origin/@@')
+  || git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')
+# origin/HEAD is not always set (shallow/CI clones), so guard against an empty value:
+[ -z "$DEFAULT_BRANCH" ] && { echo "ERROR: could not derive default branch — run: git remote set-head origin -a"; exit 1; }
 git checkout "$DEFAULT_BRANCH" && git pull --ff-only
 git checkout -b feat/<slug>
 # Per-run scratch state files must never be tracked (else they cause merge
 # conflicts on shared repos and can leak blocker text). Ensure both are ignored:
 grep -qxF '.claude-ship-state.json' .gitignore 2>/dev/null || echo '.claude-ship-state.json' >> .gitignore
 grep -qxF '.claude-pr-fix-state.json' .gitignore 2>/dev/null || echo '.claude-pr-fix-state.json' >> .gitignore
-git add .gitignore && git commit -m "chore: ignore ship/fix-pr-reviews state files"
+git add .gitignore
+# Only commit if .gitignore actually changed (both entries may already exist):
+git diff --cached --quiet || git commit -m "chore: ignore ship/fix-pr-reviews state files"
 ```
 Then write the initial state file (`phase:"spec-review"`, `branch`,
 `default_branch`, `spec`, `topic`, `focus_next`). **Rollback:** if the state-file
@@ -151,7 +155,7 @@ then run ONLY the change's own test files. **First populate `test_paths`** in th
 state file (so a later resume never re-infers them): collect the test files this
 branch added or changed —
 ```bash
-git diff --name-only $(git merge-base "$DEFAULT_BRANCH" HEAD)..HEAD -- '*.test.*' '*.spec.*'
+git diff --name-only --diff-filter=d $(git merge-base "$DEFAULT_BRANCH" HEAD)..HEAD -- '*.test.*' '*.spec.*'
 ```
 (`$DEFAULT_BRANCH` is the `default_branch` recorded in state at P0 — read it from
 state on resume; do NOT hardcode `main`. Git pathspec wildcards match across `/`
