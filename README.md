@@ -10,6 +10,8 @@ follows at runtime) plus any bundled scripts, references, and evals.
 | [`find-cold-leads`](./find-cold-leads) | Finds and **qualifies** B2B cold leads on free signals, spends scarce Apollo enrichment credits only on rows that fit the ICP, tags each with a region-aware compliance posture, and exports a classifier-ready / Odoo-ready sheet. |
 | [`linkedin-outreach-odoo`](./linkedin-outreach-odoo) | Picks up where `find-cold-leads` leaves off: reads eligible `mailing.contact` leads from Odoo, drafts a personalized LinkedIn connection note per lead, sends connection requests via the ConnectSafely API (dry-run by default), and writes outreach state back to Odoo. |
 | [`fix-pr-reviews`](./fix-pr-reviews) | Fetches the most recent GitHub PR review comments and systematically addresses each one — no copy-pasting from the PR. Supports a `--loop` mode. |
+| [`ship`](./ship) | Conductor that drives the post-brainstorm dev pipeline hands-off — spec-review, plan, plan-review, implementation, PR, then the `fix-pr-reviews` loop — resuming across `/clear` via a state file, stopping only on failure or final merge. |
+| [`reviewing-plans`](./reviewing-plans) | Reviews a written implementation plan before execution: dispatches 2–5 domain-specific reviewer agents in parallel, consolidates findings, and applies approved fixes to the plan file. |
 
 ## Install
 
@@ -77,3 +79,16 @@ cp -r find-cold-leads ~/.claude/skills/
 ### fix-pr-reviews
 - **Needs** the GitHub CLI (`gh`) authenticated.
 - Invoke `/fix-pr-reviews` (optionally `--loop`) inside a repo with an open PR.
+
+### ship
+- **Part of the [superpowers](https://github.com/obra/superpowers) pipeline.** Delegates
+  to other skills (`spec-review`, `writing-plans`, `reviewing-plans`, `fix-pr-reviews`);
+  install those too or the phases that call them stall.
+- **Run after** `/superpowers:brainstorming` produced a committed spec. Resumes an
+  in-progress run from its state file across `/clear` or auto-compact.
+- Invoke `/ship` once; it runs phases P0–P7 hands-off.
+
+### reviewing-plans
+- Takes a path to an existing plan markdown file (or finds the most recently referenced
+  one). Used standalone or as a `ship` phase.
+- Invoke `/reviewing-plans` after a plan exists, before execution.
