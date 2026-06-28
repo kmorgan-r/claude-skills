@@ -134,7 +134,7 @@ For each finding:
 
 After all reviewers return:
 
-1. **Reviewer failure?** If any reviewer agent timed out or returned an error, note the failure and proceed with available findings. Mention the failed reviewer in the summary.
+1. **Reviewer failure?** If *some* (but not all) reviewer agents timed out or returned an error, note the failure and proceed with the available findings, mentioning the failed reviewer(s) in the summary. **If ALL reviewers failed (zero successful responses), do NOT proceed** — there is no review signal, and a 0/0/0 summary here means "review did not run," not "plan is clean." In interactive mode, report the total reviewer failure and stop. In `auto` mode, return a summary explicitly marked `REVIEW FAILED — 0 of {N} reviewers succeeded` (never a clean/no-findings summary) so the calling conductor treats it as a blocker rather than as zero findings.
 2. **Zero findings?** If all reviewers returned "No findings," skip the summary. Say: "All {N} reviewers found no issues. Plan is ready for execution." Proceed directly to Step 6.
 3. **Deduplicate**: If two reviewers flag the same issue (same task + same root cause), keep the one with higher severity and more specific fix.
 4. **Sort**: CRITICAL first, then IMPORTANT, then MINOR.

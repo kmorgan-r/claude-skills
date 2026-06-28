@@ -106,7 +106,10 @@ at the design doc (`spec`) — invoke reviewing-plans auto mode via args
 summary (see the reviewing-plans auto contract). After it returns, run it once
 more in `auto` mode (re-review). If any **unresolved CRITICAL** finding remains
 after auto-apply → set `status:"blocked"`, append it to `blockers`, stop.
-Otherwise update state (`phase:"writing-plans"`) and advance.
+Also block if reviewing-plans returns a **total reviewer failure** (a
+`REVIEW FAILED` summary / zero reviewers succeeded) — a zero-findings result
+from total failure is NOT a clean review. Otherwise update state
+(`phase:"writing-plans"`) and advance.
 
 ### P2 writing-plans
 
@@ -120,7 +123,8 @@ via the Skill tool; ignore any auto-chain into execution. Record the plan path i
 
 Invoke `reviewing-plans` via the Skill tool in auto mode via `auto <plan-path>` arguments.
 Re-review once in auto mode. Unresolved CRITICAL after auto-apply →
-`status:"blocked"` + stop. Otherwise advance to P4.
+`status:"blocked"` + stop. A total reviewer failure (`REVIEW FAILED` / zero
+reviewers succeeded) → `status:"blocked"` + stop. Otherwise advance to P4.
 
 ### P4 implementation
 
@@ -179,9 +183,11 @@ file, then map (no silent fall-through):
 
 ### P7 awaiting-merge
 
-Write the one-time committed summary to `docs/superpowers/handoffs/ship-<slug>.md`
-(topic, branch, PR URL, final review status, `phase_log`, leftovers) and commit
-it. Report the PR URL + status. **STOP — the human merges manually; the conductor
+First `mkdir -p docs/superpowers/handoffs/` (the Write tool does not create
+parent directories, and this dir may not exist on a repo that has never
+completed a `ship` run). Then write the one-time committed summary to
+`docs/superpowers/handoffs/ship-<slug>.md` (topic, branch, PR URL, final review
+status, `phase_log`, leftovers) and commit it. Report the PR URL + status. **STOP — the human merges manually; the conductor
 never merges.** On a later `/ship` invoke, check `gh pr view <pr> --json state`;
 if `MERGED` → set `status:"done"` and stop.
 
