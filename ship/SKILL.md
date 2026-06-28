@@ -52,6 +52,7 @@ Repo-root JSON, gitignored (P0 adds the `.gitignore` entry), single active pipel
   "spec": "docs/superpowers/specs/....md",
   "plan": null,
   "branch": "feat/<slug>",
+  "default_branch": "main",
   "pr": null,
   "phase": "spec-review",
   "status": "in-progress",
@@ -78,14 +79,20 @@ Skill tool, overriding its hand-off) → write state (Write tool) → advance or
 
 Preconditions (any failure → stop and ask, do NOT branch):
 - `git status --porcelain` empty (clean tree).
-- `git fetch` then ensure local `main` is current.
+- `git fetch` then ensure the local default branch is current (the default
+  branch is *derived* in the Action below — do NOT assume `main`).
 - Local branch absent: `git branch --list feat/<slug>` empty.
 - **Remote** branch absent: `git ls-remote --heads origin feat/<slug>` empty
   (avoids a later push collision).
 
 Action:
 ```bash
-git checkout main && git pull --ff-only
+# Derive the repo's default branch — do NOT assume "main" (repos may use
+# master/trunk/develop). Record it in state as `default_branch`; later phases
+# (rollback, P4 merge-base) read it from state rather than hardcoding a name.
+DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null \
+  || git symbolic-ref --short refs/remotes/origin/HEAD | sed 's@^origin/@@')
+git checkout "$DEFAULT_BRANCH" && git pull --ff-only
 git checkout -b feat/<slug>
 # Per-run scratch state files must never be tracked (else they cause merge
 # conflicts on shared repos and can leak blocker text). Ensure both are ignored:
@@ -93,9 +100,10 @@ grep -qxF '.claude-ship-state.json' .gitignore 2>/dev/null || echo '.claude-ship
 grep -qxF '.claude-pr-fix-state.json' .gitignore 2>/dev/null || echo '.claude-pr-fix-state.json' >> .gitignore
 git add .gitignore && git commit -m "chore: ignore ship/fix-pr-reviews state files"
 ```
-Then write the initial state file (`phase:"spec-review"`, `branch`, `spec`,
-`topic`, `focus_next`). **Rollback:** if the state-file write fails after the
-branch was created, run `git checkout main && git branch -D feat/<slug>`.
+Then write the initial state file (`phase:"spec-review"`, `branch`,
+`default_branch`, `spec`, `topic`, `focus_next`). **Rollback:** if the state-file
+write fails after the branch was created, run
+`git checkout "$DEFAULT_BRANCH" && git branch -D feat/<slug>`.
 Advance to P1.
 
 ### P1 spec-review
@@ -143,17 +151,26 @@ then run ONLY the change's own test files. **First populate `test_paths`** in th
 state file (so a later resume never re-infers them): collect the test files this
 branch added or changed —
 ```bash
-git diff --name-only $(git merge-base main HEAD)..HEAD -- '*.test.*' '*.spec.*'
+git diff --name-only $(git merge-base "$DEFAULT_BRANCH" HEAD)..HEAD -- '*.test.*' '*.spec.*'
 ```
-(Git pathspec wildcards match across `/` — unlike shell globs — so these patterns
-DO catch nested files like `src/**/foo.test.ts`; verified against this repo.)
+(`$DEFAULT_BRANCH` is the `default_branch` recorded in state at P0 — read it from
+state on resume; do NOT hardcode `main`. Git pathspec wildcards match across `/`
+— unlike shell globs — so these patterns DO catch nested files like
+`src/**/foo.test.ts`; verified against this repo.)
 Write that list into state `test_paths`, then gate on exactly those:
 ```bash
-npx vitest run <the test_paths list>
+# Use vitest only if the repo actually has it (mirror the lint/check:types
+# guard). Otherwise run the repo's own `test` script scoped to test_paths; if
+# neither exists, skip the test step and note it in `phase_log`.
+if [ "$(npm pkg get devDependencies.vitest)" != "{}" ] || [ "$(npm pkg get dependencies.vitest)" != "{}" ]; then
+  npx vitest run <the test_paths list>
+elif [ "$(npm pkg get scripts.test)" != "{}" ]; then
+  npm run test -- <the test_paths list>   # repo's own runner (jest/mocha/etc.)
+fi
 ```
 If `test_paths` is empty (the change added no tests), the gate is lint +
-check:types only — **never** fall back to a full `npm test`/`vitest run` (the
-repo's ~70 pre-existing failures would block every pipeline). On resume, read
+check:types only — **never** fall back to a full `npm test`/`vitest run` (a
+repo's pre-existing failures would block every pipeline). On resume, read
 `test_paths` from state rather than re-deriving it.
 Any failure → `status:"blocked"`, write the failing output summary to `blockers`,
 stop. **P4-blocked resume:** re-invoking `/ship` resumes the failed task inside
