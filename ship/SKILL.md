@@ -77,6 +77,20 @@ Skill tool, overriding its hand-off) → write state (Write tool) → advance or
 
 ### P0 init
 
+**Derive `<slug>` first** — it feeds the branch name and every git command below
+(preconditions, the `checkout -b`, the rollback `branch -D`), so an unsafe value
+breaks P0 with a confusing error. Take the chosen spec's filename, drop the `.md`
+extension and any leading `YYYY-MM-DD-` date prefix, lowercase it, replace
+spaces/underscores with hyphens, strip every character not in `[a-z0-9-]`, and
+collapse repeated hyphens. Validate before using it:
+```bash
+SLUG=...                          # derived as described above
+[ -n "$SLUG" ] && git check-ref-format --branch "feat/$SLUG" >/dev/null 2>&1 \
+  || { echo "ERROR: derived slug '$SLUG' is empty or not a valid git branch name — ask the user for an explicit slug"; exit 1; }
+```
+Record the validated value as `topic` in state, and **quote `<slug>` in every
+command** that uses it (a stray space would otherwise split the argument).
+
 Preconditions (any failure → stop and ask, do NOT branch):
 - `git status --porcelain` empty (clean tree).
 - `git fetch` then ensure the local default branch is current (the default
@@ -191,10 +205,17 @@ PR with `gh`. Record the PR URL in `pr`. Advance to P6.
 
 Do NOT reimplement the loop — delegate. `fix-pr-reviews` owns its own state
 (`.claude-pr-fix-state.json`), iteration counter, and MAX-5 cap.
-- **Fresh entry** (no `.claude-pr-fix-state.json`, or it is for a different PR) →
-  invoke `fix-pr-reviews --loop`.
-- **Resume into P6** (a `.claude-pr-fix-state.json` for THIS PR exists) → invoke
-  `fix-pr-reviews --loop --continue` (preserves its counter, not restarted at 1).
+
+"Same PR" vs "different PR" is decided by the **`pr_number`** field in
+`.claude-pr-fix-state.json` (that file's schema belongs to fix-pr-reviews — if it
+ever renames the field, update this check to match). Compare it against the
+current PR: `gh pr list --head "$(git branch --show-current)" --json number --jq '.[0].number'`.
+- **Fresh entry** (no `.claude-pr-fix-state.json`, or its `pr_number` ≠ this PR) →
+  invoke `fix-pr-reviews --loop`. (fix-pr-reviews itself also backs up a
+  wrong-PR state file and starts fresh, so this is belt-and-suspenders.)
+- **Resume into P6** (a `.claude-pr-fix-state.json` whose `pr_number` == this PR
+  exists) → invoke `fix-pr-reviews --loop --continue` (preserves its counter, not
+  restarted at 1).
 
 Determine the outcome by reading fix-pr-reviews' final output block AND its state
 file, then map (no silent fall-through):
