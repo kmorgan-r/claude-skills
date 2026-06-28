@@ -130,9 +130,14 @@ reviewers succeeded) → `status:"blocked"` + stop. Otherwise advance to P4.
 
 Invoke `subagent-driven-development` via the Skill tool on the `plan` (its Task
 subagents keep your context lean; subagents self-verify per task via TDD). When
-it completes, run the **exit gate** — NOT the full test suite:
+it completes, run the **exit gate** — NOT the full test suite. ship runs across
+repos, so a quality script may be absent; `npm run <missing>` exits 1 with
+`Missing script:`, which must NOT be misrecorded as a lint failure. Run only the
+scripts that exist (`npm pkg get` returns `{}` for an absent key); skip absent
+ones and note the skip in `phase_log`:
 ```bash
-npm run lint && npm run check:types
+[ "$(npm pkg get scripts.lint)" != "{}" ] && npm run lint
+[ "$(npm pkg get 'scripts.check:types')" != "{}" ] && npm run check:types
 ```
 then run ONLY the change's own test files. **First populate `test_paths`** in the
 state file (so a later resume never re-infers them): collect the test files this
@@ -177,7 +182,7 @@ file, then map (no silent fall-through):
 |------------------------|---------------|--------------|
 | all-clear | `## Loop Complete - All Clear!` OR `## Loop Complete - No Urgent Issues` | advance to **P7** |
 | max-iterations, issues remain | `## Loop Stopped - Max Iterations Reached` | `status:"blocked"` |
-| all-remaining-issues skipped | `## Loop Complete — Human Review Needed` | `status:"blocked"` |
+| all-remaining-issues skipped | `## Loop Complete — Human Review Needed` (em-dash, U+2014, is what fix-pr-reviews emits; also accept a plain-hyphen `## Loop Complete - Human Review Needed` in case it drifts) | `status:"blocked"` |
 | unparseable review / workflow fail | its `URGENT_TOTAL=-1` stop | `status:"blocked"` |
 | unrecognized output | none of the above patterns match | `status:"blocked"`, surface the raw fix-pr-reviews output verbatim in `blockers` |
 

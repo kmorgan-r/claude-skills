@@ -87,6 +87,9 @@ cp -r find-cold-leads ~/.claude/skills/
   `fix-pr-reviews` (P6); install those too or the phases that call them stall.
 - **Run after** `/superpowers:brainstorming` produced a committed spec. Resumes an
   in-progress run from its state file across `/clear` or auto-compact.
+- **P4 exit gate** runs the `lint` and `check:types` npm scripts *when the repo
+  defines them* (absent scripts are skipped, not treated as failures) plus the
+  change's own test files — so it works across repos without those scripts.
 - Invoke `/ship` once; it runs phases P0–P7 hands-off.
 
 ### reviewing-plans
