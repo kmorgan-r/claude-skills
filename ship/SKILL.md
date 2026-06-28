@@ -44,7 +44,7 @@ Read `.claude-ship-state.json`:
 
 ## State file (`.claude-ship-state.json`)
 
-Repo-root JSON, gitignored, single active pipeline. **Write it with the Write tool** (full-document overwrite — do NOT use `jq`; the local `jq` is an unusable npm shim). If a write is interrupted (e.g. by compaction) and the state file is unreadable, re-derive state from the last commit + current branch + the spec/plan rather than trusting a partial file. Shape:
+Repo-root JSON, gitignored (P0 adds the `.gitignore` entry), single active pipeline. **Write it with the Write tool** (full-document overwrite — do NOT use `jq`; the local `jq` is an unusable npm shim). If a write is interrupted (e.g. by compaction) and the state file is unreadable, re-derive state from the last commit + current branch + the spec/plan rather than trusting a partial file. Shape:
 
 ```json
 {
@@ -87,6 +87,11 @@ Action:
 ```bash
 git checkout main && git pull --ff-only
 git checkout -b feat/<slug>
+# Per-run scratch state files must never be tracked (else they cause merge
+# conflicts on shared repos and can leak blocker text). Ensure both are ignored:
+grep -qxF '.claude-ship-state.json' .gitignore 2>/dev/null || echo '.claude-ship-state.json' >> .gitignore
+grep -qxF '.claude-pr-fix-state.json' .gitignore 2>/dev/null || echo '.claude-pr-fix-state.json' >> .gitignore
+git add .gitignore && git commit -m "chore: ignore ship/fix-pr-reviews state files"
 ```
 Then write the initial state file (`phase:"spec-review"`, `branch`, `spec`,
 `topic`, `focus_next`). **Rollback:** if the state-file write fails after the
@@ -131,7 +136,9 @@ branch added or changed —
 ```bash
 git diff --name-only $(git merge-base main HEAD)..HEAD -- '*.test.*' '*.spec.*'
 ```
-write that list into state `test_paths`, then gate on exactly those:
+(Git pathspec wildcards match across `/` — unlike shell globs — so these patterns
+DO catch nested files like `src/**/foo.test.ts`; verified against this repo.)
+Write that list into state `test_paths`, then gate on exactly those:
 ```bash
 npx vitest run <the test_paths list>
 ```

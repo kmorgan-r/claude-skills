@@ -82,8 +82,9 @@ cp -r find-cold-leads ~/.claude/skills/
 
 ### ship
 - **Part of the [superpowers](https://github.com/obra/superpowers) pipeline.** Delegates
-  to other skills (`spec-review`, `writing-plans`, `reviewing-plans`, `fix-pr-reviews`);
-  install those too or the phases that call them stall.
+  to other skills — `reviewing-plans` (P1, P3), `writing-plans` (P2),
+  `subagent-driven-development` (P4), `finishing-a-development-branch` (P5), and
+  `fix-pr-reviews` (P6); install those too or the phases that call them stall.
 - **Run after** `/superpowers:brainstorming` produced a committed spec. Resumes an
   in-progress run from its state file across `/clear` or auto-compact.
 - Invoke `/ship` once; it runs phases P0–P7 hands-off.
