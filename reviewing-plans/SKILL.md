@@ -72,7 +72,7 @@ Before dispatching reviewers, gather context they will need:
 
 1. Parse the plan for **Files to Modify** / **Files to Create** sections (or similar headings).
 2. **Fallback:** If no Files sections found, scan the plan text for file path patterns (`src/`, `supabase/`, `tests/`, etc.) and collect any paths found.
-3. For each "modify" path: read the file (it exists). Collect contents.
+3. For each "modify" path: attempt to read the file. If it does not exist, note the missing file in a warning ("Plan references `<path>` as a modify target but it was not found — plan may be stale") and continue with the available context. Otherwise collect its contents.
 4. For each "create" path: check if the file already exists (plan may be stale). Read the parent directory listing. Read one sibling file if they share a pattern (e.g., another hook or edge function in the same folder).
 5. Read CLAUDE.md (project instructions) — include relevant sections. If CLAUDE.md is very large (500+ lines), extract only sections relevant to the domains detected in Step 1.
 6. Bundle all collected file contents as `codebase_context` for the reviewer prompts.

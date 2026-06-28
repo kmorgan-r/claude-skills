@@ -168,6 +168,7 @@ file, then map (no silent fall-through):
 | max-iterations, issues remain | `## Loop Stopped - Max Iterations Reached` | `status:"blocked"` |
 | all-remaining-issues skipped | `## Loop Complete — Human Review Needed` | `status:"blocked"` |
 | unparseable review / workflow fail | its `URGENT_TOTAL=-1` stop | `status:"blocked"` |
+| unrecognized output | none of the above patterns match | `status:"blocked"`, surface the raw fix-pr-reviews output verbatim in `blockers` |
 
 ### P7 awaiting-merge
 
