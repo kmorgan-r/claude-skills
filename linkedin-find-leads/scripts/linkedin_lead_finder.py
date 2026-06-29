@@ -339,10 +339,15 @@ def enrich(survivors, client, checkpoint_path, *, cap=120, floor=5, now_fn=time.
         else:
             out.append({**s, "enriched": False, "enrich_error": err or "unknown"})
         # Hard stops, BOTH post-call (never a pre-call block, so no deadlock):
+        stop_reason = None
         if remaining is not None and remaining <= floor:
-            break                     # authoritative live floor (the common case)
-        if count >= cap:
-            break                     # hard ceiling — bounds the uncapped source modes
+            stop_reason = "skipped: daily enrich quota floor reached"
+        elif count >= cap:
+            stop_reason = "skipped: daily enrich cap reached"
+        if stop_reason:
+            rest = [{**r, "enriched": False, "enrich_error": stop_reason}
+                    for r in survivors[i + 1:]]
+            return out + rest, state
     return out, state
 
 
@@ -583,6 +588,7 @@ def run(args, client=None):
     reject_rows = [{"slug": r.get("slug", ""),   # use the dedup-time slug, not a recompute
                     "profileUrl": r.get("profileUrl", ""),
                     "first_name": r.get("firstName", ""),
+                    "last_name": r.get("lastName", ""),
                     "x_headline": r.get("headline", ""),
                     "cheap_score": r.get("cheap_score", 0),
                     "reject_reason": "below ICP threshold"} for r in rejected]

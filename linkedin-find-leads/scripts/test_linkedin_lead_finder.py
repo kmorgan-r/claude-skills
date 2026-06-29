@@ -339,10 +339,8 @@ def test_enrich_non_dict_profile_does_not_abort_batch(tmp_path):
     # caught as a parse error, not crash the batch.
     ckpt = str(tmp_path / "c.json")
     survivors = [{"slug": "a"}, {"slug": "b"}]
-    client = FakeClient([("ok-raw", 123), ("ok", {"currentCompany": "X"})],
+    client = FakeClient([("ok", 123), ("ok", {"currentCompany": "X"})],
                         remaining=[50, 50])
-    # 'ok-raw' returns {"profile": 123}
-    client._script[0] = ("ok", 123)               # profile payload is an int
     out, state = m.enrich(survivors, client, ckpt, now_fn=lambda: 0.0)
     assert client.calls == ["a", "b"]
     assert "b" in state["done"]                   # batch continued past the bad row
@@ -354,6 +352,7 @@ def test_enrich_live_floor_hard_stops(tmp_path):
     client = FakeClient([("ok", {"currentCompany": "X"})], remaining=[5])
     out, state = m.enrich(survivors, client, ckpt, floor=5, now_fn=lambda: 0.0)
     assert client.calls == ["a"]                  # floor hit after first call
+    assert any(r["slug"] == "b" and not r["enriched"] and r.get("enrich_error") for r in out)
 
 
 def test_enrich_no_deadlock_with_future_reset_at_cap(tmp_path):
@@ -378,6 +377,7 @@ def test_enrich_missing_header_falls_back_to_cap(tmp_path):
         remaining=[None, None])
     out, state = m.enrich(survivors, client, ckpt, cap=2, floor=5, now_fn=lambda: 0.0)
     assert client.calls == ["a", "b"]             # stopped at cap=2, no infinite run
+    assert any(r["slug"] == "c" and not r["enriched"] and r.get("enrich_error") for r in out)
 
 
 # ---------------------------------------------------------------------------
