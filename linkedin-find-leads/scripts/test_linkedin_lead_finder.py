@@ -597,6 +597,16 @@ def test_run_schema_manifest_fails_fast(tmp_path):
         m.run(args, client=SourceClientForRun())
 
 
+def test_run_schema_manifest_missing_path_raises(tmp_path):
+    # --schema-manifest given but the file doesn't exist -> error, NOT a silent skip
+    args = m.parse_args(["--mode", "people", "--keywords", "x", "--out",
+                         str(tmp_path / "o.xlsx"),
+                         "--schema-manifest", str(tmp_path / "nope.json"),
+                         "--checkpoint", str(tmp_path / "c.json")])
+    with pytest.raises(RuntimeError, match="does not exist"):
+        m.run(args, client=SourceClientForRun())
+
+
 def test_save_checkpoint_creates_missing_dirs(tmp_path):
     path = str(tmp_path / "nested" / "deep" / "c.json")
     state = {"done": {"x", "y"}, "count": 5, "reset": "9999"}

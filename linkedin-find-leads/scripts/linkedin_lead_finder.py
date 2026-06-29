@@ -550,7 +550,12 @@ def _read_exclude_file(path):
 def run(args, client=None):
     client = client or get_client()
     # Fail fast on a schema drift BEFORE sourcing or spending any enrich budget.
-    if getattr(args, "schema_manifest", None) and os.path.exists(args.schema_manifest):
+    # If --schema-manifest is given, the file MUST exist — a missing path is an error,
+    # not a silent skip (a silent skip would bypass validation contrary to SKILL.md).
+    if getattr(args, "schema_manifest", None):
+        if not os.path.exists(args.schema_manifest):
+            raise RuntimeError(
+                f"--schema-manifest path does not exist: {args.schema_manifest!r}")
         with open(args.schema_manifest, encoding="utf-8") as f:
             verify_schema(set(json.load(f)))
     raw_urls = _read_exclude_file(args.exclude_file)
