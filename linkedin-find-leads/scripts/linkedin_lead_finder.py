@@ -335,7 +335,8 @@ def enrich(survivors, client, checkpoint_path, *, cap=120, floor=5, now_fn=time.
             out.append({**s, **profile, "enriched": True})
             state["done"].add(slug)
             state["count"] = count
-            state["reset"] = getattr(client.last_rate, "reset", state["reset"])
+            state["reset"] = getattr(getattr(client, "last_rate", None),
+                                     "reset", state["reset"])
             save_checkpoint(checkpoint_path, state)
         else:
             out.append({**s, "enriched": False, "enrich_error": err or "unknown"})
