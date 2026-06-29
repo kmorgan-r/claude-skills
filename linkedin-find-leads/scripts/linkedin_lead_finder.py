@@ -231,6 +231,7 @@ def load_checkpoint(path):
 
 
 def save_checkpoint(path, state):
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     tmp = path + ".tmp"
     payload = {
         "done": sorted(state.get("done", [])),
@@ -598,6 +599,7 @@ def run(args, client=None):
                   "excluded_existing": len(excl_slugs),
                   "sourced": len(people), "after_dedup": len(survivors),
                   "enriched": sum(1 for p in enriched if p.get("enriched"))}
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     write_workbook(args.out, leads, reject_rows, run_config)
     print(f"wrote {len(leads)} leads to {args.out}")
     return args.out

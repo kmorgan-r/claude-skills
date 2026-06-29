@@ -595,3 +595,38 @@ def test_run_schema_manifest_fails_fast(tmp_path):
                          "--checkpoint", str(tmp_path / "c.json")])
     with pytest.raises(RuntimeError, match="x_summary"):
         m.run(args, client=SourceClientForRun())
+
+
+def test_save_checkpoint_creates_missing_dirs(tmp_path):
+    path = str(tmp_path / "nested" / "deep" / "c.json")
+    state = {"done": {"x", "y"}, "count": 5, "reset": "9999"}
+    # parent dirs do not exist yet — must not raise
+    m.save_checkpoint(path, state)
+    loaded = m.load_checkpoint(path)
+    assert loaded["done"] == {"x", "y"}
+    assert loaded["count"] == 5
+    assert loaded["reset"] == "9999"
+
+
+def test_run_creates_missing_out_dir(tmp_path):
+    out = str(tmp_path / "outdir" / "leads.xlsx")
+    exclude = str(tmp_path / "exclude.txt")
+    with open(exclude, "w", encoding="utf-8") as f:
+        f.write("https://www.linkedin.com/in/already-have\n")
+    args = m.parse_args(["--mode", "people", "--keywords", "sustainability",
+                         "--exclude-file", exclude, "--out", out,
+                         "--checkpoint", str(tmp_path / "c.json"),
+                         "--keyword-score", "sustainability"])
+    client = SourceClientForRun()
+    path = m.run(args, client=client)
+    assert os.path.exists(path)
+    import openpyxl
+    wb = openpyxl.load_workbook(path)
+    assert "Leads" in wb.sheetnames
+    ws = wb["Leads"]
+    header = [c.value for c in ws[1]]
+    rows = [{header[i]: c.value for i, c in enumerate(r)} for r in ws.iter_rows(min_row=2)]
+    assert len(rows) == 1
+    assert rows[0]["slug"] == "fresh-person"
+    assert rows[0]["company_name"] == "Acme"
+    assert str(rows[0]["enriched"]) in ("True", "1")
