@@ -111,7 +111,13 @@ DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 
 git checkout "$DEFAULT_BRANCH" && git pull --ff-only
 git checkout -b feat/<slug>
 # Per-run scratch state files must never be tracked (else they cause merge
-# conflicts on shared repos and can leak blocker text). Ensure both are ignored:
+# conflicts on shared repos and can leak blocker text). Ensure both are ignored.
+# First guarantee .gitignore ends in a newline: `echo x >> file` on a file whose
+# last line lacks a trailing \n glues the entry onto it (-> `dist.claude-ship-state.json`),
+# corrupting the prior entry AND silently failing to ignore the state file. The
+# tail-byte test appends a newline ONLY when one is missing (no stray blank line
+# on the common case where .gitignore already ends in \n):
+[ -f .gitignore ] && [ -n "$(tail -c1 .gitignore 2>/dev/null)" ] && printf '\n' >> .gitignore
 grep -qxF '.claude-ship-state.json' .gitignore 2>/dev/null || echo '.claude-ship-state.json' >> .gitignore
 grep -qxF '.claude-pr-fix-state.json' .gitignore 2>/dev/null || echo '.claude-pr-fix-state.json' >> .gitignore
 git add .gitignore
@@ -185,13 +191,22 @@ state on resume; do NOT hardcode `main`. Git pathspec wildcards match across `/`
 `src/**/foo.test.ts`; verified against this repo.)
 Write that list into state `test_paths`, then gate on exactly those:
 ```bash
-# Use vitest only if the repo actually has it (mirror the lint/check:types
-# guard). Otherwise run the repo's own `test` script scoped to test_paths; if
-# neither exists, skip the test step and note it in `phase_log`.
-if [ "$(npm pkg get devDependencies.vitest)" != "{}" ] || [ "$(npm pkg get dependencies.vitest)" != "{}" ]; then
-  npx vitest run <the test_paths list>
-elif [ "$(npm pkg get scripts.test)" != "{}" ]; then
-  npm run test -- <the test_paths list>   # repo's own runner (jest/mocha/etc.)
+# GUARD: only run a test command when test_paths is NON-EMPTY. A bare
+# `vitest run` / `npm test` (empty arg list) runs the repo's FULL suite — the
+# pre-existing-failure trap this gate exists to avoid. An empty test_paths is a
+# legitimate case (docs/config-only change): skip the test step, gate = lint +
+# check:types only. This guard MUST wrap the runner so a top-to-bottom executor
+# never fires a bare run before reaching the empty-test_paths prose constraint
+# below.
+if [ -n "<the test_paths list>" ]; then
+  # Use vitest only if the repo actually has it (mirror the lint/check:types
+  # guard). Otherwise run the repo's own `test` script scoped to test_paths; if
+  # neither exists, skip the test step and note it in `phase_log`.
+  if [ "$(npm pkg get devDependencies.vitest)" != "{}" ] || [ "$(npm pkg get dependencies.vitest)" != "{}" ]; then
+    npx vitest run <the test_paths list>
+  elif [ "$(npm pkg get scripts.test)" != "{}" ]; then
+    npm run test -- <the test_paths list>   # repo's own runner (jest/mocha/etc.)
+  fi
 fi
 ```
 If `test_paths` is empty (the change added no tests), the gate is lint +
