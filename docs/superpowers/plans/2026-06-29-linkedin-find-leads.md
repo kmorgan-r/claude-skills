@@ -408,6 +408,10 @@ def test_cheap_score_word_boundary_no_substring_false_positives():
     # "ai" must NOT match "Trainee"; "art" must NOT match "Smart"/"Stuttgart"
     assert m.cheap_score(p, ["ai", "art"]) == 0
 
+def test_cheap_score_blank_keyword_matches_nothing():
+    # an empty/whitespace keyword must NOT pass every lead (would be r"\b\b")
+    assert m.cheap_score({"headline": "Software Engineer"}, ["", "  "]) == 0
+
 def test_score_and_partition_threshold_zero_floored_to_one():
     people = [{"headline": "Software Engineer"}]   # score 0 vs "sustainability"
     survivors, rejected = m.score_and_partition(people, ["sustainability"], threshold=0)
@@ -442,8 +446,10 @@ def cheap_score(person, keywords):
         person.get("location", "") or "",
     ]
     hay = " ".join(parts).lower()
-    return sum(1 for kw in keywords
-               if re.search(r"\b" + re.escape(kw.lower()) + r"\b", hay))
+    # Drop blank/whitespace keywords: an empty keyword compiles to r"\b\b", which
+    # matches any haystack and would pass EVERY lead through the ICP filter.
+    kws = [k for k in (kw.strip().lower() for kw in keywords) if k]
+    return sum(1 for kw in kws if re.search(r"\b" + re.escape(kw) + r"\b", hay))
 
 
 def score_and_partition(people, keywords, threshold):
@@ -694,8 +700,10 @@ def test_enrich_only_survivors_and_resumes_skipping_done(tmp_path):
     client = FakeClient([("ok", {"currentCompany": "X"})], remaining=[50])
     out, state = m.enrich(survivors, client, ckpt, cap=120, floor=5,
                           now_fn=lambda: 0.0)
-    assert client.calls == ["b"]                  # 'a' already done, skipped
-    assert {s["slug"] for s in out if s.get("enriched")} == {"b"}
+    assert client.calls == ["b"]                  # 'a' already done, skipped (no call)
+    # 'a' is flagged enriched (resumed from a prior run) AND 'b' is freshly enriched
+    assert {s["slug"] for s in out if s.get("enriched")} == {"a", "b"}
+    assert next(s for s in out if s["slug"] == "a")["resumed"] is True
     assert "b" in state["done"]
 
 def test_enrich_cap_429_stops_day(tmp_path):
@@ -818,22 +826,30 @@ def enrich(survivors, client, checkpoint_path, *, cap=120, floor=5, now_fn=time.
     for i, s in enumerate(survivors):
         slug = s["slug"]
         if slug in state["done"]:
-            out.append({**s, "enriched": True})
+            # already enriched on a PRIOR run — the extracted fields are NOT in this
+            # workbook (the checkpoint stores only slugs). Mark it resumed so run()
+            # forces odoo_ready=no; a human must never create a blank mailing.contact
+            # from a field-empty resumed row.
+            out.append({**s, "enriched": True, "resumed": True,
+                        "enrich_error": "enriched on a prior run — fields not in this workbook"})
             continue
         if s.get("secondary"):        # malformed-URL dup key — not a real profile slug
             out.append({**s, "enriched": False, "enrich_error": "no valid profile slug"})
             continue
         profile, err = None, None
         for attempt in (1, 2):
+            spent = False             # did this attempt's call reach a 2xx?
             try:
                 resp = client.get_profile(profile_id=slug)
-                count += 1            # every issued call spends quota
+                spent = True
+                count += 1            # a 2xx call spends exactly one quota unit
                 profile = extract_profile_fields((resp or {}).get("profile") or {})
                 break
             except _PARSE_ERRORS as e:
-                count += 1            # the call still went out
+                if not spent:         # parse failure inside get_profile's own json()
+                    count += 1
                 err = f"parse error: {e}"
-                break                 # deterministic — no retry
+                break                 # deterministic — no retry, no double-count
             except Exception as e:    # API error (e.g. ConnectSafelyError)
                 count += 1
                 if _is_cap(str(e)):
@@ -841,7 +857,9 @@ def enrich(survivors, client, checkpoint_path, *, cap=120, floor=5, now_fn=time.
                     state["reset"] = getattr(getattr(client, "last_rate", None),
                                              "reset", state["reset"])
                     save_checkpoint(checkpoint_path, state)
-                    rest = [{**r, "enriched": False} for r in survivors[i:]]
+                    rest = [{**r, "enriched": False,
+                             "enrich_error": "skipped: daily enrich cap reached"}
+                            for r in survivors[i:]]
                     rest[0]["enrich_error"] = f"cap reached: {e}"
                     return out + rest, state
                 err = f"api error: {e}"
@@ -856,11 +874,11 @@ def enrich(survivors, client, checkpoint_path, *, cap=120, floor=5, now_fn=time.
             save_checkpoint(checkpoint_path, state)
         else:
             out.append({**s, "enriched": False, "enrich_error": err or "unknown"})
-        # Hard stops, both AFTER at least one call this slug (never a pre-call block):
+        # Hard stops, BOTH post-call (never a pre-call block, so no deadlock):
         if remaining is not None and remaining <= floor:
-            break                     # authoritative live floor
-        if remaining is None and count >= cap:
-            break                     # fallback when the header is unavailable
+            break                     # authoritative live floor (the common case)
+        if count >= cap:
+            break                     # hard ceiling — bounds the uncapped source modes
     return out, state
 ```
 
@@ -1293,16 +1311,21 @@ def resolve_company_id(client, keywords):
     return str(cid)
 
 
+MAX_SOURCE_RESULTS = 200  # bound every mode so a huge org/group/event can't blow the
+                          # enrich budget in one run (the live floor may never descend
+                          # to `floor` within an oversized survivor list).
+
+
 def source_org_followers(client, company_id):
-    return ((client.org_followers(company_id) or {}).get("followers")) or []
+    return (((client.org_followers(company_id) or {}).get("followers")) or [])[:MAX_SOURCE_RESULTS]
 
 
 def source_group(client, group_id):
-    return ((client.group_members(group_id=group_id) or {}).get("members")) or []
+    return (((client.group_members(group_id=group_id) or {}).get("members")) or [])[:MAX_SOURCE_RESULTS]
 
 
 def source_event(client, event_id):
-    return ((client.event_attendees(event_id) or {}).get("attendees")) or []
+    return (((client.event_attendees(event_id) or {}).get("attendees")) or [])[:MAX_SOURCE_RESULTS]
 
 
 def dispatch_source(mode, client, **kw):
@@ -1375,15 +1398,17 @@ def test_run_end_to_end_dry(tmp_path):
     assert rows[0]["company_name"] == "Acme"     # enrich populated it
     assert str(rows[0]["enriched"]) in ("True", "1")
 
-def test_run_neutralizes_enrich_error_end_to_end(tmp_path):
-    # A real enrich failure carrying a formula-leading API body must land neutralized
-    # on the Leads sheet — closing the loop the workbook unit test only simulates.
+def test_run_neutralizes_malicious_profile_content_end_to_end(tmp_path):
+    # The realistic injection vector: attacker-controlled profile content (currentCompany
+    # / aboutText) that BEGINS with a formula char must land neutralized on the Leads
+    # sheet. (enrich_error carries a human-readable prefix and is inert by construction,
+    # so it's the wrong column to assert on — profile content is the live vector.)
     out = str(tmp_path / "leads.xlsx")
     args = m.parse_args(["--mode", "people", "--keywords", "sustainability",
                          "--out", out, "--checkpoint", str(tmp_path / "c.json"),
                          "--keyword-score", "sustainability"])
 
-    class FailingClient:
+    class MaliciousProfileClient:
         last_rate = _Rate(50)
         def search_people(self, keywords=None, count=25, start=0, **kw):
             if start == 0:
@@ -1392,14 +1417,16 @@ def test_run_neutralizes_enrich_error_end_to_end(tmp_path):
             return {"people": []}
         def get_profile(self, profile_id=None, **kw):
             self.last_rate = _Rate(50)
-            raise ApiError("POST /profile -> 500: =cmd|'/c calc'!A1")
+            return {"profile": {"currentCompany": "=cmd|'/c calc'!A1",
+                                "aboutText": "@SUM(1)"}}
 
-    m.run(args, client=FailingClient())
+    m.run(args, client=MaliciousProfileClient())
     import openpyxl
     ws = openpyxl.load_workbook(out)["Leads"]
     header = [c.value for c in ws[1]]
-    col = header.index("enrich_error")
-    assert ws.cell(row=2, column=col + 1).value.startswith("'=")  # neutralized
+    crow = [c.value for c in ws[2]]
+    assert crow[header.index("company_name")] == "'=cmd|'/c calc'!A1"   # neutralized
+    assert crow[header.index("x_summary")] == "'@SUM(1)"                 # neutralized
 
 def test_run_schema_manifest_fails_fast(tmp_path):
     import json as _json
@@ -1511,7 +1538,9 @@ def run(args, client=None):
             # neutralizes every cell, so this is the end-to-end injection-safe path.
             "enrich_error": p.get("enrich_error", ""),
             "x_lead_status": "New",
-            "odoo_ready": "no" if not p.get("enriched") else "",
+            # not-enriched OR resumed-from-a-prior-run (field-blank here) -> never ready,
+            # so a human cannot create a blank/incomplete mailing.contact from this run.
+            "odoo_ready": "no" if (not p.get("enriched") or p.get("resumed")) else "",
         })
     reject_rows = [{"slug": r.get("slug", ""),   # use the dedup-time slug, not a recompute
                     "profileUrl": r.get("profileUrl", ""),
@@ -1628,3 +1657,5 @@ git commit -m "feat(linkedin-find-leads): SKILL.md, field-map reference, gitigno
 Note on `build_payload`/`verify_schema` (T9): `verify_schema` is wired into `run()` via `--schema-manifest` (fail-fast before any spend) and tested end-to-end (T12 `test_run_schema_manifest_fails_fast`). `build_payload` is the agent-mirrored reference for the MCP-create payload (T13 step 8 imports or mirrors it); the script's `run()` deliberately does NOT call it because the workbook — not a `create` — is the script→agent handoff. The actual `create` is agent/MCP (gated, idempotent) and correctly out of pytest scope.
 
 Pass-2 (P3 plan-review) fixes folded in: hermetic `conftest.py` (no `connectsafely`/network/key dependency); `enrich` no longer imports `connectsafely` (classifies by exception type + message), removing the import-time `sys.exit` from tests AND the cross-repo dependency; the pre-call `count >= cap` deadlock removed (live floor sole hard stop, local cap a post-call fallback for a missing header); `_PARSE_ERRORS` includes `AttributeError` (non-dict profile no longer aborts the batch); enrich-failure API text captured to `enrich_error` and neutralized end-to-end on the Leads sheet; `cheap_score`/`derive_seniority` switched to word-boundary matching; `score_and_partition` threshold floored at 1 (code/prose agree); `resolve_company_id` fails loud on a missing id + CONFIRM-AT-IMPLEMENTATION notes for the unverified `search_companies`/`last_rate` shapes; `sys.modules` restored after the import-safety test; e2e test strengthened to assert dedup + enrich outcomes. New tests: parse-no-retry, non-dict-profile-no-abort, no-deadlock-future-reset, missing-header-cap-fallback, word-boundary score/seniority, threshold-zero, event positive key, schema fail-fast, end-to-end neutralization.
+
+P3 re-review (pass-2) fixes folded in: resumed-`done` rows flagged `resumed=True` + forced `odoo_ready=no` (never create a blank `mailing.contact` from a field-empty resumed row); enrich counts each issued call exactly once (a `spent` flag prevents the parse-at-extract double-increment); the cap-reached remainder rows all carry an `enrich_error` reason; the local `count >= cap` is now an unconditional post-call ceiling (bounds the uncapped `org-followers`/`group`/`event` modes), and those sources are sliced to `MAX_SOURCE_RESULTS=200`; `cheap_score` drops blank/whitespace keywords (an empty keyword would compile to `\b\b` and pass every lead); the end-to-end neutralization test was retargeted from the (inert, prefixed) `enrich_error` cell to attacker-controlled profile content (`currentCompany`/`aboutText`) — the realistic injection vector; `test_enrich_only_survivors` assertion corrected to `{"a","b"}` (a resumed row is enriched-flagged). New tests: blank-keyword-matches-nothing, malicious-profile-content neutralization.
