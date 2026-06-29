@@ -161,10 +161,11 @@ After all reviewers return:
 5. **Present** the summary to the user:
 
 ```
+REVIEWERS: {X}/{N} succeeded{ (failed: …) when X < N}
+
 ## Plan Review Summary: `{plan_filename}`
 
 **Reviewers dispatched**: {list}
-**Reviewer coverage**: {X}/{N} succeeded{, failed: … when X < N}
 **Findings**: {critical_count} Critical, {important_count} Important, {minor_count} Minor
 
 ### Critical
