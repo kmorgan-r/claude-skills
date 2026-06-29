@@ -132,10 +132,16 @@ at the design doc (`spec`) — invoke reviewing-plans auto mode via args
 summary (see the reviewing-plans auto contract). After it returns, run it once
 more in `auto` mode (re-review). If any **unresolved CRITICAL** finding remains
 after auto-apply → set `status:"blocked"`, append it to `blockers`, stop.
-Also block if reviewing-plans returns a **total reviewer failure** (a
-`REVIEW FAILED` summary / zero reviewers succeeded) — a zero-findings result
-from total failure is NOT a clean review. Otherwise update state
-(`phase:"writing-plans"`) and advance.
+Also block on reviewer-coverage failure, read from the `REVIEWERS: X/N succeeded
+(failed: …)` line reviewing-plans emits in its auto summary:
+- **Total failure** (`REVIEW FAILED` / `0/N`) — a zero-findings result from total
+  failure is NOT a clean review.
+- **Partial failure that guts coverage** — block if fewer than 2 reviewers
+  succeeded, OR fewer than half of those dispatched succeeded, OR either always-on
+  reviewer (General Quality / Test Quality) is in the failed list. A hands-off
+  conductor cannot judge which silently-failed domain mattered, so an
+  under-covered review is treated as no review, not a clean one.
+Otherwise update state (`phase:"writing-plans"`) and advance.
 
 ### P2 writing-plans
 
@@ -149,8 +155,10 @@ via the Skill tool; ignore any auto-chain into execution. Record the plan path i
 
 Invoke `reviewing-plans` via the Skill tool in auto mode via `auto <plan-path>` arguments.
 Re-review once in auto mode. Unresolved CRITICAL after auto-apply →
-`status:"blocked"` + stop. A total reviewer failure (`REVIEW FAILED` / zero
-reviewers succeeded) → `status:"blocked"` + stop. Otherwise advance to P4.
+`status:"blocked"` + stop. Apply the **same reviewer-coverage gate as P1** (read
+`REVIEWERS: X/N succeeded`): block on total failure, on fewer than 2 succeeding,
+on fewer than half of those dispatched succeeding, or on either always-on reviewer
+failing. Otherwise advance to P4.
 
 ### P4 implementation
 
@@ -190,6 +198,16 @@ If `test_paths` is empty (the change added no tests), the gate is lint +
 check:types only — **never** fall back to a full `npm test`/`vitest run` (a
 repo's pre-existing failures would block every pipeline). On resume, read
 `test_paths` from state rather than re-deriving it.
+
+**Zero-verification guard:** every check here is conditional, so on a repo that
+defines no `lint` and no `check:types` script AND a change that added no tests,
+the gate would run *nothing* and silently advance — an unverified P4 must never
+look identical to a passing one. If all three are absent (nothing actually ran),
+do NOT advance: append a `phase_log` note (`P4 ran no checks — repo defines no
+lint/check:types/test scripts and the change added no tests`), set
+`status:"blocked"` with blocker `P4 could not verify the implementation; confirm
+the change is sound, then re-invoke /ship to advance`, and stop. The human ack is
+the verification of last resort.
 Any failure → `status:"blocked"`, write the failing output summary to `blockers`,
 stop. **P4-blocked resume:** re-invoking `/ship` resumes the failed task inside
 `subagent-driven-development` (it tracks task-level progress) — do not restart the
@@ -218,15 +236,34 @@ current PR: `gh pr list --head "$(git branch --show-current)" --json number --jq
   restarted at 1).
 
 Determine the outcome by reading fix-pr-reviews' final output block AND its state
-file, then map (no silent fall-through):
+file. **Match on the distinctive phrase, not the exact line** — fix-pr-reviews'
+headings are natural-language and may drift (a dropped `!`, reworded tail, extra
+whitespace, em-dash↔hyphen). Test each row's phrase as a case-insensitive
+substring of the final `## Loop ...` heading; the column below gives the phrase to
+look for, NOT a string to match byte-for-byte. Map (no silent fall-through):
 
-| fix-pr-reviews outcome | how to detect | ship outcome |
-|------------------------|---------------|--------------|
-| all-clear | `## Loop Complete - All Clear!` OR `## Loop Complete - No Urgent Issues` | advance to **P7** |
-| max-iterations, issues remain | `## Loop Stopped - Max Iterations Reached` | `status:"blocked"` |
-| all-remaining-issues skipped | `## Loop Complete — Human Review Needed` (em-dash, U+2014, is what fix-pr-reviews emits; also accept a plain-hyphen `## Loop Complete - Human Review Needed` in case it drifts) | `status:"blocked"` |
-| unparseable review / workflow fail | its `URGENT_TOTAL=-1` stop | `status:"blocked"` |
-| unrecognized output | none of the above patterns match | `status:"blocked"`, surface the raw fix-pr-reviews output verbatim in `blockers` |
+| fix-pr-reviews outcome | detect (case-insensitive substring of the final heading) | ship outcome |
+|------------------------|----------------------------------------------------------|--------------|
+| all-clear | `Loop Complete` AND (`All Clear` OR `No Urgent Issues`) | advance to **P7** |
+| max-iterations, issues remain | `Max Iterations Reached` | `status:"blocked"` |
+| all-remaining-issues skipped | `Human Review Needed` (dash variant irrelevant) | `status:"blocked"` |
+| unparseable review / workflow fail | the `URGENT_TOTAL=-1` stop (detect per below) | `status:"blocked"` |
+| unrecognized output | none of the above phrases present | `status:"blocked"`, surface the raw fix-pr-reviews output verbatim in `blockers` |
+
+The `URGENT_TOTAL=-1` case is **not a state-file field** — fix-pr-reviews does
+not persist that sentinel (its regression step explicitly skips updating
+`previous_urgent_count` on a `-1`). Detect it instead by fix-pr-reviews' own stop
+block: it prints `Cannot determine issue count` (or an empty-review /
+workflow-`failure`/`cancelled` message) and exits WITHOUT any all-clear heading.
+Corroborate with its state file's `previous_urgent_count`: a recorded `0`
+alongside an all-clear phrase confirms clean; a non-zero count with no terminal
+heading means it stopped mid-flight → blocked.
+
+Blocking on unrecognized output is deliberate — a hands-off conductor must NOT
+advance to merge-ready on a signal it can't read. It stays recoverable: the human
+reads the surfaced output and clears the blocker. This table is the coupling
+point between the two skills; if fix-pr-reviews' headings are ever intentionally
+reworded, update the phrases here.
 
 ### P7 awaiting-merge
 

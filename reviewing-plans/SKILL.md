@@ -17,7 +17,7 @@ This skill reviews an implementation plan before execution. It dispatches 2-5 do
 
 If invoked with an `auto` (or `--auto-apply`) argument, run NON-INTERACTIVELY:
 - **Step 4:** Do NOT wait for user input. Treat the selection as **"all"** — apply every finding (Critical, Important, AND Minor).
-- **Step 6:** Do NOT offer an execution hand-off or ask a question. After committing the fixes, return a one-paragraph summary (counts by severity + that all were applied) and stop.
+- **Step 6:** Do NOT offer an execution hand-off or ask a question. After committing the fixes, return a one-paragraph summary (counts by severity + that all were applied) and stop. The summary MUST open with the structured `REVIEWERS: X/N succeeded` line from Step 4 (append `(failed: …)` names when X < N) so a conductor can gate on review *coverage*, not just on findings — a partial reviewer failure must be machine-detectable, not absorbed silently into the findings.
 - All other steps (reviewer selection, pre-read, dispatch, consolidate, apply, commit) run as normal.
 This mode exists so a conductor skill (e.g. /ship) can run reviewing-plans hands-off. When the argument is absent, behavior is unchanged.
 
@@ -134,7 +134,23 @@ For each finding:
 
 After all reviewers return:
 
-1. **Reviewer failure?** If *some* (but not all) reviewer agents timed out or returned an error, note the failure and proceed with the available findings, mentioning the failed reviewer(s) in the summary. **If ALL reviewers failed (zero successful responses), do NOT proceed** — there is no review signal, and a 0/0/0 summary here means "review did not run," not "plan is clean." In interactive mode, report the total reviewer failure and stop. In `auto` mode, return a summary explicitly marked `REVIEW FAILED — 0 of {N} reviewers succeeded` (never a clean/no-findings summary) so the calling conductor treats it as a blocker rather than as zero findings.
+1. **Reviewer failure?** Always emit a structured coverage line —
+   `REVIEWERS: X/N succeeded` — as the FIRST line of the summary in EVERY case
+   (full success, partial failure, total failure): N = reviewers dispatched, X =
+   reviewers that returned usable output; on any failure append
+   `(failed: <reviewer names>)`. This is the machine-readable signal a conductor
+   (e.g. /ship) gates on — **partial failure must not be silently absorbed into the
+   findings.** Then:
+   - *Some but not all* reviewers failed → note it, list the failed names on the
+     `REVIEWERS:` line, and proceed with the available findings. The summary still
+     reports findings, but the `X/N` line tells the caller coverage was degraded —
+     4 of 5 domain reviewers timing out is NOT the same as a clean review, and a
+     hands-off conductor needs that distinction to block.
+   - *ALL* reviewers failed (zero usable responses) → **do NOT proceed.** A 0/0/0
+     findings summary here means "review did not run," not "plan is clean." In
+     interactive mode, report the total failure and stop. In `auto` mode, return a
+     summary marked `REVIEW FAILED — REVIEWERS: 0/{N} succeeded` (never a
+     clean/no-findings summary) so the conductor treats it as a blocker.
 2. **Zero findings?** If all reviewers returned "No findings," skip the summary. Say: "All {N} reviewers found no issues. Plan is ready for execution." Proceed directly to Step 6.
 3. **Deduplicate**: If two reviewers flag the same issue (same task + same root cause), keep the one with higher severity and more specific fix.
 4. **Sort**: CRITICAL first, then IMPORTANT, then MINOR.
@@ -144,6 +160,7 @@ After all reviewers return:
 ## Plan Review Summary: `{plan_filename}`
 
 **Reviewers dispatched**: {list}
+**Reviewer coverage**: {X}/{N} succeeded{, failed: … when X < N}
 **Findings**: {critical_count} Critical, {important_count} Important, {minor_count} Minor
 
 ### Critical
