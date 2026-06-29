@@ -151,7 +151,11 @@ After all reviewers return:
      interactive mode, report the total failure and stop. In `auto` mode, return a
      summary marked `REVIEW FAILED — REVIEWERS: 0/{N} succeeded` (never a
      clean/no-findings summary) so the conductor treats it as a blocker.
-2. **Zero findings?** If all reviewers returned "No findings," skip the summary. Say: "All {N} reviewers found no issues. Plan is ready for execution." Proceed directly to Step 6.
+2. **Zero findings?** If all reviewers returned "No findings," still emit the
+   `REVIEWERS: {X}/{N} succeeded` line FIRST (consistent with Point 1 and the
+   Step 6 invariant — the clean happy path is exactly when a conductor needs to
+   confirm coverage was full, not absent), then say: "All {N} reviewers found no
+   issues. Plan is ready for execution." Proceed directly to Step 6.
 3. **Deduplicate**: If two reviewers flag the same issue (same task + same root cause), keep the one with higher severity and more specific fix.
 4. **Sort**: CRITICAL first, then IMPORTANT, then MINOR.
 5. **Present** the summary to the user:
