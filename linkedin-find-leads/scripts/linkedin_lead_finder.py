@@ -15,7 +15,7 @@ import openpyxl
 
 # connectsafely.py lives in the marketing dir, not this repo.
 MARKETING_DIR = os.environ.get(
-    "MARKETING_DIR", os.path.expanduser(r"~\marketing")
+    "MARKETING_DIR", os.path.expanduser("~/marketing")
 )
 
 _CLIENT = None
