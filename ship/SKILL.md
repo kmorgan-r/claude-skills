@@ -199,14 +199,21 @@ Write that list into state `test_paths`, then gate on exactly those:
 # never fires a bare run before reaching the empty-test_paths prose constraint
 # below.
 if [ -n "<the test_paths list>" ]; then
-  # Use vitest only if the repo actually has it (mirror the lint/check:types
-  # guard). Otherwise run the repo's own `test` script scoped to test_paths; if
-  # neither exists, skip the test step and note it in `phase_log`.
+  # ONLY vitest can be scoped to specific files safely. Do NOT fall back to
+  # `npm run test -- <paths>`: a repo's `test` script often embeds its own glob
+  # (e.g. `"test": "mocha 'test/**/*.spec.js' --reporter spec"`), and appending
+  # paths after `--` does NOT override that glob — it runs the FULL pre-existing
+  # suite ALONGSIDE the new files. Two failure modes, both bad: pre-existing
+  # failures block a correct change, OR (if they happen to pass) the gate records
+  # a FALSE PASS on a change whose own tests were never isolated. So: vitest →
+  # run scoped; no vitest → leave the tests UNVERIFIED and let the
+  # zero-verification guard below surface it for human ack — never a silent skip,
+  # never a risky full-suite run.
   if [ "$(npm pkg get devDependencies.vitest)" != "{}" ] || [ "$(npm pkg get dependencies.vitest)" != "{}" ]; then
     npx vitest run <the test_paths list>
-  elif [ "$(npm pkg get scripts.test)" != "{}" ]; then
-    npm run test -- <the test_paths list>   # repo's own runner (jest/mocha/etc.)
   fi
+  # else (no vitest): tests stay unrun — the zero-verification guard treats a
+  # non-empty test_paths with no scoped runner as a verification gap and blocks.
 fi
 ```
 If `test_paths` is empty (the change added no tests), the gate is lint +
@@ -214,15 +221,24 @@ check:types only — **never** fall back to a full `npm test`/`vitest run` (a
 repo's pre-existing failures would block every pipeline). On resume, read
 `test_paths` from state rather than re-deriving it.
 
-**Zero-verification guard:** every check here is conditional, so on a repo that
-defines no `lint` and no `check:types` script AND a change that added no tests,
-the gate would run *nothing* and silently advance — an unverified P4 must never
-look identical to a passing one. If all three are absent (nothing actually ran),
-do NOT advance: append a `phase_log` note (`P4 ran no checks — repo defines no
-lint/check:types/test scripts and the change added no tests`), set
-`status:"blocked"` with blocker `P4 could not verify the implementation; confirm
-the change is sound, then re-invoke /ship to advance`, and stop. The human ack is
-the verification of last resort.
+**Zero-verification guard:** every check here is conditional, so the gate can run
+*nothing* meaningful — an unverified P4 must never look identical to a passing
+one. TWO cases must block (not silently advance):
+1. **Nothing ran** — the repo defines no `lint` and no `check:types` script AND
+   the change added no tests (`test_paths` empty). `phase_log` note: `P4 ran no
+   checks — repo defines no lint/check:types/test scripts and the change added no
+   tests`.
+2. **Tests exist but could not be scoped** — `test_paths` is NON-EMPTY but the
+   repo has no vitest, so the change's own tests never ran (the `npm run test`
+   fallback is deliberately omitted: it can't override an embedded glob without
+   risking the full pre-existing suite). `phase_log` note: `P4 could not run the
+   change's tests — no vitest to scope them; the repo's own test script can't be
+   safely scoped`. This is the stronger gap — a change that ships tests but never
+   runs them is worse than one with none.
+In either case, do NOT advance: set `status:"blocked"` with blocker `P4 could not
+verify the implementation; run the change's tests manually (or confirm the change
+is sound), then re-invoke /ship to advance`, and stop. The human ack is the
+verification of last resort.
 Any failure → `status:"blocked"`, write the failing output summary to `blockers`,
 stop. **P4-blocked resume:** re-invoking `/ship` resumes the failed task inside
 `subagent-driven-development` (it tracks task-level progress) — do not restart the
