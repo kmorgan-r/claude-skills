@@ -43,7 +43,7 @@ REQUIRED_FIELDS = frozenset({
 
 LEAD_COLUMNS = [
     "slug", "profileUrl", "first_name", "last_name", "x_headline", "x_job_title",
-    "company_name", "x_summary", "x_seniority", "seniority_unset", "x_persona",
+    "company_name", "top_skills", "x_summary", "x_seniority", "seniority_unset", "x_persona",
     "x_need_state", "x_lead_score", "x_outreach_angle", "x_industry",
     "x_department_function", "location", "cheap_score", "enriched", "enrich_error",
     "x_lead_status", "email", "odoo_ready", "created",
@@ -573,6 +573,7 @@ def run(args, client=None):
             "x_headline": p.get("headline", ""),
             "x_job_title": p.get("x_job_title", "") or p.get("currentPosition", ""),
             "company_name": p.get("company_name", ""),
+            "top_skills": p.get("top_skills", ""),
             "x_summary": p.get("x_summary", ""),
             "location": p.get("location", ""),
             "cheap_score": p.get("cheap_score", ""),
