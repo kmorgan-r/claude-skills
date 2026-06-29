@@ -14,3 +14,5 @@ __pycache__/
 # OS / editor
 .DS_Store
 Thumbs.db
+.claude-ship-state.json
+.claude-pr-fix-state.json
