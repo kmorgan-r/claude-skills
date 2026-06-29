@@ -82,12 +82,17 @@ process exit, not a catchable exception. Three consequences the design must hand
    then imports the client through a **lazy accessor** (`get_client()` that constructs/
    caches the client on first call) rather than importing the module-level `cs` at module
    top. This keeps a bare `import linkedin_lead_finder` side-effect-free.
-2. **Pre-flight check.** Before any sourcing or budget spend, the script verifies
-   `CONNECTSAFELY_API_KEY` is present (boolean presence test — never echo the value) and
-   the climatepoint-odoo MCP is reachable, emitting a clear actionable message
-   (`set CONNECTSAFELY_API_KEY`) on failure. This guarantees a missing key fails cleanly
-   up front instead of via a mid-run `sys.exit()` that strands partial state.
-3. **Testability.** Because construction is lazy, `import linkedin_lead_finder` succeeds
+2. **Pre-flight check — eager guarded construction.** Before any sourcing or budget spend,
+   the script verifies `CONNECTSAFELY_API_KEY` is present (boolean presence test — never echo
+   the value) and the climatepoint-odoo MCP is reachable, then **eagerly constructs the client
+   once** via `get_client()` inside a guard that traps the constructor's `SystemExit` and
+   converts it to a clear actionable message (`set CONNECTSAFELY_API_KEY`). Because the client
+   is cached after this single guarded construction, every later `get_client()` call (the first
+   real one is `search_companies` in `--mode org-followers`, before any enrich) returns the
+   cached instance and **never re-enters the constructor** — so a key cleared mid-run cannot
+   trigger an un-guarded `sys.exit()`. A bare presence test alone would leave a TOCTOU window;
+   eager guarded construction is what makes "fails cleanly up front" actually hold.
+3. **Testability.** Because construction is lazy + cached, `import linkedin_lead_finder` succeeds
    with the key unset. Tests stub `get_client()` (or the individual `cs.*` methods) and
    never touch the network. An explicit test asserts the module imports key-unset.
 
@@ -137,6 +142,13 @@ that fails the cheap ICP filter.
   per-page/per-mode enrich that could enrich the same person twice.
 - Defensive parsing: a missing/empty `people` key (or `followers`/`members`/`attendees`)
   is treated as zero results, not a `KeyError`. Null optional fields → blank.
+- **Confirm item field names at implementation.** The `search_people` item keys this design
+  reads (`headline`, `currentPosition`, `firstName`/`lastName`, `profileUrl`, `location`) and
+  the response wrapper keys (`people`/`followers`/`members`/`attendees`) are not all pinned in
+  the client source — confirm them against a live/fixture response (the same discipline as the
+  Odoo `fields_get` re-verify). The cheap ICP scorer must **tolerate a missing title key**
+  (fall back to `headline`) so a renamed/absent `currentPosition` does not silently zero every
+  title-based score and push everything to the enrich fallback.
 
 ### Step 3 — cheap ICP pre-filter
 
@@ -153,19 +165,30 @@ incrementally:
   `experience[0].title` (most-recent role → `x_job_title` fallback), `currentCompany`
   (→ `company_name`), `topSkills[]`, `experience[].companyName`. There is **no** top-level
   `title`, `about`, `industry`, or `department_function` — do not read them.
-- **Cap vs transient discrimination:** inspect the `ConnectSafelyError` (HTTP status /
-  message). On **429 / cap reached** → stop enriching for the day, persist the checkpoint,
-  emit the cap-reached message (below). On **transient 5xx / timeout / malformed JSON** →
-  mark that one slug failed (best-effort, like `linkedin_research.py`), do **not** mark it
-  done, and continue; a single bounded retry with backoff is allowed for transient only,
-  never for the cap.
-- **Live-quota reconciliation (authoritative):** after each call read
-  `cs.last_rate.remaining` and stop when it reaches a safety floor (e.g. ≤5), independent
-  of the local counter. The shared account quota (other tools spend it too) makes the live
-  header ground truth; the local daily counter is a secondary guard.
+- **Failure discrimination — two exception classes.** The wrapper catches **both**
+  `ConnectSafelyError` (fires only on non-2xx) **and** response-parse exceptions
+  (`JSONDecodeError`/`KeyError`/`TypeError` on a 2xx body — a 200-with-garbage response is
+  NOT a `ConnectSafelyError`). On **429 / cap reached** (a `ConnectSafelyError`) → stop
+  enriching for the day, persist the checkpoint, emit the cap-reached message (below). On
+  **transient 5xx / timeout** → mark that one slug failed (best-effort, like
+  `linkedin_research.py`), do **not** mark it done, continue; a single bounded retry with
+  backoff is allowed for transient only, never for the cap. On **malformed/parse failure**
+  (deterministic) → skip-and-continue (not done), **no retry** (a retry just burns another
+  quota unit on the same guaranteed failure). No failure path escapes the per-row `try` — a
+  single bad slug never aborts the batch.
+- **Live-quota reconciliation (sole authoritative hard stop):** after each call read
+  `cs.last_rate.remaining` and stop when it reaches a safety floor (e.g. ≤5). The shared
+  account quota (other tools spend it too) makes this post-call header the **only** hard
+  stop. The local daily counter is **advisory** — it may warn/inform but must **never by
+  itself** produce a no-call state, otherwise the system can deadlock (counter reads "full" →
+  no call made → no fresh `cs.last_rate` → counter never clears). At least one call always
+  proceeds so a fresh header is read and the true window/remaining is reconciled.
 - **"Day" boundary:** the counter resets on the **server** window, not local midnight.
-  Persist `cs.last_rate.reset` in the checkpoint and zero the counter only once that
-  timestamp passes.
+  Persist `cs.last_rate.reset` in the checkpoint and zero the counter once that timestamp
+  passes. On resume: if `now ≥ persisted reset` → zero the counter; **else still permit a
+  probe call** (the live floor read post-call is authoritative) rather than blocking on the
+  stale counter. **Initial state:** absent any persisted `reset` (brand-new run, no call yet)
+  → counter starts at 0 and the first call proceeds; `reset` is established from its header.
 - **Atomic checkpoint:** after **each successful** `get_profile`, append the slug (and last
   seen remaining/reset) to the checkpoint via temp-file write + rename, before moving on.
   The daily counter is derived from the persisted checkpoint, not an in-memory variable, so
@@ -181,8 +204,10 @@ incrementally:
 - Persona/seniority/score come from the reused classifier, validated against the **exact
   key sets** (not labels) at classify time:
   - Invalid/absent **persona** → coerce to `unknown` (a valid key); the row stays.
-  - Unmappable **seniority** → leave `x_seniority` **unset** (omit from create) and flag the
-    row in the Rejected/review annotations; never write an invalid key, never abort the batch.
+  - Unmappable **seniority** → leave `x_seniority` **unset** (omit from create). The row
+    **stays on the Leads sheet** with a review-annotation flag (`seniority_unset=yes`); it is
+    NOT moved to the Rejected sheet (which is reserved strictly for rows excluded from the
+    Odoo create set). Never write an invalid key, never abort the batch.
   - A documented title→seniority derivation maps common titles to the 5 keys; titles that
     map to nothing → unset (above).
 - This catches a bad key at classify time (before the workbook is presented), not as a late
@@ -193,11 +218,22 @@ incrementally:
 - The skill **always** writes the reviewable workbook to `%TEMP%`. After the human marks
   `odoo_ready=yes`, the skill **offers** to `create` the rows via the climatepoint-odoo MCP
   (gated by the MCP's server-generated two-step confirmation code; never fabricated).
-- **Per-row idempotency:** create row-by-row; on each success write the new Odoo record id /
-  `created=yes` back to the workbook row. If call *k* fails (bad confirm code, transient MCP
-  error, a selection key that slipped through), rows 1..k-1 are marked created. A re-run
-  skips rows already marked created (the start-of-run exclude-set will not yet contain
-  this run's inserts) — alternatively re-query Odoo slugs immediately before create.
+- **Per-row idempotency (mandatory pre-create re-query):** immediately before the create
+  loop, **re-query the current Odoo slug set** and skip any survivor already present. This is
+  a **required** step, not an alternative — it is the airtight backstop and also fixes two
+  adjacent problems at once: (a) the start-of-run exclude-set predates this run's own inserts,
+  and (b) on a multi-day capped batch the day-1 exclude-set is stale by day-2 (another tool,
+  `/find-cold-leads`, or a prior partial create may have inserted overlapping contacts). Note:
+  "resume continues without re-running discovery" does NOT waive this create-time re-check.
+  As a secondary aid, create row-by-row and write the new Odoo record id / `created=yes` back
+  to the workbook row on each success (durably — a side-car marker or per-row flush, since the
+  enrich checkpoint's atomic-write guarantee does not extend to the openpyxl workbook); but
+  correctness rests on the mandatory re-query, not on workbook-marker durability.
+- **Completion invariant:** `odoo_ready` MUST NOT be accepted on any survivor still flagged
+  `pending` (un-enriched) — the create step skips pending rows by construction, so a
+  cap-interrupted run can never offer create on half-classified rows. Authoritative artifact
+  per resume phase: the **enrich checkpoint** governs enrich resume; the **create-time
+  re-queried Odoo slug set** governs create resume — the two never disagree.
 - `country_id` resolution is **best-effort**: resolve the free-text `location` to a
   `res.country` id; on no-match, **omit the field** from the create payload (never write
   `false`, never index a `false` m2o). Included in the pre-create validation pass.
@@ -281,12 +317,12 @@ Selection fields must receive a valid key (validated in-script before any MCP `c
 |---|---|---|
 | `search_people` | server-throttled, no profile cap | paginate via `start` until empty/short page; terminate |
 | `org_followers` / `group_members` / `event_attendees` / `search_companies` | server-throttled | **single call each, no pagination param** — take what one response returns |
-| `get_profile` (enrich) | ~120/day, **shared across all tools on the account** | live-quota floor (`cs.last_rate.remaining` ≤ floor → stop) is authoritative; local daily counter is a secondary guard; reset on server `cs.last_rate.reset`, not local midnight; atomic per-profile checkpoint; cap (429) stops the day, transient errors skip-and-continue |
+| `get_profile` (enrich) | ~120/day, **shared across all tools on the account** | live-quota floor (`cs.last_rate.remaining` ≤ floor → stop) is the **sole authoritative hard stop**; the checkpoint-derived local counter is **advisory only** and never by itself blocks a call; reset on server `cs.last_rate.reset`, not local midnight; atomic per-profile checkpoint; cap (429) stops the day, transient errors retry-once-then-skip, parse failures skip (no retry) |
 
-The script maintains a checkpoint-derived daily counter, refuses to exceed either the live
-floor or the local cap, and writes a resume checkpoint (slugs already enriched + last seen
-remaining/reset) so a >120-lead batch spans multiple days without re-spending budget or
-re-running discovery.
+The script maintains a checkpoint-derived **advisory** daily counter and writes a resume
+checkpoint (slugs already enriched + last seen remaining/reset) so a >120-lead batch spans
+multiple days without re-spending budget or re-running discovery. The post-call live floor is
+the only condition that hard-stops the day; the advisory counter must never deadlock the loop.
 
 ## Safety & security
 
@@ -336,15 +372,27 @@ Mirror `find-cold-leads/scripts/test_lead_crawler.py` (pytest, no live API):
   `linkedin.com/company/acme`, and no-`/in/` URLs dropped+logged; query strings stripped;
   trailing locale stripped; **case-fold** so exclude-set and sourced slug compare equal;
   Unicode-slug drop documented.
-- **Dedup:** vs exclude-set (incl. case-mismatch), within-batch collapse across modes/pages,
-  malformed-stored-URL secondary key. Mirror `test_dedupe_skips_linkedin_and_normalizes_domains`.
+- **Dedup:** vs exclude-set (incl. case-mismatch), within-batch collapse across modes/pages.
+  Mirror `test_dedupe_skips_linkedin_and_normalizes_domains`. **Malformed-stored-URL secondary
+  key — assert end-to-end suppression** (not just that a secondary key is computed): seed the
+  exclude-set with a stored URL that fails primary slug validation but resolves under the
+  secondary key, source the same person, and assert that sourced row is **dropped and never
+  reaches the enrich call set**.
+- **Schema fail-fast:** stub `fields_get` to return a field set missing one required write
+  field (e.g. drop `x_seniority`) → assert the script raises a clear error **before** any
+  `create`/enrich spend; companion test where all required fields present → pre-flight passes.
 - **Cheap score:** boundary at/above/below threshold; score-0 → Rejected and excluded from
   enrich set.
 - **Enrich:** (a) ordering — `get_profile` called only for post-dedup, post-filter survivors
-  (count + identity of stubbed calls); (b) resume — pre-seeded checkpoint of N done slugs →
-  only the remainder enriched, total ≤ cap across two runs; (c) cap (429) stops the day and
-  persists checkpoint; (d) transient 5xx skips one slug and continues (not counted done);
-  (e) live floor (`cs.last_rate.remaining` ≤ floor) stops independent of local counter.
+  (count + identity of stubbed calls); (b) resume — counter is **read from the on-disk
+  checkpoint, not an in-memory variable**: a checkpoint whose `reset` has NOT passed keeps the
+  persisted count (cap still enforced on run 2); a checkpoint whose `reset` HAS passed zeros
+  it; an interrupted (temp-file) write leaves the prior checkpoint intact; only the not-yet-done
+  remainder is enriched, total ≤ cap across two runs; (c) cap (429) stops the day and persists
+  checkpoint; (d) transient 5xx retries once then skips one slug, continues (not counted done);
+  (e) **parse failure on a 2xx body** (`JSONDecodeError`) skips the slug with NO retry and does
+  not abort the batch; (f) live floor (`cs.last_rate.remaining` ≤ floor) hard-stops; the advisory
+  counter alone never produces a no-call state (probe call always allowed after a window-boundary).
 - **Selection keys:** parametrized — all 10 personas + all 5 seniorities pass; an invalid
   persona coerces to `unknown`; an unmappable seniority is omitted (not written); neither
   aborts the batch. Pin the exact key sets.
@@ -354,7 +402,13 @@ Mirror `find-cold-leads/scripts/test_lead_crawler.py` (pytest, no live API):
 - **Formula injection:** workbook (openpyxl) cells beginning `=`/`+`/`-`/`@`/tab/CR/LF are
   neutralized for ALL untrusted columns (`x_summary`, `x_outreach_angle`, `x_headline`,
   `location`, names) AND Rejected-reason/error columns. Mirror
-  `test_write_table_neutralizes_formula_starters`.
+  `test_write_table_neutralizes_formula_starters`. **Include the real injection vector:**
+  populate the error cell from a simulated `ConnectSafelyError` whose (untrusted) body begins
+  with `=`/`@` and assert it is neutralized — not just a hand-crafted string that never
+  traversed the error path.
+- **`country_id` omit-on-no-match:** matched location → id present in the create payload;
+  unmatched location → assert the key is **absent** (`"country_id" not in payload`), never
+  `payload["country_id"] is False`.
 - **Fixtures:** canned `search_people` / `org_followers` / `group_members` /
   `event_attendees` / `get_profile` JSON responses — no network in tests.
 - **Eval (optional):** mirror `find-cold-leads/evals/` with a qualification gold-set for
