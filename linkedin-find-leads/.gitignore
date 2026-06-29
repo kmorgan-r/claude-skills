@@ -1,0 +1,7 @@
+outputs/*
+!outputs/.gitkeep
+*_leads_*.csv
+*.xlsx
+enrich_checkpoint*.json
+exclude*.txt
+schema-manifest*.json
