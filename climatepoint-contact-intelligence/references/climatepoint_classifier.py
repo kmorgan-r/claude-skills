@@ -360,6 +360,73 @@ def rule_based_persona(title: str, headline: str, summary: str, domain: str = ""
     return ""
 
 
+CANONICAL_PERSONAS = [
+    "Sustainability Buyer",
+    "Product / R&D Buyer",
+    "Operations / Supply Chain Buyer",
+    "Founder / Executive Sponsor",
+    "Investor / Fund Persona",
+    "Marketing / Commercial",
+    "Technical / Analyst",
+    "Partner / Channel",
+    "Low-fit / Other",
+]
+
+
+def normalize_persona(raw: str) -> str:
+    """Map a free-form LLM persona response onto a canonical persona name.
+
+    Ollama is told to "return only the persona name" but frequently returns a
+    verbose sentence ("Based on the title ..., I would classify this as
+    Product / R&D Buyer"). Storing that raw string corrupts downstream lookups
+    (PERSONA_BASE_SCORE, classify_need, determine_next_action) silently and
+    permanently (--resume never revisits a non-empty Persona).
+    """
+    if not raw:
+        return "Unknown"
+    txt = raw.strip()
+    # Strip leading numbers / bullets
+    txt = re.sub(r"^\s*\d+[\.\):]\s*", "", txt)
+    # Take first line if multi-line
+    txt = txt.splitlines()[0] if txt else ""
+    low = txt.lower()
+    for p in CANONICAL_PERSONAS:
+        if p.lower() in low:
+            return p
+    aliases = {
+        "sustainability": "Sustainability Buyer",
+        "esg": "Sustainability Buyer",
+        "product": "Product / R&D Buyer",
+        "r&d": "Product / R&D Buyer",
+        "research": "Product / R&D Buyer",
+        "supply chain": "Operations / Supply Chain Buyer",
+        "operations": "Operations / Supply Chain Buyer",
+        "procurement": "Operations / Supply Chain Buyer",
+        "founder": "Founder / Executive Sponsor",
+        "ceo": "Founder / Executive Sponsor",
+        "executive": "Founder / Executive Sponsor",
+        "investor": "Investor / Fund Persona",
+        "fund": "Investor / Fund Persona",
+        "venture": "Investor / Fund Persona",
+        "vc": "Investor / Fund Persona",
+        "marketing": "Marketing / Commercial",
+        "commercial": "Marketing / Commercial",
+        "sales": "Marketing / Commercial",
+        "analyst": "Technical / Analyst",
+        "technical": "Technical / Analyst",
+        "partner": "Partner / Channel",
+        "channel": "Partner / Channel",
+        "consultant": "Partner / Channel",
+        "low-fit": "Low-fit / Other",
+        "low fit": "Low-fit / Other",
+        "other": "Low-fit / Other",
+    }
+    for k, v in aliases.items():
+        if k in low:
+            return v
+    return "Unknown"
+
+
 def classify_persona(title: str, company: str, summary: str, headline: str,
                      ollama: Optional[OllamaClient], domain: str = "") -> str:
     persona = rule_based_persona(title, headline, summary, domain)
@@ -373,7 +440,8 @@ def classify_persona(title: str, company: str, summary: str, headline: str,
 
     if ollama and title and company:
         try:
-            return ollama.classify_persona(title, company, summary, headline)
+            raw = ollama.classify_persona(title, company, summary, headline)
+            return normalize_persona(raw)
         except Exception as e:
             print(f"  [Ollama fallback failed: {e}]")
     return "Unknown"
@@ -446,7 +514,11 @@ def score_lead(persona: str, seniority: str, title: str, company: str,
     # Competitor / internal deprioritize
     if domain in COMPETITOR_DOMAINS:
         score = min(score, 3)
-    if domain in INTERNAL_DOMAINS or "climatepoint" in text:
+    # Internal-contact check: domain is precise; company name catches internal
+    # employees on non-ClimatePoint mail. Do NOT scan `text` (which includes the
+    # web-enriched summary) — external prospects' summaries often mention
+    # ClimatePoint as a competitor/reference and would be falsely zeroed.
+    if domain in INTERNAL_DOMAINS or "climatepoint" in company.lower():
         return 0
 
     return max(0, min(10, score))
@@ -681,8 +753,10 @@ def main():
         summary = row.get("Summary", "") or ""
         headline = row.get("Headline", "") or ""
 
-        # Skip internal / competitor
-        if domain in INTERNAL_DOMAINS or "climatepoint" in f"{title} {company} {summary}".lower():
+        # Skip internal / competitor. Scan company + domain only, NOT the
+        # web-enriched summary (external prospects' summaries frequently
+        # mention ClimatePoint as a competitor/reference → false positive).
+        if domain in INTERNAL_DOMAINS or "climatepoint" in company.lower():
             row["Persona"] = "Low-fit / Other"
             row["Lead Score (1-10)"] = "0"
             row["Need State"] = "Internal"

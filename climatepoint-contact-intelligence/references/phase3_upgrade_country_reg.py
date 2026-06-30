@@ -209,10 +209,10 @@ def detect_country(row):
         if re.search(pat, company):
             return country, "suffix"
 
-    # 2. city in text
-    for city, country in CITY_TO_COUNTRY.items():
+    # 2. city in text — longest keys first so "Cambridge MA" wins over "Cambridge"
+    for city in sorted(CITY_TO_COUNTRY, key=len, reverse=True):
         if re.search(rf"\b{re.escape(city)}\b", text):
-            return country, "city"
+            return CITY_TO_COUNTRY[city], "city"
 
     # 3. country word in text
     for pat, country in COUNTRY_WORD_PATTERNS:

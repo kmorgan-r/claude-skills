@@ -120,9 +120,9 @@ def detect_country(text: str, domain: str = "") -> Optional[str]:
     for pat, country in COUNTRY_SUFFIXES:
         if re.search(pat, text):
             return country
-    for city, country in CITY_TO_COUNTRY.items():
+    for city in sorted(CITY_TO_COUNTRY, key=len, reverse=True):
         if re.search(rf"\b{re.escape(city)}\b", text):
-            return country
+            return CITY_TO_COUNTRY[city]
     for word, country in COUNTRY_WORDS.items():
         if re.search(rf"\b{re.escape(word)}\b", text):
             return country
