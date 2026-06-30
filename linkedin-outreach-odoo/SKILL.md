@@ -3,6 +3,30 @@ name: linkedin-outreach-odoo
 description: Use when the user wants to perform LinkedIn outreach (send connection requests) against cold leads they have already found with /find-cold-leads and saved into Odoo. Trigger on phrases like "reach out to my cold leads on LinkedIn", "send LinkedIn connection requests to the Odoo leads", "do LinkedIn outreach on the leads I imported", "connect with the climatepoint leads on LinkedIn", or any time the user links Odoo leads/mailing contacts to LinkedIn connection outreach. Do NOT use for email drip (that's the cold-email / cp_mailing_drip path) or for finding new leads (that's /find-cold-leads). This skill reads mailing.contact from the local Odoo DB via the climatepoint-odoo MCP, drafts personalized connection notes, sends requests via the ConnectSafely API, and writes the result back to Odoo.
 ---
 
+> # ⛔ DO NOT USE — VIOLATES LINKEDIN TERMS OF SERVICE
+>
+> **This skill breaches LinkedIn's User Agreement §8.2 and should not be used.**
+> It sends real connection requests by driving your logged-in LinkedIn account
+> through an unofficial third-party automation API (ConnectSafely). §8.2
+> explicitly prohibits using "bots or other unauthorized automated methods to
+> access the Services, **add or download contacts, send or redirect messages**."
+> Automated connection requests are named directly in the prohibition.
+>
+> **This is HIGHER risk than `/linkedin-find-leads`** because it performs
+> automated *send* actions — the single most-detected, most-penalized category of
+> LinkedIn automation (it trips both automation-detection AND LinkedIn's own
+> weekly-invite limits). The 90/week cap, dry-run, and personalized notes reduce
+> *ban likelihood*, not the *breach*. There is no ToS-compliant configuration of
+> the automated send.
+>
+> **Risk:** restriction → "verify you're human" → temporary ban → permanent ban
+> of your real LinkedIn account.
+>
+> **Safe alternative:** use this skill's targeting/drafting only and **send each
+> connection request manually** in the LinkedIn UI (no automation touches your
+> account), or reach the same Odoo leads by email via `cp_mailing_drip`. Kept for
+> reference only — disabled by decision on 2026-06-30.
+
 # LinkedIn Outreach from Odoo
 
 Send personalized LinkedIn connection requests to cold leads that `/find-cold-leads`
