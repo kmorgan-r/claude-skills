@@ -3,6 +3,29 @@ name: linkedin-find-leads
 description: Use when the user wants to source NEW B2B cold leads natively from LinkedIn (people search, a competitor's followers, a group's members, or an event's attendees) and drop them into Odoo as mailing.contact rows for /linkedin-outreach-odoo to connect with. Trigger on "find LinkedIn leads", "source leads from LinkedIn", "get followers of <company> as leads", "people in <group> as leads", "attendees of <event> as leads". Do NOT use to SEND connection requests (that's /linkedin-outreach-odoo) or to scrape the open web for email (that's /find-cold-leads).
 ---
 
+> # ⛔ DO NOT USE — VIOLATES LINKEDIN TERMS OF SERVICE
+>
+> **This skill breaches LinkedIn's User Agreement §8.2 and should not be used.**
+> It drives your logged-in LinkedIn account through an unofficial third-party
+> automation API (ConnectSafely) to scrape/copy profiles, followers, group
+> members, and event attendees. §8.2 prohibits using "software... robots or any
+> other means or processes... to scrape or copy the Services, including profiles
+> and other data" and "bots or other unauthorized automated methods to access the
+> Services, add or download contacts." The violation attaches to the **automated
+> data collection itself** — being read-only / sourcing-only / rate-limited
+> reduces *ban likelihood*, not the *breach*.
+>
+> **Risk:** restriction → suspension → permanent ban of your real LinkedIn
+> account. LinkedIn actively fingerprints for automation tools, and ConnectSafely
+> itself admits "LinkedIn prohibits any automated method that accesses, scrapes,
+> or mimics human actions on the platform" and that this "can and does result in
+> account restrictions."
+>
+> **ToS-compliant alternative:** use `/find-cold-leads` (Apollo / open-web data),
+> which sources the same B2B leads into Odoo **without automating your LinkedIn
+> account.** Kept in the repo for reference only — left unmerged/disabled by
+> decision on 2026-06-30.
+
 # LinkedIn Lead Finder → Odoo
 
 Source B2B cold leads natively from LinkedIn via the ConnectSafely API and write
