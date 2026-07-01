@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.request
 from collections import defaultdict
@@ -76,7 +77,7 @@ PERSONA_KEYWORDS: Dict[str, List[str]] = {
     "Technical / Analyst": [
         "lca", "analyst", "consultant", "scientist", "researcher",
         "data", "rådgiver", "forsker", "risk", "head of risk",
-        "technical"
+        "technical", "professor"
     ],
     "Partner / Channel": [
         "consultant", "advisor", "agency", "accelerator",
@@ -691,11 +692,31 @@ def ensure_headers(headers: List[str]) -> List[str]:
     return new_headers
 
 
+def atomic_write_csv(path: str, fieldnames: List[str], rows: List[Dict[str, str]],
+                     extrasaction: str = "ignore") -> None:
+    """Write CSV atomically: stream to a temp file in the same dir, then
+    os.replace() onto `path`. A crash mid-write truncates the temp (not
+    `path`), so the prior checkpoint survives and --resume sees a complete
+    CSV instead of a partial write."""
+    out_dir = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".csv", dir=out_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as out:
+            w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction=extrasaction)
+            w.writeheader()
+            w.writerows(rows)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_csv(path: str, headers: List[str], rows: List[Dict[str, str]]) -> None:
-    with open(path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
-        writer.writeheader()
-        writer.writerows(rows)
+    """Backwards-compatible wrapper; writes atomically."""
+    atomic_write_csv(path, headers, rows, extrasaction="raise")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

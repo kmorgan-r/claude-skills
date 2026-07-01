@@ -24,10 +24,33 @@ import importlib.util
 import os
 import re
 import sys
+import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
 import requests
+
+
+def _atomic_write_csv(path, fieldnames, rows, extrasaction="ignore"):
+    """Write CSV atomically: stream to a temp file in the same dir, then
+    os.replace() onto `path`. A crash mid-write truncates the temp (not
+    `path`), so the prior checkpoint survives and --resume sees a complete
+    CSV instead of a partial write."""
+    out_dir = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".csv", dir=out_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as out:
+            w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction=extrasaction)
+            w.writeheader()
+            w.writerows(rows)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("te", os.path.join(HERE, "tavily_enrich.py"))
@@ -228,10 +251,7 @@ def main():
     processed = 0
 
     def save():
-        with open(args.output, "w", encoding="utf-8-sig", newline="") as out:
-            w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore")
-            w.writeheader()
-            w.writerows(rows)
+        _atomic_write_csv(args.output, fieldnames, rows)
         print(f"  [saved] {args.output}", flush=True)
 
     for i, row in enumerate(rows):

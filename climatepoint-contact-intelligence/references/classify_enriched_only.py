@@ -18,7 +18,30 @@ import csv
 import importlib.util
 import os
 import sys
+import tempfile
 from typing import Dict
+
+
+def _atomic_write_csv(path, fieldnames, rows, extrasaction="ignore"):
+    """Write CSV atomically: stream to a temp file in the same dir, then
+    os.replace() onto `path`. A crash mid-write truncates the temp (not
+    `path`), so the prior checkpoint survives and --resume sees a complete
+    CSV instead of a partial write."""
+    out_dir = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".csv", dir=out_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as out:
+            w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction=extrasaction)
+            w.writeheader()
+            w.writerows(rows)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLASSIFIER_PATH = os.path.join(HERE, "climatepoint_classifier.py")
@@ -98,10 +121,7 @@ def main():
         classify_one(row)
         classified += 1
 
-    with open(args.output, "w", encoding="utf-8-sig", newline="") as out:
-        w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(rows)
+    _atomic_write_csv(args.output, fieldnames, rows)
 
     print(f"classified: {classified}")
     print(f"skipped (already classified): {skipped_already}")

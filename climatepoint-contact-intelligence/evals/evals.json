@@ -22,6 +22,7 @@
       "assertions": [
         {"name": "amanda_not_lowfit", "description": "Amanda Dyke (Bocconi / International Business) is NOT classified as Low-fit / Other"},
         {"name": "daniele_not_investor", "description": "Daniele Ragni (Associate Professor at TU Delft) is NOT classified as Investor / Fund Persona"},
+        {"name": "daniele_classified_analyst", "description": "Daniele Ragni (Associate Professor at TU Delft) is classified as Technical / Analyst (not Unknown, not Investor), matching SKILL.md's documented Associate-Professor rubric"},
         {"name": "internal_scores_zero", "description": "Test Intern at climatepoint.com has Lead Score = 0 and Persona = Low-fit / Other"},
         {"name": "word_boundaries_used", "description": "The classifier script or process mentions using word boundaries for LOW_FIT keywords"}
       ]

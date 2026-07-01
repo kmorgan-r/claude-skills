@@ -25,10 +25,33 @@ import csv
 import os
 import re
 import sys
+import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
 import requests
+
+
+def _atomic_write_csv(path, fieldnames, rows, extrasaction="ignore"):
+    """Write CSV atomically: stream to a temp file in the same dir, then
+    os.replace() onto `path`. A crash mid-write truncates the temp (not
+    `path`), so the prior checkpoint survives and --resume sees a complete
+    CSV instead of a partial write."""
+    out_dir = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".csv", dir=out_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as out:
+            w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction=extrasaction)
+            w.writeheader()
+            w.writerows(rows)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
 
 TAVILY_URL = "https://api.tavily.com/search"
 
@@ -321,10 +344,7 @@ def main():
     print(f"will enrich {len(target_indices)} rows (limit={args.limit})")
 
     def flush():
-        with open(args.output, "w", encoding="utf-8-sig", newline="") as out:
-            w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore")
-            w.writeheader()
-            w.writerows(rows)
+        _atomic_write_csv(args.output, fieldnames, rows)
 
     stats = {"ok": 0, "no_results": 0, "skip": 0, "changed_fields": 0}
     t0 = time.time()

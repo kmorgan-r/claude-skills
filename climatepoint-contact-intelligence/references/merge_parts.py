@@ -11,8 +11,31 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
+import tempfile
 from typing import Dict, List
+
+
+def _atomic_write_csv(path, fieldnames, rows, extrasaction="ignore"):
+    """Write CSV atomically: stream to a temp file in the same dir, then
+    os.replace() onto `path`. A crash mid-write truncates the temp (not
+    `path`), so the prior checkpoint survives and --resume sees a complete
+    CSV instead of a partial write."""
+    out_dir = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".csv", dir=out_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as out:
+            w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction=extrasaction)
+            w.writeheader()
+            w.writerows(rows)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 ENRICH_FIELDS = ("Title", "LinkedIn", "Company", "Summary", "Headline")
@@ -53,10 +76,7 @@ def main():
                 improved += 1
         print(f"{path}: improved {improved} rows")
 
-    with open(args.output, "w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(merged)
+    _atomic_write_csv(args.output, fieldnames, merged)
 
     enriched_total = sum(1 for r in merged if (r.get("Title") or "").strip() or (r.get("Summary") or "").strip())
     print(f"output: {args.output}")
