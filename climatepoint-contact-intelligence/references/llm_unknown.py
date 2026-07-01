@@ -141,7 +141,7 @@ def reclassify_row(row: Dict[str, str], ollama: cpc.OllamaClient) -> bool:
     headline = (row.get("Headline") or "").strip()
     summary = (row.get("Summary") or "").strip()
     company = (row.get("Company") or "").strip()
-    domain = (row.get("Domain") or "").strip()
+    domain = (row.get("Domain") or cpc.extract_domain(row.get("Email", "")) or "").strip()
 
     if not (title or headline or summary):
         return False

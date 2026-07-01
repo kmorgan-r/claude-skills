@@ -87,7 +87,7 @@ def main():
         for i, prow in enumerate(part):
             if i >= n:
                 break
-            if enrichment_score(prow) > enrichment_score(merged[i]):
+            if enrichment_score(prow) >= enrichment_score(merged[i]):
                 merged[i] = prow
                 improved += 1
         print(f"{path}: improved {improved} rows")

@@ -235,12 +235,24 @@ TLD_TO_COUNTRY = {
 }
 
 
+def _extract_domain(email: str) -> str:
+    """Lowercased domain from an email, or '' if none. Mirror of
+    cpc.extract_domain — kept local so this script stays standalone (no
+    classifier import). Defensive: in normal pipeline order Domain is
+    already populated by Phase 2 before this Phase-3 script runs, but the
+    fallback keeps the TLD country/regulatory signals working on
+    raw/out-of-order inputs that have no Domain column."""
+    if not email or "@" not in (email or ""):
+        return ""
+    return (email or "").split("@")[-1].strip().lower()
+
+
 def detect_country(row):
     """Return (country, source) or (None, None)."""
     company  = (row.get("Company",  "") or "").strip()
     summary  = (row.get("Summary",  "") or "").strip()
     headline = (row.get("Headline", "") or "").strip()
-    domain   = (row.get("Domain",   "") or "").strip().lower()
+    domain   = (row.get("Domain") or _extract_domain(row.get("Email", "")) or "").strip().lower()
     text     = f"{company} {summary} {headline}"
 
     # 1. suffix on Company
@@ -300,7 +312,7 @@ def derive_regulatory(row):
     company  = (row.get("Company",  "") or "").strip()
     summary  = (row.get("Summary",  "") or "").strip()
     headline = (row.get("Headline", "") or "").strip()
-    domain   = (row.get("Domain",   "") or "").strip().lower()
+    domain   = (row.get("Domain") or _extract_domain(row.get("Email", "")) or "").strip().lower()
     text = f"{company} {summary} {headline}".lower()
     text_cs = f"{company} {summary} {headline}"  # case-sensitive for some
 

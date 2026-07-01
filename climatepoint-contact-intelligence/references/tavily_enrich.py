@@ -69,6 +69,17 @@ def _atomic_write_csv(path, fieldnames, rows, extrasaction="ignore"):
         raise
 
 
+def _extract_domain(email: str) -> str:
+    """Lowercased domain from an email, or '' if none. Mirror of
+    cpc.extract_domain — kept local so this Phase-1 enrichment script
+    stays dependency-light (no classifier import). Lets Domain fall back
+    to Email when the input CSV has no pre-populated Domain column, which
+    is the case for raw exports before Phase 2 back-fills it."""
+    if not email or "@" not in (email or ""):
+        return ""
+    return (email or "").split("@")[-1].strip().lower()
+
+
 TAVILY_URL = "https://api.tavily.com/search"
 
 LINKEDIN_RE = re.compile(r"https?://[a-z\.]*linkedin\.com/in/[^\s\"'?]+", re.IGNORECASE)
@@ -256,7 +267,7 @@ def enrich_row(row: Dict[str, str], api_key: str) -> Dict[str, Any]:
     first = (row.get("First Name") or "").strip()
     last = (row.get("Last Name") or "").strip()
     company = (row.get("Company") or "").strip()
-    domain = (row.get("Domain") or "").strip()
+    domain = (row.get("Domain") or _extract_domain(row.get("Email", "")) or "").strip()
 
     if not (first or last) and not domain:
         return {"status": "skip", "reason": "no name or domain"}
@@ -343,7 +354,7 @@ def main():
             continue
         persona = (row.get("Persona") or "").strip()
         email = (row.get("Email") or "").strip()
-        domain = (row.get("Domain") or "").strip()
+        domain = (row.get("Domain") or _extract_domain(row.get("Email", "")) or "").strip()
         title = (row.get("Title") or "").strip()
         if args.only_empty_persona and persona:
             continue
@@ -368,7 +379,7 @@ def main():
         row = rows[idx]
         first = row.get("First Name", "")
         last = row.get("Last Name", "")
-        domain = row.get("Domain", "")
+        domain = row.get("Domain") or _extract_domain(row.get("Email", ""))
         print(f"[{n}/{len(target_indices)}] row {idx}: {first} {last} ({domain})")
         try:
             res = enrich_row(row, args.tavily_key)

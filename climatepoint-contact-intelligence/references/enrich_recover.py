@@ -69,6 +69,17 @@ def _atomic_write_csv(path, fieldnames, rows, extrasaction="ignore"):
         raise
 
 
+def _extract_domain(email: str) -> str:
+    """Lowercased domain from an email, or '' if none. Mirror of
+    cpc.extract_domain — kept local so this Phase-1 recovery script
+    stays dependency-light (te does not expose it). Lets Domain fall
+    back to Email when the input CSV has no pre-populated Domain column,
+    which is the case for raw exports before Phase 2 back-fills it."""
+    if not email or "@" not in (email or ""):
+        return ""
+    return (email or "").split("@")[-1].strip().lower()
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("te", os.path.join(HERE, "tavily_enrich.py"))
 te = importlib.util.module_from_spec(spec)
@@ -282,7 +293,7 @@ def main():
         first = (row.get("First Name") or "").strip()
         last = (row.get("Last Name") or "").strip()
         email = (row.get("Email") or "").strip()
-        domain = (row.get("Domain") or "").strip()
+        domain = (row.get("Domain") or _extract_domain(row.get("Email", "")) or "").strip()
         company = (row.get("Company") or "").strip()
 
         nameless = not (first or last)

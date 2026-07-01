@@ -75,6 +75,18 @@ def _atomic_write_csv(path, fieldnames, rows, extrasaction="ignore"):
         raise
 
 
+def _extract_domain(email: str) -> str:
+    """Lowercased domain from an email, or '' if none. Mirror of
+    cpc.extract_domain — kept local so this script stays standalone (no
+    classifier import). Defensive: in normal pipeline order Domain is
+    already populated by Phase 2 before this Phase-3 script runs, but the
+    fallback keeps the disambiguation anchor working on raw/out-of-order
+    inputs that have no Domain column."""
+    if not email or "@" not in (email or ""):
+        return ""
+    return (email or "").split("@")[-1].strip().lower()
+
+
 BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
 
 STALE = {"unknown", "none found", "minimal", "", "not enough information", "n/a"}
@@ -332,7 +344,8 @@ def main():
 
     for n, company in enumerate(companies, start=1):
         sample_idx = company_rows[company][0]
-        domain = (rows[sample_idx].get("Domain") or "").strip()
+        domain = (rows[sample_idx].get("Domain")
+                  or _extract_domain(rows[sample_idx].get("Email", "")) or "").strip()
         if domain:
             query = f'"{company}" {domain} headquarters employees'
         else:
