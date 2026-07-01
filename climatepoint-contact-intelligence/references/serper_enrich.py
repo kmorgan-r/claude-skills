@@ -29,18 +29,34 @@ from typing import Any, Dict, List
 import requests
 
 
+def _csv_safe(value):
+    """Neutralize CSV formula injection (OWASP). Enriched fields (Company,
+    Title, Summary, Headline, search snippets) come from live web-search
+    results — untrusted text. A leading = + - @ turns a cell into a live
+    Excel formula/DDE payload when the output is opened in Excel (SKILL.md
+    ships utf-8-sig for exactly that). Prefix such cells with a single quote
+    so Excel treats them as literal text. None preserved (csv writes "")."""
+    if value is None:
+        return value
+    s = str(value)
+    if s[:1] in ("=", "+", "-", "@"):
+        return "'" + s
+    return s
+
+
 def _atomic_write_csv(path, fieldnames, rows, extrasaction="ignore"):
     """Write CSV atomically: stream to a temp file in the same dir, then
     os.replace() onto `path`. A crash mid-write truncates the temp (not
     `path`), so the prior checkpoint survives and --resume sees a complete
-    CSV instead of a partial write."""
+    CSV instead of a partial write. Cell values are sanitized against CSV
+    formula injection before writing."""
     out_dir = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".csv", dir=out_dir)
     try:
         with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as out:
             w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction=extrasaction)
             w.writeheader()
-            w.writerows(rows)
+            w.writerows([{k: _csv_safe(v) for k, v in row.items()} for row in rows])
         os.replace(tmp, path)
     except BaseException:
         try:

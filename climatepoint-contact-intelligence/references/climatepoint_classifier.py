@@ -428,6 +428,17 @@ def normalize_persona(raw: str) -> str:
     return "Unknown"
 
 
+# Aggregate Ollama-failure tracking. Without this, a mid-run Ollama outage
+# (expired key, host down, rate limit) silently stamps every ambiguous row
+# "Unknown" and the script still exits 0 — a real quality regression that's
+# invisible unless someone scrolls the console. classify_persona increments
+# on exception and resets on a successful LLM call; the driver aborts when
+# CONSECUTIVE failures cross OLLAMA_FAILURE_ABORT so the run fails loudly
+# instead of producing a batch of Unknown personas.
+_ollama_stats = {"failures": 0, "consecutive": 0}
+OLLAMA_FAILURE_ABORT = 5
+
+
 def classify_persona(title: str, company: str, summary: str, headline: str,
                      ollama: Optional[OllamaClient], domain: str = "") -> str:
     persona = rule_based_persona(title, headline, summary, domain)
@@ -442,9 +453,12 @@ def classify_persona(title: str, company: str, summary: str, headline: str,
     if ollama and title and company:
         try:
             raw = ollama.classify_persona(title, company, summary, headline)
+            _ollama_stats["consecutive"] = 0
             return normalize_persona(raw)
         except Exception as e:
             print(f"  [Ollama fallback failed: {e}]")
+            _ollama_stats["failures"] += 1
+            _ollama_stats["consecutive"] += 1
     return "Unknown"
 
 
@@ -692,19 +706,35 @@ def ensure_headers(headers: List[str]) -> List[str]:
     return new_headers
 
 
+def _csv_safe(value):
+    """Neutralize CSV formula injection (OWASP). Several enriched fields
+    (Company, Title, Summary, Headline) come from live web-search results —
+    untrusted text. A leading = + - @ turns a cell into a live Excel
+    formula/DDE payload when the output is opened in Excel (SKILL.md ships
+    utf-8-sig for exactly that). Prefix such cells with a single quote so
+    Excel treats them as literal text. None is preserved (csv writes "")."""
+    if value is None:
+        return value
+    s = str(value)
+    if s[:1] in ("=", "+", "-", "@"):
+        return "'" + s
+    return s
+
+
 def atomic_write_csv(path: str, fieldnames: List[str], rows: List[Dict[str, str]],
                      extrasaction: str = "ignore") -> None:
     """Write CSV atomically: stream to a temp file in the same dir, then
     os.replace() onto `path`. A crash mid-write truncates the temp (not
     `path`), so the prior checkpoint survives and --resume sees a complete
-    CSV instead of a partial write."""
+    CSV instead of a partial write. Cell values are sanitized against CSV
+    formula injection before writing."""
     out_dir = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".csv", dir=out_dir)
     try:
         with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as out:
             w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction=extrasaction)
             w.writeheader()
-            w.writerows(rows)
+            w.writerows([{k: _csv_safe(v) for k, v in row.items()} for row in rows])
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -761,9 +791,16 @@ def main():
     skipped = 0
 
     for i, row in enumerate(rows):
-        if args.resume and row.get("Persona"):
-            skipped += 1
-            continue
+        # --resume skips completed work, not failed work. "Unknown" is the
+        # stamp classify_persona leaves when the LLM fallback failed (or the
+        # rule engine genuinely couldn't classify) — it is a placeholder, not
+        # a classification. Treating it as populated (the old non-empty check)
+        # permanently locked failed rows out of retry on every future --resume.
+        if args.resume:
+            existing_persona = (row.get("Persona") or "").strip()
+            if existing_persona and existing_persona.lower() != "unknown":
+                skipped += 1
+                continue
 
         email = row.get("Email", "")
         domain = extract_domain(email)
@@ -799,6 +836,21 @@ def main():
 
         # Classification
         persona = classify_persona(title, company, summary, headline, ollama, domain)
+
+        # Abort loudly on sustained Ollama failure instead of silently
+        # degrading the rest of the batch to "Unknown" (exit 0). Saves the
+        # checkpoint so --resume picks up here once Ollama is back.
+        if _ollama_stats["consecutive"] >= OLLAMA_FAILURE_ABORT:
+            print(
+                f"[ABORT] {OLLAMA_FAILURE_ABORT} consecutive Ollama failures "
+                f"(total {_ollama_stats['failures']}). Stopping to avoid a "
+                f"silent Unknown batch — check --ollama-host / OLLAMA_API_KEY. "
+                f"Checkpoint saved; rerun with --resume once Ollama is available.",
+                file=sys.stderr,
+            )
+            write_csv(args.output, headers, rows)
+            sys.exit(1)
+
         seniority = detect_seniority(title)
         need = classify_need(persona, title, company, summary)
         score = score_lead(persona, seniority, title, company, summary, domain)

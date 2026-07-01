@@ -5,10 +5,15 @@ Brave Search pass to fill Country / HQ + Company Size for score>=7 rows.
 Strategy:
   1. Filter hot rows (score>=7) where Country OR Size is unknown/stale.
   2. Dedup by Company — one query per unique company.
-  3. Brave query: '"{Company}" headquarters employees'.
+  3. Brave query: '"{Company}" headquarters employees', anchored with the
+     row's Domain when present to disambiguate generic same-name companies.
   4. Parse country (suffix/city/word/TLD) + size (employee count regex) from
      title+description of top results.
-  5. Broadcast result back to every row sharing that company.
+  5. Confidence gate: if the row's domain TLD maps to a country that
+     conflicts with the web-search-detected country, the query likely hit a
+     same-named different company — skip writing Country and leave the
+     company retryable (not locked in --attempted-log). Size is still applied.
+  6. Broadcast result back to every row sharing that company.
 
 Usage:
     python brave_enrich_country_size.py \
@@ -33,18 +38,34 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 
+def _csv_safe(value):
+    """Neutralize CSV formula injection (OWASP). Enriched fields (Company,
+    Title, Summary, Headline, search snippets) come from live web-search
+    results — untrusted text. A leading = + - @ turns a cell into a live
+    Excel formula/DDE payload when the output is opened in Excel (SKILL.md
+    ships utf-8-sig for exactly that). Prefix such cells with a single quote
+    so Excel treats them as literal text. None preserved (csv writes "")."""
+    if value is None:
+        return value
+    s = str(value)
+    if s[:1] in ("=", "+", "-", "@"):
+        return "'" + s
+    return s
+
+
 def _atomic_write_csv(path, fieldnames, rows, extrasaction="ignore"):
     """Write CSV atomically: stream to a temp file in the same dir, then
     os.replace() onto `path`. A crash mid-write truncates the temp (not
     `path`), so the prior checkpoint survives and --resume sees a complete
-    CSV instead of a partial write."""
+    CSV instead of a partial write. Cell values are sanitized against CSV
+    formula injection before writing."""
     out_dir = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp = tempfile.mkstemp(prefix=".tmp_", suffix=".csv", dir=out_dir)
     try:
         with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as out:
             w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction=extrasaction)
             w.writeheader()
-            w.writerows(rows)
+            w.writerows([{k: _csv_safe(v) for k, v in row.items()} for row in rows])
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -312,7 +333,10 @@ def main():
     for n, company in enumerate(companies, start=1):
         sample_idx = company_rows[company][0]
         domain = (rows[sample_idx].get("Domain") or "").strip()
-        query = f'"{company}" headquarters employees'
+        if domain:
+            query = f'"{company}" {domain} headquarters employees'
+        else:
+            query = f'"{company}" headquarters employees'
         results = brave_search(args.brave_key, query)
         queries_done += 1
         stats["queries"] += 1
@@ -326,6 +350,26 @@ def main():
 
             country = detect_country(blob, domain)
             size = detect_size(blob)
+
+            # Confidence gate (F4): if the row's own domain TLD maps to a
+            # country that disagrees with the web-search-detected country,
+            # the generic-name query almost certainly matched a same-named
+            # different company. Don't write the country and don't lock
+            # `attempted` so a later run can retry — but keep size, since
+            # size is less disambiguation-sensitive.
+            tld_country = ""
+            if domain and "." in domain:
+                tld = domain.rsplit(".", 1)[-1].lower()
+                tld_country = TLD_TO_COUNTRY.get(tld, "")
+            country_conflict = bool(
+                country and tld_country and country != tld_country
+            )
+            if country_conflict:
+                stats["country_conflict"] += 1
+                print(f"  [conflict] domain .{tld} -> {tld_country} vs "
+                      f"detected {country}; not writing country for "
+                      f"ambiguous name", file=sys.stderr)
+                country = None
 
             applied_c = applied_s = 0
             for idx in company_rows[company]:
@@ -343,9 +387,12 @@ def main():
                 stats["country_hit"] += 1
             if size:
                 stats["size_hit"] += 1
-            if not country and not size:
+            if not country and not size and not country_conflict:
                 stats["both_miss"] += 1
                 attempted.add(company)
+            elif country_conflict:
+                # low-confidence: leave retryable, do not lock in attempted
+                pass
 
             print(f"[{n}/{len(companies)}] {company[:45]:<45} "
                   f"C={country or '-'} S={size or '-'} "
