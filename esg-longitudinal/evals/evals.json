@@ -22,7 +22,7 @@
       "name": "philips-rerun-diff",
       "prompt": "Attached is last year's ESG snapshot for Philips (philips_prior_snapshot_2025-06-29.csv). Please re-run the circular economy analysis with the most recent data you can find and produce a change report telling me what's new or different since that snapshot.",
       "expected_output": "A new dated snapshot CSV (today's date) built from current Philips reports, then a diff against the provided prior snapshot using diff.py, producing a markdown change report with NEW (e.g. a newly disclosed 2023/2024 circular_revenue_pct), CHANGED (any restated value, with numeric delta), and DROPPED sections. Should treat the provided CSV as the baseline rather than starting from scratch, and keep the same schema so the keys (entity, indicator, period) match.",
-      "files": ["C:/Users/kmorg/.claude/skills/esg-longitudinal/evals/files/philips_prior_snapshot_2025-06-29.csv"],
+      "files": ["evals/files/philips_prior_snapshot_2025-06-29.csv"],
       "assertions": []
     }
   ]
