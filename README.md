@@ -7,6 +7,7 @@ follows at runtime) plus any bundled scripts, references, and evals.
 
 | Skill | What it does |
 |-------|--------------|
+| [`climatepoint-contact-intelligence`](./climatepoint-contact-intelligence) | Turns a raw contact CSV into a scored sales map: enriches contacts via web research (Title, LinkedIn, Company, Summary, Headline), classifies by persona/need/score, and emits a sales-ready output file. The scorer that `find-cold-leads` hands off to. |
 | [`find-cold-leads`](./find-cold-leads) | Finds and **qualifies** B2B cold leads on free signals, spends scarce Apollo enrichment credits only on rows that fit the ICP, tags each with a region-aware compliance posture, and exports a classifier-ready / Odoo-ready sheet. |
 | [`linkedin-outreach-odoo`](./linkedin-outreach-odoo) | Picks up where `find-cold-leads` leaves off: reads eligible `mailing.contact` leads from Odoo, drafts a personalized LinkedIn connection note per lead, sends connection requests via the ConnectSafely API (dry-run by default), and writes outreach state back to Odoo. |
 | [`fix-pr-reviews`](./fix-pr-reviews) | Fetches the most recent GitHub PR review comments and systematically addresses each one — no copy-pasting from the PR. Supports a `--loop` mode. |
@@ -28,9 +29,17 @@ cp -r find-cold-leads ~/.claude/skills/
 
 ## Notes per skill
 
+### climatepoint-contact-intelligence
+- **The scorer** that `find-cold-leads` hands off to (its classifier-ready columns
+  feed this skill's input). Run it standalone on any raw contact CSV too.
+- **Needs** a web-search provider via env var (`SERPER_API_KEY` / `TAVILY_API_KEY` /
+  `BRAVE_API_KEY`); no keys stored in the repo.
+- **Install the whole directory** (`cp -r climatepoint-contact-intelligence …`), not
+  just `SKILL.md`: the bundled `references/` scripts and `evals/` set are load-bearing.
+
 ### find-cold-leads
-- **Hands off to** a separate `climatepoint-contact-intelligence` classifier (the
-  scorer) — **not included here**. Without it, the handoff still produces the
+- **Hands off to** [`climatepoint-contact-intelligence`](./climatepoint-contact-intelligence)
+  (the scorer, included in this repo). Without it, the handoff still produces the
   classifier-ready columns; the column-conformance test validates against a pinned
   snapshot instead of the live classifier source.
 - **Needs** the Apollo MCP server for enrichment (Mode A). Open-web fallback (Mode O)

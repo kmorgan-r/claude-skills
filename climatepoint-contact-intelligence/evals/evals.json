@@ -1,0 +1,42 @@
+{
+  "skill_name": "climatepoint-contact-intelligence",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I have a CSV with 5 raw contacts from a trade show. Can you run the ClimatePoint Contact Intelligence pipeline to enrich and classify them so I know who to reach out to first?",
+      "expected_output": "A classified CSV file with Title, Company, Persona, Lead Score, Need State, Opportunity Type, Outreach Angle, and Next Action for all 5 contacts. High-scoring leads should have specific outreach angles.",
+      "files": [],
+      "assertions": [
+        {"name": "output_csv_exists", "description": "A classified output CSV was produced"},
+        {"name": "all_personas_populated", "description": "All 5 contacts have a non-empty Persona field"},
+        {"name": "scores_numeric_1_to_10", "description": "Lead Score values are integers between 1 and 10 (or 0 for internal)"},
+        {"name": "outreach_angles_present", "description": "Contacts with score >= 5 have a non-empty Outreach Angle"},
+        {"name": "next_actions_present", "description": "All contacts have a non-empty Next Action field"}
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Classify these contacts and flag any low-fit or internal contacts. I want to make sure we don't waste outreach on students, HR people, or ClimatePoint employees.",
+      "expected_output": "CSV with Low-fit / Other personas for students/HR/internal contacts. ClimatePoint domains should score 0. Word boundaries used so 'International' doesn't match 'intern'.",
+      "files": [],
+      "assertions": [
+        {"name": "amanda_not_lowfit", "description": "Amanda Dyke (Bocconi / International Business) is NOT classified as Low-fit / Other"},
+        {"name": "daniele_not_investor", "description": "Daniele Ragni (Associate Professor at TU Delft) is NOT classified as Investor / Fund Persona"},
+        {"name": "daniele_classified_analyst", "description": "Daniele Ragni (Associate Professor at TU Delft) is classified as Technical / Analyst (not Unknown, not Investor), matching SKILL.md's documented Associate-Professor rubric"},
+        {"name": "internal_scores_zero", "description": "Test Intern at climatepoint.com has Lead Score = 0 and Persona = Low-fit / Other"},
+        {"name": "word_boundaries_used", "description": "The classifier script or process mentions using word boundaries for LOW_FIT keywords"}
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I need account research on the top-scored leads from my classified file. Can you run Phase 3 for leads with score 7 and above?",
+      "expected_output": "Enhanced CSV with company-level fields: Industry, Company Size, Has Physical Product, Has Manufacturing, Regulatory Exposure, Likely LCA Need, Estimated Urgency, Recommended Offer.",
+      "files": [],
+      "assertions": [
+        {"name": "account_fields_present", "description": "Top-scored leads have Industry, Company Size, Has Physical Product, Has Manufacturing, Regulatory Exposure fields"},
+        {"name": "lca_need_populated", "description": "Likely LCA Need field is populated for high-scored leads"},
+        {"name": "recommended_offer_present", "description": "Recommended Offer field is populated for high-scored leads"}
+      ]
+    }
+  ]
+}
