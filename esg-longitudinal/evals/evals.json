@@ -7,7 +7,16 @@
       "prompt": "I'm researching Royal Philips' circular economy progress. Can you pull together their circular economy targets and actual numbers over roughly the last 10 years (about 2015 to today) from their public sustainability and annual reports? I want to see how things like circular revenue and product take-back have changed over time, with sources.",
       "expected_output": "A tidy time-series (one row per indicator per year) of Philips circular-economy indicators (e.g. circular_revenue_pct, waste_recycled_pct, product_takeback_scope) spanning ~2015-2024, every found value carrying a source URL + reporting period + verbatim quote, plus a timestamped snapshot CSV saved under data/snapshots/ and a short report showing the backward trend (e.g. 7% baseline -> ~18% -> 25% target). Gaps recorded as not_found rather than guessed.",
       "files": [],
-      "assertions": []
+      "assertions": [
+        "A timestamped snapshot CSV is written under data/snapshots/ whose filename is the run date in YYYY-MM-DD.csv form.",
+        "The snapshot CSV header is exactly the 13-column tidy schema: entity,lei,domain,indicator,value,unit,period,status,source,source_url,page,quote,retrieved_at.",
+        "The snapshot contains circular-domain rows (domain=circular) for recognizable circular indicators such as circular_revenue_pct, waste_recycled_pct, or product_takeback_scope.",
+        "The series is longitudinal: at least one indicator (e.g. circular_revenue_pct) carries values for 3 or more distinct period years across the ~2015-2024 range.",
+        "Every row with status=found or status=target has a non-empty value, source_url, and quote (the snapshot passes scripts/snapshot.py validation, exit code 0).",
+        "At least one status=target row captures a forward Philips goal (e.g. circular_revenue_pct 25% with period=2025).",
+        "Indicators or years the agent searched for but could not source are recorded as status=not_found rather than given a fabricated value or interpolated number.",
+        "A markdown report is produced that includes a time-series table and a Sources section listing the reports used with their URLs."
+      ]
     },
     {
       "id": 2,
@@ -15,7 +24,15 @@
       "prompt": "How have Unilever's greenhouse gas emissions and use of renewable energy changed over the past several years? Build me a year-by-year view from their own reporting, and note any net-zero or emissions-reduction target they've set.",
       "expected_output": "Demonstrates domain + company generality: a climate-pack time-series for Unilever (e.g. scope1_emissions / scope2_emissions / scope3_emissions / renewable_electricity_pct, plus a netzero_target_year or emissions_reduction_target_pct as status=target), each found value sourced with URL + period + quote, normalized to the same tidy schema, snapshotted to a dated CSV. Should reuse the same workflow/scripts as eval 1 without bespoke per-company code.",
       "files": [],
-      "assertions": []
+      "assertions": [
+        "A timestamped snapshot CSV is written under data/snapshots/ using the identical 13-column schema as eval 1 (no added, renamed, or dropped columns), proving schema reuse across a different company and domain.",
+        "Rows carry domain=climate and recognizable climate indicators such as scope1_emissions, scope2_emissions, scope3_emissions, or renewable_electricity_pct.",
+        "The view is multi-year: at least one emissions or renewable indicator has values for 2 or more distinct period years.",
+        "At least one status=target row captures a net-zero year or emissions-reduction goal (e.g. netzero_target_year or emissions_reduction_target_pct).",
+        "Every row with status=found or status=target has a non-empty value, source_url, and quote (the snapshot passes scripts/snapshot.py validation, exit code 0).",
+        "The run uses the bundled scripts/snapshot.py rather than inventing bespoke per-company parsing or a custom schema.",
+        "A markdown report is produced with a time-series table and a Sources section listing Unilever's own reports with URLs."
+      ]
     },
     {
       "id": 3,
@@ -23,7 +40,15 @@
       "prompt": "Attached is last year's ESG snapshot for Philips (philips_prior_snapshot_2025-06-29.csv). Please re-run the circular economy analysis with the most recent data you can find and produce a change report telling me what's new or different since that snapshot.",
       "expected_output": "A new dated snapshot CSV (today's date) built from current Philips reports, then a diff against the provided prior snapshot using diff.py, producing a markdown change report with NEW (e.g. a newly disclosed 2023/2024 circular_revenue_pct), CHANGED (any restated value, with numeric delta), and DROPPED sections. Should treat the provided CSV as the baseline rather than starting from scratch, and keep the same schema so the keys (entity, indicator, period) match.",
       "files": ["evals/files/philips_prior_snapshot_2025-06-29.csv"],
-      "assertions": []
+      "assertions": [
+        "The provided prior snapshot CSV is treated as the baseline (loaded and diffed against), not ignored or rebuilt from scratch.",
+        "A new snapshot CSV is written dated with today's run date, distinct from the 2025-06-29 baseline file.",
+        "scripts/diff.py is run with --old pointing at the provided prior snapshot and --new pointing at the freshly written snapshot.",
+        "A markdown change report is produced containing the diff's NEW / CHANGED / DROPPED structure (Newly disclosed / Changed values / Dropped sections).",
+        "The new snapshot uses the identical 13-column schema and matching key fields (entity=Royal Philips, indicator names like circular_revenue_pct, period years) so the diff keys align with the baseline instead of showing spurious churn.",
+        "Any row reported under Changed shows a numeric delta between the old and new value.",
+        "Rows in the new snapshot with status=found or status=target still carry value, source_url, and quote (provenance preserved on the re-run)."
+      ]
     }
   ]
 }
