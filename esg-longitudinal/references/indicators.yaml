@@ -1,0 +1,55 @@
+# Canonical indicator packs per ESG domain.
+#
+# Use these exact `indicator` names + `unit`s when writing snapshot rows so values
+# line up across companies AND across years — that alignment is what makes diffing
+# work. Adding a new indicator is fine: same tidy schema absorbs it, just keep the
+# name stable so future runs match it.
+#
+# Per-value `status` (recorded in the snapshot, not here): found | not_found | target
+#   found     = a disclosed actual for that period
+#   target    = a forward-looking goal (e.g. "25% by 2025")
+#   not_found = you looked and it wasn't disclosed (a gap is data — record it)
+
+climate:
+  - {indicator: scope1_emissions,                unit: tCO2e}
+  - {indicator: scope2_emissions,                unit: tCO2e}
+  - {indicator: scope3_emissions,                unit: tCO2e}
+  - {indicator: ghg_total_emissions,             unit: tCO2e}
+  - {indicator: renewable_electricity_pct,       unit: "%"}
+  - {indicator: energy_consumption,              unit: MWh}
+  - {indicator: netzero_target_year,             unit: year}
+  - {indicator: emissions_reduction_target_pct,  unit: "%"}
+  - {indicator: emissions_reduction_baseline_yr, unit: year}
+  - {indicator: sbti_validated,                  unit: bool}
+  - {indicator: carbon_neutral_operations_year,  unit: year}
+
+circular:
+  - {indicator: circular_revenue_pct,            unit: "%"}
+  - {indicator: recycled_input_pct,              unit: "%"}
+  - {indicator: waste_recycled_pct,              unit: "%"}
+  - {indicator: waste_to_landfill_pct,           unit: "%"}
+  - {indicator: total_waste,                     unit: tonnes}
+  - {indicator: product_takeback_scope,          unit: text}
+  - {indicator: closed_loop_target_year,         unit: year}
+  - {indicator: material_circularity_rate,       unit: "%"}
+
+biodiversity:
+  - {indicator: tnfd_aligned,                    unit: bool}
+  - {indicator: deforestation_commitment_year,   unit: year}
+  - {indicator: land_use_total,                  unit: ha}
+  - {indicator: water_withdrawal,                unit: m3}
+  - {indicator: water_intensity,                 unit: m3_per_unit}
+  - {indicator: sites_in_protected_areas,        unit: count}
+  - {indicator: nature_positive_target_year,     unit: year}
+  - {indicator: sustainable_sourcing_pct,        unit: "%"}
+
+social_gov:
+  - {indicator: women_in_management_pct,         unit: "%"}
+  - {indicator: women_in_workforce_pct,          unit: "%"}
+  - {indicator: board_independence_pct,          unit: "%"}
+  - {indicator: ltifr,                           unit: rate}   # lost-time injury frequency rate
+  - {indicator: employee_turnover_pct,           unit: "%"}
+  - {indicator: gender_pay_gap_pct,              unit: "%"}
+  - {indicator: training_hours_per_employee,     unit: hours}
+  - {indicator: controversy_flag,                unit: bool}
+  - {indicator: csrd_reporting,                  unit: bool}

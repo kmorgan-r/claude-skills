@@ -13,6 +13,7 @@ follows at runtime) plus any bundled scripts, references, and evals.
 | [`fix-pr-reviews`](./fix-pr-reviews) | Fetches the most recent GitHub PR review comments and systematically addresses each one — no copy-pasting from the PR. Supports a `--loop` mode. |
 | [`ship`](./ship) | Conductor that drives the post-brainstorm dev pipeline hands-off — spec-review, plan, plan-review, implementation, PR, then the `fix-pr-reviews` loop — resuming across `/clear` via a state file, stopping only on failure or final merge. |
 | [`reviewing-plans`](./reviewing-plans) | Reviews a written implementation plan before execution: dispatches 2–5 domain-specific reviewer agents in parallel, consolidates findings, and applies approved fixes to the plan file. |
+| [`esg-longitudinal`](./esg-longitudinal) | Tracks a company's ESG / CSR / sustainability commitments over time using **free** public data: finds sustainability/annual report PDFs, extracts targets and metrics into a tidy time-series with source + period + verbatim quote per value, saves a timestamped snapshot, and diffs against earlier snapshots to surface what changed. Re-runnable next year; scales from one company toward tens of thousands. |
 
 ## Install
 
@@ -105,3 +106,27 @@ cp -r find-cold-leads ~/.claude/skills/
 - Takes a path to an existing plan markdown file (or finds the most recently referenced
   one). Used standalone or as a `ship` phase.
 - Invoke `/reviewing-plans` after a plan exists, before execution.
+
+### esg-longitudinal
+- **Free data only** — no API subscription required. Builds an assembled free stack:
+  GLEIF LEI for entity resolution, structured lists (SBTi, Net Zero Tracker, CDP, TNFD,
+  SEC EDGAR, WikiRate) for breadth, and a `find → fetch → extract` report-PDF chain for
+  the detail those miss (most circular-economy and biodiversity metrics). Paid feeds
+  (FMP, ESG Book, CSRHub, …) bolt on later as just another `source` — same schema, same
+  diff. See [`references/data_sources.md`](./esg-longitudinal/references/data_sources.md).
+- **Two time axes, snapshot-first.** `period` = the reporting year of a value;
+  `retrieved_at` = the run date. Every run writes a timestamped snapshot CSV
+  (`data/snapshots/<date>.csv`) so a future run has something to diff against. Backward
+  trend comes from multi-year reports; forward change comes from diffing a later snapshot
+  against an earlier one (`scripts/diff.py`).
+- **Anti-hallucination gate is load-bearing.** `scripts/snapshot.py` rejects any
+  `found`/`target` row lacking a value **and** `source_url` **and** verbatim `quote`;
+  gaps are recorded as `not_found`, never guessed or interpolated. A value with no source
+  and no quote is not a value.
+- **Needs** Python with `ddgs` (report search), `requests`, and `PyMuPDF` (`fitz`) +
+  `pdfplumber` (PDF text/tables) — all free, no keys. No credentials stored in the repo.
+- **Install the whole directory** (`cp -r esg-longitudinal …`), not just `SKILL.md`: the
+  bundled `scripts/`, `references/` (indicator packs + source catalog), and `evals/` are
+  load-bearing.
+- Invoke by asking to track a company's ESG/CSR/sustainability targets over time
+  (e.g. "pull Philips' circular-economy targets over the last 10 years, with sources").
