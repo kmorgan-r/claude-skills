@@ -1,0 +1,29 @@
+{
+  "skill_name": "esg-longitudinal",
+  "evals": [
+    {
+      "id": 1,
+      "name": "philips-circular-10yr",
+      "prompt": "I'm researching Royal Philips' circular economy progress. Can you pull together their circular economy targets and actual numbers over roughly the last 10 years (about 2015 to today) from their public sustainability and annual reports? I want to see how things like circular revenue and product take-back have changed over time, with sources.",
+      "expected_output": "A tidy time-series (one row per indicator per year) of Philips circular-economy indicators (e.g. circular_revenue_pct, waste_recycled_pct, product_takeback_scope) spanning ~2015-2024, every found value carrying a source URL + reporting period + verbatim quote, plus a timestamped snapshot CSV saved under data/snapshots/ and a short report showing the backward trend (e.g. 7% baseline -> ~18% -> 25% target). Gaps recorded as not_found rather than guessed.",
+      "files": [],
+      "assertions": []
+    },
+    {
+      "id": 2,
+      "name": "unilever-climate-generality",
+      "prompt": "How have Unilever's greenhouse gas emissions and use of renewable energy changed over the past several years? Build me a year-by-year view from their own reporting, and note any net-zero or emissions-reduction target they've set.",
+      "expected_output": "Demonstrates domain + company generality: a climate-pack time-series for Unilever (e.g. scope1_emissions / scope2_emissions / scope3_emissions / renewable_electricity_pct, plus a netzero_target_year or emissions_reduction_target_pct as status=target), each found value sourced with URL + period + quote, normalized to the same tidy schema, snapshotted to a dated CSV. Should reuse the same workflow/scripts as eval 1 without bespoke per-company code.",
+      "files": [],
+      "assertions": []
+    },
+    {
+      "id": 3,
+      "name": "philips-rerun-diff",
+      "prompt": "Attached is last year's ESG snapshot for Philips (philips_prior_snapshot_2025-06-29.csv). Please re-run the circular economy analysis with the most recent data you can find and produce a change report telling me what's new or different since that snapshot.",
+      "expected_output": "A new dated snapshot CSV (today's date) built from current Philips reports, then a diff against the provided prior snapshot using diff.py, producing a markdown change report with NEW (e.g. a newly disclosed 2023/2024 circular_revenue_pct), CHANGED (any restated value, with numeric delta), and DROPPED sections. Should treat the provided CSV as the baseline rather than starting from scratch, and keep the same schema so the keys (entity, indicator, period) match.",
+      "files": ["evals/files/philips_prior_snapshot_2025-06-29.csv"],
+      "assertions": []
+    }
+  ]
+}

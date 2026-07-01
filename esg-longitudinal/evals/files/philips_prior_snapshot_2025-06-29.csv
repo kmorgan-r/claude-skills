@@ -1,0 +1,7 @@
+entity,lei,domain,indicator,value,unit,period,status,source,source_url,page,quote,retrieved_at
+Royal Philips,724500P0BEPLPSV2I087,circular,circular_revenue_pct,7,%,2015,found,Annual Report 2016,https://www.results.philips.com/publications/ar16,,"circular revenues were 7% in the 2015 baseline year",2025-06-29
+Royal Philips,724500P0BEPLPSV2I087,circular,circular_revenue_pct,16,%,2021,found,Annual Report 2021,https://www.results.philips.com/publications/ar21,,"circular revenues accounted for 16% of sales",2025-06-29
+Royal Philips,724500P0BEPLPSV2I087,circular,circular_revenue_pct,18,%,2022,found,Annual Report 2022,https://www.results.philips.com/publications/ar22,41,"circular revenues accounted for 18% of sales",2025-06-29
+Royal Philips,724500P0BEPLPSV2I087,circular,circular_revenue_pct,25,%,2025,target,Annual Report 2022,https://www.results.philips.com/publications/ar22,41,"target of generating 25% of revenue from circular products and services by 2025",2025-06-29
+Royal Philips,724500P0BEPLPSV2I087,circular,waste_recycled_pct,91,%,2022,found,Annual Report 2022,https://www.results.philips.com/publications/ar22,,"improved the circularity of its waste stream to 91%",2025-06-29
+Royal Philips,724500P0BEPLPSV2I087,circular,product_takeback_scope,all professional medical equipment,text,2025,target,Sustainability 2022,https://www.philips.com/sustainability,,"extended its take-back pledge to all professional medical equipment by 2025",2025-06-29
