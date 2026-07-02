@@ -23,3 +23,14 @@ def test_enablers_present_and_well_formed():
 def test_enabler_ids_match_snapshot_validator():
     data = json.loads((ROOT / "circular-economy-10rs.json").read_text(encoding="utf-8"))
     assert {e["id"] for e in data["enablers"]} == snapshot.VALID_ENABLER
+
+
+def test_circular_indicators_have_valid_r_hint():
+    import re
+    text = (ROOT / "references" / "indicators.yaml").read_text(encoding="utf-8")
+    circular = text.split("circular:", 1)[1].split("\nbiodiversity:", 1)[0]
+    hints = re.findall(r"r_hint:\s*([R0-9|]+)", circular)
+    assert len(hints) >= 8  # one per circular indicator
+    for h in hints:
+        for tok in h.split("|"):
+            assert re.fullmatch(r"R[0-9]", tok), f"bad r_hint token {tok}"

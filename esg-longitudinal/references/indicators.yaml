@@ -24,14 +24,16 @@ climate:
   - {indicator: carbon_neutral_operations_year,  unit: year}
 
 circular:
-  - {indicator: circular_revenue_pct,            unit: "%"}
-  - {indicator: recycled_input_pct,              unit: "%"}
-  - {indicator: waste_recycled_pct,              unit: "%"}
-  - {indicator: waste_to_landfill_pct,           unit: "%"}
-  - {indicator: total_waste,                     unit: tonnes}
-  - {indicator: product_takeback_scope,          unit: text}
-  - {indicator: closed_loop_target_year,         unit: year}
-  - {indicator: material_circularity_rate,       unit: "%"}
+  # r_hint = the R-strategy(ies) an indicator typically evidences (guidance for the
+  # r_strategy column; pipe-separated, primary first). See circular-economy-10rs.json.
+  - {indicator: circular_revenue_pct,            unit: "%",     r_hint: R1|R2}
+  - {indicator: recycled_input_pct,              unit: "%",     r_hint: R8}
+  - {indicator: waste_recycled_pct,              unit: "%",     r_hint: R8}
+  - {indicator: waste_to_landfill_pct,           unit: "%",     r_hint: R8|R9}
+  - {indicator: total_waste,                     unit: tonnes,  r_hint: R2}
+  - {indicator: product_takeback_scope,          unit: text,    r_hint: R3|R6}
+  - {indicator: closed_loop_target_year,         unit: year,    r_hint: R8}
+  - {indicator: material_circularity_rate,       unit: "%",     r_hint: R2|R8}
 
 biodiversity:
   - {indicator: tnfd_aligned,                    unit: bool}
