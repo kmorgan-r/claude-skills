@@ -34,3 +34,13 @@ def test_circular_indicators_have_valid_r_hint():
     for h in hints:
         for tok in h.split("|"):
             assert re.fullmatch(r"R[0-9]", tok), f"bad r_hint token {tok}"
+
+
+def test_skill_documents_new_columns():
+    text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+    for col in ["item_type", "r_strategy", "enabler_topic",
+                "target_end_year", "target_has_kpi", "target_status"]:
+        assert col in text, f"SKILL.md missing {col}"
+    for section in ["Classification layer", "Target anatomy",
+                    "Year-over-year target status"]:
+        assert section in text, f"SKILL.md missing section: {section}"
