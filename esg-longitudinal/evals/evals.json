@@ -46,7 +46,7 @@
         "scripts/diff.py is run with --old pointing at the provided prior snapshot and --new pointing at the freshly written snapshot.",
         "A markdown change report is produced containing the diff's NEW / CHANGED / DROPPED structure (Newly disclosed / Changed values / Dropped sections).",
         "The new snapshot uses the identical 13-column schema and matching key fields (entity=Royal Philips, indicator names like circular_revenue_pct, period years) so the diff keys align with the baseline instead of showing spurious churn.",
-        "Any row reported under Changed shows a numeric delta between the old and new value.",
+        "Any row reported under Changed with a numeric value type shows a numeric delta between the old and new value; text-valued indicators (e.g. product_takeback_scope) may show a blank delta.",
         "Rows in the new snapshot with status=found or status=target still carry value, source_url, and quote (provenance preserved on the re-run)."
       ]
     }
