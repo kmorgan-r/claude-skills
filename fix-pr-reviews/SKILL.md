@@ -101,6 +101,16 @@ fi
 # Get the most recent review comment from the review bot
 # (github-actions = the login for workflow-posted comments; see REVIEW_BOT config)
 REVIEW_BOT="${REVIEW_BOT:-github-actions}"
+# SECURITY: Validate REVIEW_BOT before interpolating it into the double-quoted
+# --jq filter below. Bash expands the string (command substitution, backticks)
+# BEFORE gh runs, and a value containing a double-quote would break out of the
+# jq string literal (jq injection). Allow only GitHub login characters plus an
+# optional [bot] suffix — matching how every other interpolated var here is guarded.
+REVIEW_BOT_RE='^[A-Za-z0-9-]+(\[bot\])?$'
+if ! [[ "$REVIEW_BOT" =~ $REVIEW_BOT_RE ]]; then
+  echo "❌ Invalid REVIEW_BOT login: $REVIEW_BOT"
+  exit 1
+fi
 gh pr view "$PR_NUMBER" --json comments --jq "
   [.comments[] | select(.author.login == \"$REVIEW_BOT\")]
   | sort_by(.createdAt)
@@ -817,6 +827,14 @@ fi
 
 # Fetch comments newer than our push
 REVIEW_BOT="${REVIEW_BOT:-github-actions}"
+# SECURITY: Validate REVIEW_BOT before interpolating it into the double-quoted
+# --jq filter below (same guard as Step 2). Prevents shell command substitution
+# and jq string-literal breakout from a crafted REVIEW_BOT value.
+REVIEW_BOT_RE='^[A-Za-z0-9-]+(\[bot\])?$'
+if ! [[ "$REVIEW_BOT" =~ $REVIEW_BOT_RE ]]; then
+  echo "❌ Invalid REVIEW_BOT login: $REVIEW_BOT"
+  exit 1
+fi
 gh pr view "$PR_NUMBER" --json comments --jq "
   [.comments[]
    | select(.author.login == \"$REVIEW_BOT\")
