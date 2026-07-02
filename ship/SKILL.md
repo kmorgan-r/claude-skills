@@ -1,13 +1,13 @@
 ---
 name: ship
-description: Conductor that drives the post-brainstorm dev pipeline hands-off — spec-review, plan, plan-review, implementation, PR, fix-pr-reviews loop — stopping only on failure or final merge. Use after /superpowers:brainstorming when a committed spec exists, or to resume an in-progress pipeline.
+description: Conductor that drives the post-brainstorm dev pipeline hands-off — spec-review, plan, plan-review, implementation, PR, fix-pr-reviews loop — stopping only on failure, a DB-deploy gate decision, or final merge. Use after /superpowers:brainstorming when a committed spec exists, or to resume an in-progress pipeline.
 ---
 
 # Ship — Pipeline Conductor
 
 Drives the mechanical tail of development after brainstorming. Invoked once;
-runs phases P0–P7 hands-off, resuming after any `/clear` or auto-compact via a
-state file.
+runs phases P0–P7 (with P6.5 db-gates between P6 and P7) hands-off, resuming after
+any `/clear` or auto-compact via a state file.
 
 > This is a Claude Code skill (an instruction set Claude follows at runtime).
 > **Authority over control flow:** when a delegated skill ends with a hand-off
@@ -20,9 +20,12 @@ state file.
 > Preserved during auto-compaction. After ANY compaction, immediately:
 > 1. Read `.claude-ship-state.json` (repo root).
 > 2. Resume at `phase` using `focus_next`.
-> 3. Preserve: `topic`, `branch`, `phase`, `status`, `pr`, `plan`, `blockers`.
+> 3. Preserve: `topic`, `branch`, `phase`, `status`, `pr`, `plan`, `blockers`, `db_gate`.
 > If `phase == "fix-pr-reviews"`, the loop internals belong to fix-pr-reviews
 > (`.claude-pr-fix-state.json`) — defer to it; re-enter with `--loop --continue`.
+> If `status == "awaiting-db-gates"`, the P6.5 DB gate was deferred — surface
+> `db_gate.checklist`, require explicit human ack that the gate ran, and do NOT
+> close out on a MERGED PR alone (see First action).
 
 ## First action (EVERY invoke)
 
@@ -32,6 +35,36 @@ Read `.claude-ship-state.json`:
   <topic>" and stop.
 - **Present and `status == "blocked"`** → surface the blocker(s) verbatim and ask
   the user to clear them. Do NOT silently re-run or skip the failed phase.
+- **Present and `status == "awaiting-db-gates"`** → the P6.5 DB gate was deferred
+  LOUDLY, not silently. This ack authorizes a PRODUCTION DB write/deploy, so FIRST
+  run `git branch --show-current`; if it ≠ state `branch` → warn about the mismatch,
+  REFUSE to ack (the working tree no longer matches the pipeline the gate belongs
+  to), ask the user to reconcile, and stop. NEXT, before surfacing any checklist,
+  check `gh pr view <pr> --json state` — a PR abandoned while the gate sat open at
+  `awaiting-db-gates` never advanced to P7, so P7's own CLOSED re-check never runs;
+  this branch must catch it instead of ack-and-continuing:
+    - `CLOSED` **and** `db_gate.applied_ahead_of_merge` → LOUD halt (identical to
+      P7's CLOSED branch): the apply-now migration is orphaned live in prod. Surface
+      that the paired rollback (`db_gate.rollback`) MUST be run; require explicit
+      human confirmation it ran (or a deliberate waiver) before setting
+      `status:"done"`. The pending-deploy checklist is moot for a dead PR — this
+      rollback prompt is the ONLY thing that re-surfaces the obligation once the PR
+      is gone. Do NOT silently close.
+    - `CLOSED` **and** no applied-ahead migration → nothing was written to prod;
+      report the pipeline was abandoned, set `status:"done"`, and stop (the deferred
+      checklist is moot — do not ask the human to apply migrations for a dead PR).
+    - `OPEN`/`MERGED` → fall through to the ack flow below.
+  Otherwise surface `db_gate.checklist`
+  from state VERBATIM and ask the human to confirm each listed gate ran (migration
+  applied via `apply_migration`, SQL harness passed, grants/reconciliation verified,
+  any edge-fn/`config.toml`/secret deploys done — including any
+  `db_gate.pending_deploys` left over from an apply-now that also touched
+  functions/secrets). Only on explicit confirmation: append the ack to `phase_log`,
+  set `db_gate.status:"acked"` and clear `pending_deploys`, then advance — to P7 if
+  not yet written, else set `status:"done"`. Without explicit confirmation do NOT
+  proceed — even if `gh pr view <pr>` shows MERGED (a merged PR whose migration never
+  ran, or whose edge function was never deployed, is exactly the prod-404 this phase
+  exists to stop). Re-post the checklist and stop.
 - **Present (in-progress)** → echo `Resuming <topic> at phase <phase>. Next:
   <focus_next>.` Run `git branch --show-current`; if it ≠ state `branch` → warn
   about the mismatch, ask the user to reconcile, and stop. Otherwise jump to the
@@ -59,7 +92,8 @@ Repo-root JSON, gitignored (P0 adds the `.gitignore` entry), single active pipel
   "focus_next": "<1-2 sentences for the next phase>",
   "phase_log": [ { "phase": "init", "result": "branch created" } ],
   "blockers": [],
-  "test_paths": []
+  "test_paths": [],
+  "db_gate": null
 }
 ```
 
@@ -67,13 +101,27 @@ Repo-root JSON, gitignored (P0 adds the `.gitignore` entry), single active pipel
 populated during P4 and persists so a post-compaction resume never has to
 re-infer it (and therefore never falls back to the full, always-failing suite).
 
+`db_gate` records the P6.5 decision + outcome (`null` until P6.5 runs; then
+`{ "decision": "apply-now|defer|abort", "status": "applied|deferred|acked",
+"migrations": [...], "checklist": "<verbatim gate list>", "results": [...],
+"pending_deploys": [...], "applied_ahead_of_merge": <bool>, "rollback": "<paired rollback file|null>" }`).
+`pending_deploys` holds edge-fn/`config.toml`/secret items ship cannot deploy —
+non-empty means the gate stays OPEN (`status:"deferred"`) for human ack even when
+migrations were applied-now, because the single decision/status pair cannot mean
+both "migrations applied" and "deploys still pending". `applied_ahead_of_merge` +
+`rollback` flag a real prod write made before merge, so a later CLOSED-unmerged PR
+can re-surface the orphan-rollback obligation. It survives compaction so a deferred
+gate (or pending deploy) is re-surfaced and acked on a later invoke instead of
+silently closing out.
+
 Rewrite it at every phase boundary (update `phase`, `focus_next`, append to
 `phase_log`). On a failure set `status:"blocked"` and append to `blockers`.
 
 ## Phases
 
-Each phase: check preconditions → run the action (invoke the named skill via the
-Skill tool, overriding its hand-off) → write state (Write tool) → advance or block.
+Each phase: check preconditions → run the action (for delegated phases, invoke the
+named skill via the Skill tool, overriding its hand-off; P0 and P6.5 are inline
+conductor logic with no delegated skill) → write state (Write tool) → advance or block.
 
 ### P0 init
 
@@ -275,7 +323,7 @@ look for, NOT a string to match byte-for-byte. Map (no silent fall-through):
 
 | fix-pr-reviews outcome | detect (case-insensitive substring of the final heading) | ship outcome |
 |------------------------|----------------------------------------------------------|--------------|
-| all-clear | `Loop Complete` AND (`All Clear` OR `No Urgent Issues`) | advance to **P7** |
+| all-clear | `Loop Complete` AND (`All Clear` OR `No Urgent Issues`) | advance to **P6.5** |
 | max-iterations, issues remain | `Max Iterations Reached` | `status:"blocked"` |
 | all-remaining-issues skipped | `Human Review Needed` (dash variant irrelevant) | `status:"blocked"` |
 | unparseable review / workflow fail | the `URGENT_TOTAL=-1` stop (detect per below) | `status:"blocked"` |
@@ -296,15 +344,153 @@ reads the surfaced output and clears the blocker. This table is the coupling
 point between the two skills; if fix-pr-reviews' headings are ever intentionally
 reworded, update the phrases here.
 
+### P6.5 db-gates
+
+DB deploy gates (apply migration to prod, SQL/pgTAP harness, edge-fn deploy,
+`supabase secrets set`) are NOT silent leftovers for the P7 handoff. This phase
+makes them block or defer LOUDLY. It runs only after P6 reaches all-clear. On
+entering, set `phase:"db-gates"` in state (so every sub-outcome below resumes here).
+
+**Detect** the branch's deployable DB artifacts vs the default branch
+(`$DEFAULT_BRANCH` from state; `$BASE = git merge-base "$DEFAULT_BRANCH" HEAD`):
+```bash
+# path-B-automatable: migrations + SQL test harness
+git diff --name-only --diff-filter=d "$BASE"..HEAD -- 'supabase/migrations/*' 'supabase/tests/*'
+# deploy/secret gates: surfaced, NEVER auto-applied by ship
+git diff --name-only --diff-filter=d "$BASE"..HEAD -- 'supabase/functions/*' 'supabase/config.toml'
+```
+Both empty → `phase_log` note `P6.5 no DB artifacts`, advance to P7. Any present →
+this phase MUST resolve before close-out; ship does NOT route around it.
+
+**One explicit decision.** Present the detected artifacts + the path-B runbook,
+then ask the human ONE decision. Never auto-pick: this is the single human gate in
+a hands-off conductor because it writes to PRODUCTION (the frontend degrades
+dark-safe on `PGRST202`, so a missed migration is invisible in CI and surfaces only
+as a user-facing empty state / console 404). The options depend on what was
+detected:
+- **Migrations present** → **apply-now / defer / abort** (apply-now is
+  migrations-only; see below).
+- **Only edge functions / `config.toml` / secrets, no `supabase/migrations/*`** →
+  **defer / abort** only. apply-now does not apply — ship never auto-deploys
+  functions or sets secrets, so there is nothing for it to apply now.
+
+**Prod-only environments — default-recommend defer.** When the only reachable
+Supabase project is production (no staging/non-prod DB — the common case here),
+apply-now means an *unmerged write to prod*, so present the options but recommend
+**defer** unless the human explicitly opts into apply-now. Note the asymmetry: the
+transactional `BEGIN … ROLLBACK` validation runs against prod but commits nothing
+(safe), whereas `apply_migration` is a real, irreversible-without-rollback prod
+write. Default to defer; make apply-now an explicit human choice.
+
+**apply-now — migrations only, via path B.** Rails FIRST — any failing rail
+downgrades this to defer (never force an unsafe prod write):
+1. **Additive-only scan.** Read each new migration. It is safe to apply ahead of
+   merge ONLY if it cannot break the still-deployed *old* frontend. Downgrade to
+   defer (naming the offending statement) on any unsafe pattern:
+   - Breaking DDL — `DROP TABLE|COLUMN|CONSTRAINT`, `ALTER … TYPE`, `SET NOT NULL`
+     without a backfilled default, `RENAME`, `REVOKE` of an in-use grant.
+   - `CREATE OR REPLACE FUNCTION` that changes an EXISTING RPC's signature or
+     behavior — the old frontend still calls the old contract (a brand-new function
+     name is additive and safe; a replacement is not).
+   - Data-mutating DML — `DELETE`, `TRUNCATE`, `UPDATE` — destructive regardless of
+     merge order.
+   - Permission-broadening — any `GRANT … TO anon|authenticated|public`,
+     `CREATE POLICY`, or `ALTER POLICY`. These widen who can read/write prod data
+     and are the exact statements the post-check (`anon` absent where required) exists
+     to police — but that check runs *after* the write already landed on prod. "New,
+     not a REVOKE" does not make a grant safe: `GRANT SELECT ON sensitive_table TO
+     anon` or `CREATE POLICY … USING (true)` is a data exposure the moment it commits.
+     A human must review the specific grant/policy before it touches prod → defer.
+   This list is a heuristic, NOT an exhaustive safety proof. When a migration's
+   effect on the old frontend — or on who can access prod data — is unclear, DEFER.
+   Only clearly additive, non-permission-broadening migrations (new
+   table/RPC/column-with-default) are apply-now candidates. A new grant or policy is
+   NOT categorically additive — route it to defer per the permission-broadening rail.
+2. **Rollback pairing.** Confirm the paired rollback migration exists (repo
+   convention: sibling `…99`, e.g. `20260702000099`). Absent → defer.
+3. **Idempotency guard.** `list_migrations` (Supabase MCP); if the version is
+   already applied, skip the apply and run only post-checks (safe resume).
+Then the proven steps (all from P2/P4a/P4b/P5):
+1. **Validate transactionally** — `execute_sql` running the migration body inside
+   `BEGIN … ROLLBACK` (proves it executes, commits nothing). If a
+   `supabase/tests/*.test.sql` harness shipped, run its scenarios the same way; any
+   HARD-blocker assertion (e.g. benchmark-leak) failing → `status:"blocked"`, stop.
+2. **Apply** — `apply_migration` (NEVER `db push`).
+3. **Post-checks** — grants (`anon` absent where required, `authenticated`
+   present), an RPC smoke call under an impersonated owner (RLS-real), and
+   reconciliation counts.
+Record each result in `phase_log` and in `db_gate` (`decision:"apply-now"`,
+`migrations`, `results`, `applied_ahead_of_merge:true`, `rollback:"<paired rollback
+file>"`). **Applied ahead of merge → if the PR is later abandoned the migration is
+orphaned in prod and the paired rollback MUST be run**; the `rollback` field carries
+the filename so P7's MERGED/CLOSED re-check (not just the handoff prose) can
+re-surface it.
+
+**apply-now does NOT cover edge functions / secrets — and does NOT close the gate
+while any remain.** Detected `supabase/functions/*` or `config.toml`/secret changes
+are listed but never deployed by ship (deploy + secret semantics are outside path
+B's proven scope). Record them in `db_gate.pending_deploys`. The final step is then
+CONDITIONAL — the single decision/status pair cannot mean both "migrations applied"
+and "deploys still pending", so any pending item keeps the gate OPEN:
+- **`pending_deploys` empty** → set `db_gate.status:"applied"` and advance to P7.
+- **`pending_deploys` non-empty** → the migrations are applied but the gate is NOT
+  clean. Set `db_gate.status:"deferred"` and state `status:"awaiting-db-gates"`, and
+  build `db_gate.checklist` from the pending edge-fn/secret deploys (noting which
+  migrations were already applied so the human does not re-run them). Do NOT advance
+  to P7 — First action holds here until the human acks the deploys ran. This closes
+  the hole where an apply-now migration would advance straight to merge-ready
+  alongside an updated-but-undeployed edge function.
+
+**defer — loud, never silent.** Set `status:"awaiting-db-gates"` (NOT
+in-progress). Post the gate checklist as a PR comment (proven manually in
+PR #3944): exact migrations to `apply_migration`, harness to run, grants/
+reconciliation to verify, the rollback file, and any edge-fn/secret deploys. Store
+the verbatim checklist in `db_gate` (`decision:"defer"`, `status:"deferred"`,
+`applied_ahead_of_merge:false` — nothing was written to prod yet, so a later CLOSED
+PR triggers no rollback obligation). Ship will NOT set `done` until the human acks
+it ran (see First action / P7).
+
+**abort.** `status:"blocked"`, blocker `DB gate aborted by human — resolve DB
+deploy manually, then re-invoke /ship`, stop.
+
 ### P7 awaiting-merge
 
 First `mkdir -p docs/superpowers/handoffs/` (the Write tool does not create
 parent directories, and this dir may not exist on a repo that has never
 completed a `ship` run). Then write the one-time committed summary to
 `docs/superpowers/handoffs/ship-<slug>.md` (topic, branch, PR URL, final review
-status, `phase_log`, leftovers) and commit it. Report the PR URL + status. **STOP — the human merges manually; the conductor
-never merges.** On a later `/ship` invoke, check `gh pr view <pr> --json state`;
-if `MERGED` → set `status:"done"` and stop.
+status, `phase_log`, leftovers, the P6.5 `db_gate` outcome — applied migrations +
+post-check results, OR the deferred gate checklist — and, if a migration was
+applied ahead of merge, an **applied-but-unmerged rollback flag** naming the paired
+rollback (`db_gate.rollback`) to run if the PR is abandoned) and commit it. Report
+the PR URL + status. **STOP — the human merges manually; the conductor never
+merges.** On a later `/ship` invoke, check `gh pr view <pr> --json state`:
+- `MERGED` **and** the gate is clean (`db_gate` null, or `status` `applied`/`acked`
+  with an empty `pending_deploys`) → set `status:"done"` and stop.
+- `MERGED` but `db_gate` is still deferred/unacked (`status == "deferred"` OR a
+  non-empty `pending_deploys`) → do NOT set done. Switch to
+  `status:"awaiting-db-gates"` and surface the checklist (a merged PR whose migration
+  never ran / edge fn never deployed is the exact prod failure P6.5 prevents); handle
+  per First action until acked. **Defense-in-depth note:** a deferred/pending gate
+  normally holds the pipeline at `status:"awaiting-db-gates"`, which First action
+  intercepts BEFORE this P7 handler is ever reached — First action is the PRIMARY
+  enforcement path, not this bullet. This branch is a belt-and-suspenders assertion
+  of the invariant "never `done` on an unran gate". Do NOT delete the First-action
+  `awaiting-db-gates` bullet believing P7 catches this case; keep the two in sync if
+  you change the dispatch order.
+- `CLOSED` (abandoned, not merged) **and** `db_gate.applied_ahead_of_merge` → LOUD
+  halt: the apply-now migration is now orphaned live in prod. Surface that the paired
+  rollback (`db_gate.rollback`) MUST be run, and require explicit human confirmation
+  it was run (or a deliberate waiver) before setting `status:"done"`. Do NOT silently
+  close — this is the only prompt that re-surfaces the rollback obligation once the
+  PR is gone (the handoff markdown alone re-surfaces nothing). This P7 branch catches
+  a PR that reached P7 with a clean/applied gate and was THEN closed; a PR abandoned
+  earlier — while the gate was still held at `awaiting-db-gates` (apply-now with
+  pending deploys) — never reaches P7, so First action runs this identical CLOSED
+  check. Keep the two CLOSED handlers in sync.
+- `CLOSED` (abandoned, not merged) **and** no applied-ahead migration → nothing is
+  orphaned; report the pipeline was abandoned, set `status:"done"`, and stop.
+- `OPEN` → still awaiting merge; re-report the PR URL + status and stop.
 
 ## Failure handling
 
@@ -313,4 +499,9 @@ if `MERGED` → set `status:"done"` and stop.
 - A re-invoked `blocked` pipeline surfaces the blocker and waits for the human; it
   never silently re-runs or skips the failed phase.
 - Branch mismatch (state `branch` ≠ current branch) → warn + reconcile + stop.
+- `awaiting-db-gates` (P6.5) is a deliberate LOUD halt, NOT a failure: the DB gate
+  was deferred and the pipeline waits for explicit human ack (see First action). It
+  never auto-closes on a merged PR without that ack. (A CLOSED/abandoned PR is
+  different: First action reports abandonment — and, if a migration was applied ahead
+  of merge, LOUDLY demands the paired rollback — instead of acking a deploy.)
 - `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is never modified by this skill.
