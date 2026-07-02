@@ -1,0 +1,107 @@
+{
+  "title": "The 10 R-Strategies of the Circular Economy",
+  "source": {
+    "publisher": "Circularise",
+    "url": "https://www.circularise.com/blogs/r-strategies-for-a-circular-economy",
+    "retrieved": "2026-07-02"
+  },
+  "definition": "The ten strategies are classified under three categories that demonstrate the length of the waste loop each represents. The shorter the loop, the more sustainable the strategy is.",
+  "categories": [
+    {
+      "name": "Short Loops: Smarter Product Use and Manufacturing",
+      "loop_length": "short",
+      "note": "Most sustainable — least material and energy re-processing.",
+      "strategies": [
+        {
+          "id": "R0",
+          "name": "Refuse",
+          "description": "Either bans the use of specific materials deemed harmful to the planet, puts an end to a certain production process, or phases out one product that is detrimental to the environment in favour of an efficient alternative."
+        },
+        {
+          "id": "R1",
+          "name": "Rethink",
+          "description": "Making a product use-intensive through sharing products or by putting multi-functional products on the market (e.g. leasing clothes, battery swapping points, or reusable coffee mugs)."
+        },
+        {
+          "id": "R2",
+          "name": "Reduce",
+          "description": "Aims to increase the efficiency of product manufacturing or use. Doing so results in using fewer natural resources and producing less waste."
+        }
+      ]
+    },
+    {
+      "name": "Medium Loops: Extend the Lifespan of a Product and Its Parts",
+      "loop_length": "medium",
+      "strategies": [
+        {
+          "id": "R3",
+          "name": "Reuse",
+          "description": "When a different consumer uses a discarded product that is still in good condition and is able to fulfil its original function."
+        },
+        {
+          "id": "R4",
+          "name": "Repair",
+          "description": "The Repair and maintenance of a defective product so it can perform once more."
+        },
+        {
+          "id": "R5",
+          "name": "Refurbish",
+          "description": "Restoring an old product and bringing it up to date. Upgrading or modernising a product can happen within (with updated components) and on the outside."
+        },
+        {
+          "id": "R6",
+          "name": "Remanufacture",
+          "description": "Involves integrating product components that are still perfectly intact into new products with the same function."
+        },
+        {
+          "id": "R7",
+          "name": "Repurpose",
+          "description": "Incorporates discarded components into a completely different product for a unique benefit or alternative purpose."
+        }
+      ]
+    },
+    {
+      "name": "Long Loops: Creative Material Application",
+      "loop_length": "long",
+      "note": "Least sustainable of the R-strategies — material is broken down before reuse.",
+      "strategies": [
+        {
+          "id": "R8",
+          "name": "Recycle",
+          "description": "Processing materials through recycling makes sense, especially when a product cannot be used any longer and there are materials within it to recover."
+        },
+        {
+          "id": "R9",
+          "name": "Recover",
+          "description": "The composting of organic waste can recover energy through anaerobic digestion or waste-to-energy incineration that generates electricity or heat."
+        }
+      ]
+    }
+  ],
+  "enablers": [
+    {"id": "ecodesign", "name": "Design for circularity",
+     "description": "Durability, modularity, recyclability, and disassembly designed into the product so downstream R-strategies become possible.",
+     "supports": ["R2", "R3", "R4", "R5", "R8"]},
+    {"id": "rnd", "name": "R&D and innovation",
+     "description": "Research into circular materials, processes, and technologies (e.g. recycled feedstock, bio-based inputs).",
+     "supports": ["R2", "R5", "R6", "R8", "R9"]},
+    {"id": "data_infrastructure", "name": "Digital and data infrastructure",
+     "description": "Digital product passports, material traceability, IoT tracking, and the data systems that make loops auditable.",
+     "supports": ["R3", "R4", "R5", "R8"]},
+    {"id": "training", "name": "Workforce skills and training",
+     "description": "Building the skills and capability needed to repair, refurbish, and run circular operations.",
+     "supports": ["R4", "R5", "R6"]},
+    {"id": "partnerships", "name": "Partnerships and collaboration",
+     "description": "Value-chain collaboration, take-back networks, industry consortia, and customer engagement.",
+     "supports": ["R1", "R3", "R7", "R8"]},
+    {"id": "reverse_logistics", "name": "Reverse logistics",
+     "description": "Collection, take-back, and sorting infrastructure that returns used products and materials into loops.",
+     "supports": ["R3", "R4", "R5", "R6", "R8"]},
+    {"id": "finance", "name": "Circular finance and business models",
+     "description": "Financing circular business models (product-as-a-service, leasing) and capital for circular production lines.",
+     "supports": ["R1", "R2"]},
+    {"id": "policy", "name": "Policy and standards engagement",
+     "description": "Policy advocacy and regulatory alignment such as extended producer responsibility and right-to-repair.",
+     "supports": ["R0", "R4", "R8"]}
+  ]
+}
