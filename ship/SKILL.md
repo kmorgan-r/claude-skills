@@ -379,9 +379,18 @@ downgrades this to defer (never force an unsafe prod write):
      name is additive and safe; a replacement is not).
    - Data-mutating DML — `DELETE`, `TRUNCATE`, `UPDATE` — destructive regardless of
      merge order.
+   - Permission-broadening — any `GRANT … TO anon|authenticated|public`,
+     `CREATE POLICY`, or `ALTER POLICY`. These widen who can read/write prod data
+     and are the exact statements the post-check (`anon` absent where required) exists
+     to police — but that check runs *after* the write already landed on prod. "New,
+     not a REVOKE" does not make a grant safe: `GRANT SELECT ON sensitive_table TO
+     anon` or `CREATE POLICY … USING (true)` is a data exposure the moment it commits.
+     A human must review the specific grant/policy before it touches prod → defer.
    This list is a heuristic, NOT an exhaustive safety proof. When a migration's
-   effect on the old frontend is unclear, DEFER. Only clearly additive migrations
-   (new table/RPC/column-with-default, new grant) are apply-now candidates.
+   effect on the old frontend — or on who can access prod data — is unclear, DEFER.
+   Only clearly additive, non-permission-broadening migrations (new
+   table/RPC/column-with-default) are apply-now candidates. A new grant or policy is
+   NOT categorically additive — route it to defer per the permission-broadening rail.
 2. **Rollback pairing.** Confirm the paired rollback migration exists (repo
    convention: sibling `…99`, e.g. `20260702000099`). Absent → defer.
 3. **Idempotency guard.** `list_migrations` (Supabase MCP); if the version is
