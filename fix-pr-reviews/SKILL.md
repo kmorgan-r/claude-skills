@@ -322,19 +322,29 @@ The `mv` command on the same filesystem is atomic on Linux/macOS/Git Bash, so th
 **At the END of each iteration:**
 1. Increment `iteration` count (per-session)
 2. Increment `total_rounds` (session-independent — this is what the ceiling checks)
-3. Update `previous_urgent_count` for regression detection
+3. Update `previous_urgent_count` for regression detection (skip when `URGENT_TOTAL == -1` — a parse/fetch failure must NOT overwrite the last real count; see "Regression detection")
 4. Append the current urgent count to `urgent_count_history` (skip when `URGENT_TOTAL == -1`; cap the array at the last 20 entries)
 5. Write state file before commit (Write tool by default — see "State-file writes" above)
 
-These are the five field transitions; apply them however you write state. **Default: read the state with the Read tool, apply the changes, write the full document back with the Write tool** (the npm-shim jq truncates the file — see the jq Warning). The jq form below is normative for the LOGIC only; use it from bash **only if jq is verified working**:
+These are the five field transitions; apply them however you write state. **Default: read the state with the Read tool, apply the changes, write the full document back with the Write tool** (the npm-shim jq truncates the file — see the jq Warning). The jq form below is normative for the LOGIC only; use it from bash **only if jq is verified working**.
+
+**When `URGENT_TOTAL == -1`** (parse/fetch failure): bump `iteration` and `total_rounds` ONLY — do NOT touch `previous_urgent_count` or `urgent_count_history`. Writing `-1` into either makes the next iteration compare a real count against `-1` (e.g. `3 -gt -1` → false "REGRESSION DETECTED") and pollutes the severity trend shown at the ceiling handoff. Same sentinel rule as "Regression detection" below.
 ```bash
-jq --argjson uc "$URGENT_TOTAL" \
-  '.iteration += 1
-   | .total_rounds = ((.total_rounds // 0) + 1)
-   | .previous_urgent_count = $uc
-   | .urgent_count_history = ((.urgent_count_history // []) + [$uc] | .[-20:])' \
-  .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
-  mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
+if [ "$URGENT_TOTAL" -eq -1 ]; then
+  # Parse/fetch failure: advance counters only, preserve last real urgent state
+  jq '.iteration += 1
+     | .total_rounds = ((.total_rounds // 0) + 1)' \
+    .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
+    mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
+else
+  jq --argjson uc "$URGENT_TOTAL" \
+    '.iteration += 1
+     | .total_rounds = ((.total_rounds // 0) + 1)
+     | .previous_urgent_count = $uc
+     | .urgent_count_history = ((.urgent_count_history // []) + [$uc] | .[-20:])' \
+    .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
+    mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
+fi
 ```
 
 This ensures that if auto-compaction occurs mid-iteration, Claude can recover state by reading the file.
