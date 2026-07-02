@@ -484,15 +484,19 @@ if [ -f ".claude-pr-fix-state.json" ]; then
       if [ "$STATE_ITER" -ge "$STATE_MAX" ]; then
         echo "⚠️ Previous run completed (iteration $STATE_ITER >= max $STATE_MAX)"
         echo "Preserving issue_history, resetting iteration counter..."
-        # Reset per-session iteration, but PRESERVE session-independent total_rounds.
-        # (--reset is the only path that zeroes total_rounds; it deletes the file entirely.)
+        # Reset per-session iteration, but PRESERVE session-independent total_rounds AND
+        # total_rounds_ceiling. (--reset is the only path that zeroes total_rounds; it
+        # deletes the file entirely.) The ceiling is raise-only here: a plain --loop
+        # (default MAX_ROUNDS=8) must not clobber a previously-raised ceiling, yet an
+        # explicit --max-rounds=<higher> must still raise it — so take max(stored, requested).
+        # Mirrors how max_iterations is intentionally left untouched by these reset blocks.
         jq --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           --argjson ceiling "$MAX_ROUNDS" \
           '.total_rounds = (.total_rounds // .iteration // 0)
            | .iteration = 1
            | .started_at = $started
            | .previous_urgent_count = null
-           | .total_rounds_ceiling = $ceiling
+           | .total_rounds_ceiling = ([(.total_rounds_ceiling // 0), $ceiling] | max)
            | .urgent_count_history = (.urgent_count_history // [])' \
           .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
           mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
@@ -501,15 +505,19 @@ if [ -f ".claude-pr-fix-state.json" ]; then
       else
         echo "✅ State file valid for PR #$CURRENT_PR — preserving issue_history"
         # Preserve issue_history but reset iteration for new loop session
-        # Reset per-session iteration, but PRESERVE session-independent total_rounds.
-        # (--reset is the only path that zeroes total_rounds; it deletes the file entirely.)
+        # Reset per-session iteration, but PRESERVE session-independent total_rounds AND
+        # total_rounds_ceiling. (--reset is the only path that zeroes total_rounds; it
+        # deletes the file entirely.) The ceiling is raise-only here: a plain --loop
+        # (default MAX_ROUNDS=8) must not clobber a previously-raised ceiling, yet an
+        # explicit --max-rounds=<higher> must still raise it — so take max(stored, requested).
+        # Mirrors how max_iterations is intentionally left untouched by these reset blocks.
         jq --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           --argjson ceiling "$MAX_ROUNDS" \
           '.total_rounds = (.total_rounds // .iteration // 0)
            | .iteration = 1
            | .started_at = $started
            | .previous_urgent_count = null
-           | .total_rounds_ceiling = $ceiling
+           | .total_rounds_ceiling = ([(.total_rounds_ceiling // 0), $ceiling] | max)
            | .urgent_count_history = (.urgent_count_history // [])' \
           .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
           mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
@@ -530,8 +538,9 @@ fi
 2. Validate JSON is parseable (if corrupted, backup to `.corrupted` and start fresh)
 3. Validate `pr_number` matches current branch's PR (if mismatched, backup to `.prNNN` and start fresh)
 4. Load `iteration` as-is (do NOT reset — this is a resume, not a new session)
-5. Load `issue_history`, `files_blacklisted`, `previous_urgent_count`
-6. Continue from the current iteration
+5. Load `issue_history`, `files_blacklisted`, `previous_urgent_count`, **`total_rounds`, `total_rounds_ceiling`, `urgent_count_history`**
+6. **Pre-flight ceiling check (same gate as `--loop`):** if `total_rounds >= total_rounds_ceiling`, STOP immediately with the "Round Ceiling Reached" handoff (see Loop Step 6) instead of resuming. A loop that already stopped at the ceiling has no mid-session state to resume — `--continue` must not silently bypass it. The human proceeds with `/fix-pr-reviews --loop --max-rounds=<higher>` (raises the ceiling and starts a fresh session) or `--reset`. This is the same issue #3953 class of bug via the `--continue` re-invocation path. Implemented by the shared "Pre-flight ceiling check" bash block below, which runs on BOTH the `--loop` and `--continue` resume paths.
+7. Continue from the current iteration
 
 **If `--loop` is used (new loop session) and state file exists for same PR:**
 1. Read `.claude-pr-fix-state.json`
@@ -585,12 +594,14 @@ jq -n \
 Starting iteration 1...
 ```
 
-**Pre-flight ceiling check (runs after state is loaded, before the first fix):**
+**Pre-flight ceiling check (runs on BOTH the `--loop` and `--continue` resume paths, after state is loaded, before the first fix):**
 
 ```bash
-# Session-independent ceiling. Catches a re-invoked --loop that is already at/over
-# the ceiling BEFORE it starts another round. --reset (deletes state) or a raised
-# --max-rounds=<N> are the explicit human decisions that allow proceeding.
+# Session-independent ceiling. Catches a re-invoked --loop OR a --continue resume that is
+# already at/over the ceiling BEFORE it starts/resumes another round. Reads the ceiling from
+# the state file (not MAX_ROUNDS), so --continue is gated purely off stored state. --reset
+# (deletes state) or a raised --max-rounds=<N> via --loop are the explicit human decisions
+# that allow proceeding.
 TOTAL_ROUNDS=$(jq -r '.total_rounds // 0' .claude-pr-fix-state.json)
 ROUNDS_CEILING=$(jq -r '.total_rounds_ceiling // 8' .claude-pr-fix-state.json)
 if [ "$TOTAL_ROUNDS" -ge "$ROUNDS_CEILING" ]; then
