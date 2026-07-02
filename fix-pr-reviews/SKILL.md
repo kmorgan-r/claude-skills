@@ -12,17 +12,27 @@ Automatically fetch the most recent code review comments from a GitHub PR and sy
 ## When to Use This Skill
 
 Use `/fix-pr-reviews` when:
-- Your code review bot (claude) has posted review comments on a PR
+- Your code review bot (posting as `github-actions`) has posted review comments on a PR
 - You want to address review feedback without manually copying from GitHub
 - You're on a feature branch with an open PR
 
 ## Prerequisites
 
 - GitHub CLI (`gh`) must be authenticated
-- `jq` must be installed (for JSON parsing in validation scripts)
 - Bash-compatible shell (Git Bash on Windows, or native bash on macOS/Linux)
 - You must be on a branch with an associated open PR
-- The PR must have review comments from the `claude` bot
+- The PR must have review comments from the review bot (default login: `github-actions` — reviews posted by a workflow step via `GITHUB_TOKEN` + `gh pr comment` appear under this login, NOT as `claude`)
+
+### jq Warning — verify before trusting
+
+The bash examples in this doc use `jq` for JSON parsing. **Verify jq works before relying on it**: run `echo '{}' | jq .`. On some machines (including this repo's primary dev machine) `jq` resolves to a broken npm shim that silently produces EMPTY output — a state-file write through that shim once truncated `.claude-pr-fix-state.json` to 0 bytes mid-loop.
+
+If jq is broken or absent, substitute per operation:
+- **State-file writes:** use the Write tool (full-document overwrite of `.claude-pr-fix-state.json`). This replaces every `jq ... > tmp && mv` pattern below.
+- **JSON extraction from `gh` output:** use `gh`'s built-in `--jq` flag (bundled gojq, independent of local jq).
+- **State-file reads:** use the Read tool.
+
+The bash snippets in this doc are normative for their LOGIC (validations, ordering, atomicity intent), not their tooling — reproduce the same checks with whichever tool actually works.
 
 ### Loop Mode Prerequisites
 
@@ -54,9 +64,9 @@ The skill supports configuration via environment variables or command arguments:
 |--------|---------|-------------|
 | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `40` (recommended) | Context % at which auto-compaction triggers. **Required for loop mode.** |
 | `REVIEW_WORKFLOW` | `claude-code-review.yml` | GitHub Actions workflow that runs the review bot |
-| `REVIEW_BOT` | `claude` | GitHub username of the review bot |
+| `REVIEW_BOT` | `github-actions` | Login the review bot posts under. A workflow step posting via `GITHUB_TOKEN` (`gh pr comment`) appears as `github-actions`; only an app posting directly appears under its own name (e.g. `claude`). |
 | `MAX_LOOP_ITERATIONS` | `5` | Maximum fix iterations in loop mode |
-| `LOOP_WAIT_TIMEOUT` | `15` | Minutes to wait for GitHub Action completion |
+| `LOOP_WAIT_TIMEOUT` | `15` | Minutes to wait for GitHub Action completion (this repo's review run typically finishes in 3–4 min; the timeout is a safety ceiling, not the expected wait) |
 
 **State file:** `.claude-pr-fix-state.json` - Tracks loop progress and issue history across compactions and invocations. Use `--reset` to clear history and start fresh.
 
@@ -78,7 +88,7 @@ If no PR is found, inform the user and ask them to provide a PR number manually.
 
 ### Step 2: Fetch Most Recent Review
 
-Fetch all comments and filter to the most recent one from the `claude` bot:
+Fetch all comments and filter to the most recent one from the review bot:
 
 ```bash
 # SECURITY: Validate PR_NUMBER is numeric before use in commands
@@ -88,16 +98,18 @@ if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-# Get the most recent review comment from claude
-gh pr view "$PR_NUMBER" --json comments --jq '
-  [.comments[] | select(.author.login == "claude")]
+# Get the most recent review comment from the review bot
+# (github-actions = the login for workflow-posted comments; see REVIEW_BOT config)
+REVIEW_BOT="${REVIEW_BOT:-github-actions}"
+gh pr view "$PR_NUMBER" --json comments --jq "
+  [.comments[] | select(.author.login == \"$REVIEW_BOT\")]
   | sort_by(.createdAt)
   | last
   | {body: .body, createdAt: .createdAt, url: .url}
-'
+"
 ```
 
-If no review from `claude` is found, check for reviews from other common bot names or inform the user.
+If no review from `$REVIEW_BOT` is found, check other common bot logins (`claude`, the workflow app's name) or inform the user.
 
 ### Step 3: Parse Review Into Actionable Items
 
@@ -263,16 +275,22 @@ Loop mode uses `.claude-pr-fix-state.json` to track progress and issue history a
 
 This ensures that if auto-compaction occurs DURING a fix, the approach is already recorded and won't be repeated.
 
-**CRITICAL: Always use atomic writes for state file updates:**
+**CRITICAL: State-file writes — use the Write tool by default:**
+
+Write the full state document with the Write tool (single full-document overwrite). This is the default because on machines with a broken jq (npm shim — see the jq Warning in Prerequisites), the jq pipeline below silently writes an EMPTY file, which is worse than the partial-write problem it was designed to avoid.
+
+Only if jq is verified working and you must update state from bash, use the atomic-rename pattern:
 ```bash
 # WRONG - partial write on crash/compaction causes corruption:
 jq '...' .claude-pr-fix-state.json > .claude-pr-fix-state.json
 
-# CORRECT - atomic rename prevents partial writes:
+# WRONG on machines with the npm-shim jq - silently writes an EMPTY state file
+
+# Acceptable ONLY with verified-working jq - atomic rename prevents partial writes:
 jq '...' .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
   mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
 ```
-The `mv` command on the same filesystem is atomic on Linux/macOS/Git Bash, so the state file is either fully updated or unchanged - never partially written.
+The `mv` command on the same filesystem is atomic on Linux/macOS/Git Bash, so the state file is either fully updated or unchanged - never partially written. After ANY bash-driven state write, sanity-check the result is non-empty valid JSON before proceeding.
 
 **After EACH successful fix:**
 1. Update the latest attempt's `outcome` to `"pending"` (confirmed as `"resolved"` or `"re-flagged"` after next review)
@@ -798,9 +816,10 @@ if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
 fi
 
 # Fetch comments newer than our push
+REVIEW_BOT="${REVIEW_BOT:-github-actions}"
 gh pr view "$PR_NUMBER" --json comments --jq "
   [.comments[]
-   | select(.author.login == \"claude\")
+   | select(.author.login == \"$REVIEW_BOT\")
    | select(.createdAt > \"$PUSH_TIME\")]
   | sort_by(.createdAt)
   | last
@@ -859,10 +878,16 @@ WORKFLOW_STATUS=$(gh run view "$RUN_ID" --json conclusion --jq '.conclusion')
 if [ -z "$REVIEW_BODY" ] || [ "$REVIEW_BODY" == "null" ] || [ "$REVIEW_BODY" == "{}" ]; then
   # Distinguish between "no issues" vs "workflow failed"
   if [ "$WORKFLOW_STATUS" == "success" ]; then
-    echo "✅ Workflow succeeded with no review comment - likely clean!"
-    URGENT_TOTAL=0  # Treat as success
+    # This repo's claude-code-review.yml FAILS when no review.md verdict artifact
+    # is produced, so a SUCCESSFUL run always posts a comment (findings or the
+    # explicit "✅ No critical issues found" marker). Success + empty fetch here
+    # means OUR fetch filter is wrong (REVIEW_BOT login or PUSH_TIME filter) —
+    # do NOT assume clean. Re-check the author filter before anything else.
+    echo "⚠️ Workflow succeeded but no comment matched the fetch filter"
+    echo "   Check REVIEW_BOT (expected: github-actions) and the timestamp filter"
+    URGENT_TOTAL=-1  # Signal unknown state - NOT clean
   elif [ "$WORKFLOW_STATUS" == "failure" ] || [ "$WORKFLOW_STATUS" == "cancelled" ]; then
-    echo "❌ Workflow $WORKFLOW_STATUS - review may not have run"
+    echo "❌ Workflow $WORKFLOW_STATUS - review may not have run (this includes the missing-verdict-artifact guard failing the run)"
     URGENT_TOTAL=-1  # Signal error state
   else
     echo "⚠️ Empty review body with workflow status: $WORKFLOW_STATUS"
@@ -1207,7 +1232,7 @@ The skill supports optional arguments:
 | Argument | Description | Example |
 |----------|-------------|---------|
 | `<PR_NUMBER>` | Specify PR number directly | `/fix-pr-reviews 2806` |
-| `--loop` | **Enable loop mode** - auto-iterate until clean | `/fix-pr-reviews --loop` |
+| `--loop` | **Enable loop mode** - auto-iterate until clean. Single-dash `-loop` is accepted as a typo-tolerant alias. | `/fix-pr-reviews --loop` |
 | `--workflow=<name>` | Specify review workflow (default: claude-code-review.yml) | `/fix-pr-reviews --loop --workflow=claude-review.yml` |
 | `--max-iterations=<N>` | Max loop iterations (default: 5) | `/fix-pr-reviews --loop --max-iterations=3` |
 | `--all` | Include medium/low priority items too | `/fix-pr-reviews --all` |
@@ -1252,7 +1277,7 @@ Claude: I'll fetch the most recent code review for your current PR.
 → PR #2806: feat: Add ISO 14067 report frontend integration
 
 [Runs: gh pr view 2806 --json comments --jq '...']
-→ Found review from claude at 2026-01-15T12:39:34Z
+→ Found review from github-actions at 2026-01-15T12:39:34Z
 
 Parsing review...
 
@@ -1373,8 +1398,8 @@ Options:
 
 ### No Reviews Found
 ```
-No review comments from 'claude' found on PR #2806.
-The PR has comments from: vercel, github-actions
+No review comments from 'github-actions' found on PR #2806.
+The PR has comments from: vercel, claude
 
 Would you like me to check reviews from a different author?
 ```
@@ -1402,17 +1427,23 @@ Please specify: /fix-pr-reviews --loop --workflow=code-review.yml
 ```
 ⚠️ No new review found after 5 minutes
 
-The review workflow completed but no new comment from 'claude' was posted.
+The review workflow completed but no new comment from the review bot was posted.
 This might mean:
-1. The bot only comments when there are issues (good sign!)
+1. The fetch filter is wrong (REVIEW_BOT login or timestamp) — check first
 2. The workflow failed silently
 3. The bot uses a different comment mechanism
 
 Options:
 1. Check PR manually: gh pr view 2806 --web
-2. Assume clean and exit loop mode
+2. Re-check with a different author filter
 3. Wait longer for review (extend by 5 min)
 ```
+
+Note: this repo's `claude-code-review.yml` fails the run when the review step
+produces no `review.md` verdict artifact, and a clean review posts an explicit
+"✅ No critical issues found" comment. A SUCCESSFUL run with no matching comment
+therefore points at YOUR fetch filter, never at "bot only comments on issues" —
+do not assume clean.
 
 ### Loop Mode: Same Issues Persist
 ```
