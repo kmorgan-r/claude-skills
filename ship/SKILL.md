@@ -39,7 +39,22 @@ Read `.claude-ship-state.json`:
   LOUDLY, not silently. This ack authorizes a PRODUCTION DB write/deploy, so FIRST
   run `git branch --show-current`; if it ≠ state `branch` → warn about the mismatch,
   REFUSE to ack (the working tree no longer matches the pipeline the gate belongs
-  to), ask the user to reconcile, and stop. Otherwise surface `db_gate.checklist`
+  to), ask the user to reconcile, and stop. NEXT, before surfacing any checklist,
+  check `gh pr view <pr> --json state` — a PR abandoned while the gate sat open at
+  `awaiting-db-gates` never advanced to P7, so P7's own CLOSED re-check never runs;
+  this branch must catch it instead of ack-and-continuing:
+    - `CLOSED` **and** `db_gate.applied_ahead_of_merge` → LOUD halt (identical to
+      P7's CLOSED branch): the apply-now migration is orphaned live in prod. Surface
+      that the paired rollback (`db_gate.rollback`) MUST be run; require explicit
+      human confirmation it ran (or a deliberate waiver) before setting
+      `status:"done"`. The pending-deploy checklist is moot for a dead PR — this
+      rollback prompt is the ONLY thing that re-surfaces the obligation once the PR
+      is gone. Do NOT silently close.
+    - `CLOSED` **and** no applied-ahead migration → nothing was written to prod;
+      report the pipeline was abandoned, set `status:"done"`, and stop (the deferred
+      checklist is moot — do not ask the human to apply migrations for a dead PR).
+    - `OPEN`/`MERGED` → fall through to the ack flow below.
+  Otherwise surface `db_gate.checklist`
   from state VERBATIM and ask the human to confirm each listed gate ran (migration
   applied via `apply_migration`, SQL harness passed, grants/reconciliation verified,
   any edge-fn/`config.toml`/secret deploys done — including any
@@ -468,7 +483,11 @@ merges.** On a later `/ship` invoke, check `gh pr view <pr> --json state`:
   rollback (`db_gate.rollback`) MUST be run, and require explicit human confirmation
   it was run (or a deliberate waiver) before setting `status:"done"`. Do NOT silently
   close — this is the only prompt that re-surfaces the rollback obligation once the
-  PR is gone (the handoff markdown alone re-surfaces nothing).
+  PR is gone (the handoff markdown alone re-surfaces nothing). This P7 branch catches
+  a PR that reached P7 with a clean/applied gate and was THEN closed; a PR abandoned
+  earlier — while the gate was still held at `awaiting-db-gates` (apply-now with
+  pending deploys) — never reaches P7, so First action runs this identical CLOSED
+  check. Keep the two CLOSED handlers in sync.
 - `CLOSED` (abandoned, not merged) **and** no applied-ahead migration → nothing is
   orphaned; report the pipeline was abandoned, set `status:"done"`, and stop.
 - `OPEN` → still awaiting merge; re-report the PR URL + status and stop.
@@ -482,5 +501,7 @@ merges.** On a later `/ship` invoke, check `gh pr view <pr> --json state`:
 - Branch mismatch (state `branch` ≠ current branch) → warn + reconcile + stop.
 - `awaiting-db-gates` (P6.5) is a deliberate LOUD halt, NOT a failure: the DB gate
   was deferred and the pipeline waits for explicit human ack (see First action). It
-  never auto-closes, even on a merged PR.
+  never auto-closes on a merged PR without that ack. (A CLOSED/abandoned PR is
+  different: First action reports abandonment — and, if a migration was applied ahead
+  of merge, LOUDLY demands the paired rollback — instead of acking a deploy.)
 - `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is never modified by this skill.
