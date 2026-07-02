@@ -24,13 +24,38 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 
 COLS = ["entity", "lei", "domain", "indicator", "value", "unit", "period", "status",
-        "source", "source_url", "page", "quote", "retrieved_at"]
+        "source", "source_url", "page", "quote", "retrieved_at",
+        "item_type", "r_strategy", "enabler_topic",
+        "target_end_year", "target_has_kpi", "target_status"]
 REQUIRED = ["entity", "domain", "indicator", "period", "status", "retrieved_at"]
 SOURCED_STATUSES = {"found", "target"}
 VALID_STATUS = {"found", "not_found", "target"}
+
+# Classification enums — validated ONLY when the field is non-empty, so old
+# 13-column rows (which omit these fields) still pass. New fields are never required.
+VALID_ITEM_TYPE = {"kpi", "target", "qualitative"}
+VALID_R = {f"R{i}" for i in range(10)}  # R0..R9
+VALID_ENABLER = {"ecodesign", "rnd", "data_infrastructure", "training",
+                 "partnerships", "reverse_logistics", "finance", "policy"}
+VALID_HAS_KPI = {"yes", "no"}
+VALID_TARGET_STATUS = {"on_track", "achieved", "delayed", "changed",
+                       "failed", "dropped", "too_early"}
+
+
+def _autofill_item_type(row):
+    """If item_type is blank, derive it from status (found->kpi, target->target).
+    not_found is left blank — a gap has no metric/target character."""
+    if str(row.get("item_type", "")).strip():
+        return
+    status = str(row.get("status", "")).strip()
+    if status == "found":
+        row["item_type"] = "kpi"
+    elif status == "target":
+        row["item_type"] = "target"
 
 
 def validate(row):
@@ -45,6 +70,33 @@ def validate(row):
         for k in ("value", "source_url", "quote"):
             if not str(row.get(k, "")).strip():
                 errs.append(f"status={status} requires {k}")
+
+    it = str(row.get("item_type", "")).strip()
+    if it and it not in VALID_ITEM_TYPE:
+        errs.append(f"invalid item_type '{it}' (use kpi|target|qualitative)")
+
+    rs = str(row.get("r_strategy", "")).strip()
+    if rs:
+        for tok in (t.strip() for t in rs.split("|")):
+            if tok and tok not in VALID_R:
+                errs.append(f"invalid r_strategy token '{tok}' (use R0..R9)")
+
+    en = str(row.get("enabler_topic", "")).strip()
+    if en and en not in VALID_ENABLER:
+        errs.append(f"invalid enabler_topic '{en}' (see circular-economy-10rs.json)")
+
+    hk = str(row.get("target_has_kpi", "")).strip()
+    if hk and hk not in VALID_HAS_KPI:
+        errs.append(f"invalid target_has_kpi '{hk}' (use yes|no)")
+
+    ts = str(row.get("target_status", "")).strip()
+    if ts and ts not in VALID_TARGET_STATUS:
+        errs.append(f"invalid target_status '{ts}'")
+
+    ey = str(row.get("target_end_year", "")).strip()
+    if ey and not re.fullmatch(r"\d{4}", ey):
+        errs.append(f"invalid target_end_year '{ey}' (use YYYY)")
+
     return errs
 
 
@@ -64,6 +116,7 @@ def main():
     for idx, r in enumerate(rows):
         if not str(r.get("retrieved_at", "")).strip():
             r["retrieved_at"] = args.run_date
+        _autofill_item_type(r)
         errs = validate(r)
         if errs:
             bad.append((idx, errs))
