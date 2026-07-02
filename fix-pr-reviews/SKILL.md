@@ -12,17 +12,27 @@ Automatically fetch the most recent code review comments from a GitHub PR and sy
 ## When to Use This Skill
 
 Use `/fix-pr-reviews` when:
-- Your code review bot (claude) has posted review comments on a PR
+- Your code review bot (posting as `github-actions`) has posted review comments on a PR
 - You want to address review feedback without manually copying from GitHub
 - You're on a feature branch with an open PR
 
 ## Prerequisites
 
 - GitHub CLI (`gh`) must be authenticated
-- `jq` must be installed (for JSON parsing in validation scripts)
 - Bash-compatible shell (Git Bash on Windows, or native bash on macOS/Linux)
 - You must be on a branch with an associated open PR
-- The PR must have review comments from the `claude` bot
+- The PR must have review comments from the review bot (default login: `github-actions` — reviews posted by a workflow step via `GITHUB_TOKEN` + `gh pr comment` appear under this login, NOT as `claude`)
+
+### jq Warning — verify before trusting
+
+The bash examples in this doc use `jq` for JSON parsing. **Verify jq works before relying on it**: run `echo '{}' | jq .`. On some machines (including this repo's primary dev machine) `jq` resolves to a broken npm shim that silently produces EMPTY output — a state-file write through that shim once truncated `.claude-pr-fix-state.json` to 0 bytes mid-loop.
+
+If jq is broken or absent, substitute per operation:
+- **State-file writes:** use the Write tool (full-document overwrite of `.claude-pr-fix-state.json`). This replaces every `jq ... > tmp && mv` pattern below.
+- **JSON extraction from `gh` output:** use `gh`'s built-in `--jq` flag (bundled gojq, independent of local jq).
+- **State-file reads:** use the Read tool.
+
+The bash snippets in this doc are normative for their LOGIC (validations, ordering, atomicity intent), not their tooling — reproduce the same checks with whichever tool actually works.
 
 ### Loop Mode Prerequisites
 
@@ -41,7 +51,8 @@ This triggers automatic context compaction at 40% usage instead of the default 9
 
 When context is compacted during `/fix-pr-reviews` loop mode, preserve:
 - Current PR number and branch name
-- Loop iteration count and max iterations
+- Loop iteration count and max iterations (per-session)
+- `total_rounds` and its ceiling (session-independent — never reset except by `--reset`)
 - Issue history summary: which issues were resolved, re-flagged, or skipped and why
 - Files that have been blacklisted due to regression
 - Full state is in `.claude-pr-fix-state.json` — re-read it after compaction
@@ -54,11 +65,14 @@ The skill supports configuration via environment variables or command arguments:
 |--------|---------|-------------|
 | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `40` (recommended) | Context % at which auto-compaction triggers. **Required for loop mode.** |
 | `REVIEW_WORKFLOW` | `claude-code-review.yml` | GitHub Actions workflow that runs the review bot |
-| `REVIEW_BOT` | `claude` | GitHub username of the review bot |
-| `MAX_LOOP_ITERATIONS` | `5` | Maximum fix iterations in loop mode |
-| `LOOP_WAIT_TIMEOUT` | `15` | Minutes to wait for GitHub Action completion |
+| `REVIEW_BOT` | `github-actions` | Login the review bot posts under. A workflow step posting via `GITHUB_TOKEN` (`gh pr comment`) appears as `github-actions`; only an app posting directly appears under its own name (e.g. `claude`). |
+| `MAX_LOOP_ITERATIONS` | `5` | Maximum fix iterations **per session** (per-invocation cap; resets on each new `--loop`) |
+| `MAX_TOTAL_ROUNDS` | `8` | Maximum **total rounds across all sessions** on a PR (session-independent; only `--reset` clears it) |
+| `LOOP_WAIT_TIMEOUT` | `15` | Minutes to wait for GitHub Action completion (this repo's review run typically finishes in 3–4 min; the timeout is a safety ceiling, not the expected wait) |
 
-**State file:** `.claude-pr-fix-state.json` - Tracks loop progress and issue history across compactions and invocations. Use `--reset` to clear history and start fresh.
+**Two independent caps — why both exist:** `MAX_LOOP_ITERATIONS` counts fixes within one invocation and resets to 1 on every fresh `--loop`. On a hard PR the human aborts and re-invokes, so this cap alone never trips (see issue #3953). `MAX_TOTAL_ROUNDS` counts rounds via `total_rounds` in the state file, which is **never reset except by `--reset`** — so re-invoking `--loop` on the same PR keeps accumulating toward the ceiling. This is the guard that actually fires on long-running PRs.
+
+**State file:** `.claude-pr-fix-state.json` - Tracks loop progress and issue history across compactions and invocations. `total_rounds` and `urgent_count_history` persist across every session on a PR until `--reset`.
 
 ## Workflow
 
@@ -78,7 +92,7 @@ If no PR is found, inform the user and ask them to provide a PR number manually.
 
 ### Step 2: Fetch Most Recent Review
 
-Fetch all comments and filter to the most recent one from the `claude` bot:
+Fetch all comments and filter to the most recent one from the review bot:
 
 ```bash
 # SECURITY: Validate PR_NUMBER is numeric before use in commands
@@ -88,16 +102,28 @@ if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-# Get the most recent review comment from claude
-gh pr view "$PR_NUMBER" --json comments --jq '
-  [.comments[] | select(.author.login == "claude")]
+# Get the most recent review comment from the review bot
+# (github-actions = the login for workflow-posted comments; see REVIEW_BOT config)
+REVIEW_BOT="${REVIEW_BOT:-github-actions}"
+# SECURITY: Validate REVIEW_BOT before interpolating it into the double-quoted
+# --jq filter below. Bash expands the string (command substitution, backticks)
+# BEFORE gh runs, and a value containing a double-quote would break out of the
+# jq string literal (jq injection). Allow only GitHub login characters plus an
+# optional [bot] suffix — matching how every other interpolated var here is guarded.
+REVIEW_BOT_RE='^[A-Za-z0-9-]+(\[bot\])?$'
+if ! [[ "$REVIEW_BOT" =~ $REVIEW_BOT_RE ]]; then
+  echo "❌ Invalid REVIEW_BOT login: $REVIEW_BOT"
+  exit 1
+fi
+gh pr view "$PR_NUMBER" --json comments --jq "
+  [.comments[] | select(.author.login == \"$REVIEW_BOT\")]
   | sort_by(.createdAt)
   | last
   | {body: .body, createdAt: .createdAt, url: .url}
-'
+"
 ```
 
-If no review from `claude` is found, check for reviews from other common bot names or inform the user.
+If no review from `$REVIEW_BOT` is found, check other common bot logins (`claude`, the workflow app's name) or inform the user.
 
 ### Step 3: Parse Review Into Actionable Items
 
@@ -213,6 +239,9 @@ Loop mode uses `.claude-pr-fix-state.json` to track progress and issue history a
   "branch": "feat/iso-14067-report-frontend",
   "iteration": 2,
   "max_iterations": 5,
+  "total_rounds": 11,
+  "total_rounds_ceiling": 8,
+  "urgent_count_history": [8, 5, 6, 4, 3, 5, 2, 3, 4, 2, 3],
   "started_at": "2026-01-15T14:30:00Z",
   "issue_history": {
     "src/handler.ts:80": {
@@ -247,6 +276,11 @@ Loop mode uses `.claude-pr-fix-state.json` to track progress and issue history a
 
 **Status values:** `resolved`, `re-flagged`, `skipped`, `pending`
 
+**Session-independent fields** (survive re-invocation; only `--reset` clears):
+- `total_rounds` — count of completed rounds across **every** session on this PR. Never reset when `--loop` restarts. In the example above it is `11` while `iteration` is only `2` — the PR was re-driven across many sessions, and `total_rounds` (unlike `iteration`) captures the true effort.
+- `total_rounds_ceiling` — stop-and-hand-off threshold (default `8`, from `MAX_TOTAL_ROUNDS` / `--max-rounds=<N>`). When `total_rounds >= total_rounds_ceiling` the loop stops for an explicit human decision (see Loop Step 6).
+- `urgent_count_history` — append-only list of the urgent count after each round. Feeds the **severity-trend** summary shown at the ceiling so the human sees whether findings are converging (e.g. `8 → 5 → 3 → 2`) or thrashing (`5 → 6 → 5 → 7`).
+
 **At the START of each iteration:**
 1. Read `.claude-pr-fix-state.json` if it exists
 2. Resume from recorded state, loading `issue_history`
@@ -263,16 +297,22 @@ Loop mode uses `.claude-pr-fix-state.json` to track progress and issue history a
 
 This ensures that if auto-compaction occurs DURING a fix, the approach is already recorded and won't be repeated.
 
-**CRITICAL: Always use atomic writes for state file updates:**
+**CRITICAL: State-file writes — use the Write tool by default:**
+
+Write the full state document with the Write tool (single full-document overwrite). This is the default because on machines with a broken jq (npm shim — see the jq Warning in Prerequisites), the jq pipeline below silently writes an EMPTY file, which is worse than the partial-write problem it was designed to avoid.
+
+Only if jq is verified working and you must update state from bash, use the atomic-rename pattern:
 ```bash
 # WRONG - partial write on crash/compaction causes corruption:
 jq '...' .claude-pr-fix-state.json > .claude-pr-fix-state.json
 
-# CORRECT - atomic rename prevents partial writes:
+# WRONG on machines with the npm-shim jq - silently writes an EMPTY state file
+
+# Acceptable ONLY with verified-working jq - atomic rename prevents partial writes:
 jq '...' .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
   mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
 ```
-The `mv` command on the same filesystem is atomic on Linux/macOS/Git Bash, so the state file is either fully updated or unchanged - never partially written.
+The `mv` command on the same filesystem is atomic on Linux/macOS/Git Bash, so the state file is either fully updated or unchanged - never partially written. After ANY bash-driven state write, sanity-check the result is non-empty valid JSON before proceeding.
 
 **After EACH successful fix:**
 1. Update the latest attempt's `outcome` to `"pending"` (confirmed as `"resolved"` or `"re-flagged"` after next review)
@@ -280,9 +320,22 @@ The `mv` command on the same filesystem is atomic on Linux/macOS/Git Bash, so th
 3. Write updated state to file IMMEDIATELY
 
 **At the END of each iteration:**
-1. Increment `iteration` count
-2. Update `previous_urgent_count` for regression detection
-3. Write state file before commit
+1. Increment `iteration` count (per-session)
+2. Increment `total_rounds` (session-independent — this is what the ceiling checks)
+3. Update `previous_urgent_count` for regression detection
+4. Append the current urgent count to `urgent_count_history` (skip when `URGENT_TOTAL == -1`; cap the array at the last 20 entries)
+5. Write state file before commit (Write tool by default — see "State-file writes" above)
+
+These are the five field transitions; apply them however you write state. **Default: read the state with the Read tool, apply the changes, write the full document back with the Write tool** (the npm-shim jq truncates the file — see the jq Warning). The jq form below is normative for the LOGIC only; use it from bash **only if jq is verified working**:
+```bash
+jq --argjson uc "$URGENT_TOTAL" \
+  '.iteration += 1
+   | .total_rounds = ((.total_rounds // 0) + 1)
+   | .previous_urgent_count = $uc
+   | .urgent_count_history = ((.urgent_count_history // []) + [$uc] | .[-20:])' \
+  .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
+  mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
+```
 
 This ensures that if auto-compaction occurs mid-iteration, Claude can recover state by reading the file.
 
@@ -355,10 +408,12 @@ Use `/fix-pr-reviews --loop` when:
 │  5. SAFETY CHECK                                        │
 │     - Read state from .claude-pr-fix-state.json         │
 │     - Run npm run lint && npm run check:types           │
-│     - Check: iteration < MAX_ITERATIONS?                │
+│     - Check: total_rounds < CEILING? (session-indep)    │
+│     - Check: iteration < MAX_ITERATIONS? (per-session)  │
 │     - Check: current_count <= previous_count?           │
 │     - Check: no issues with attempts >= 2?              │
 │     - If all OK → LOOP TO ITERATION N+1                 │
+│     - If ceiling hit → stop, severity-trend handoff     │
 │     - If not → stop, state saved for --continue         │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -386,6 +441,7 @@ fi
 CURRENT_BRANCH=$(git branch --show-current)
 CURRENT_PR=$(gh pr list --head "$CURRENT_BRANCH" --json number --jq '.[0].number // empty')
 MAX_ITER="${MAX_LOOP_ITERATIONS:-5}"
+MAX_ROUNDS="${MAX_TOTAL_ROUNDS:-8}"   # session-independent ceiling; --max-rounds=<N> overrides
 
 if [ -z "$CURRENT_PR" ]; then
   echo "❌ No open PR found for branch '$CURRENT_BRANCH'"
@@ -428,20 +484,36 @@ if [ -f ".claude-pr-fix-state.json" ]; then
       if [ "$STATE_ITER" -ge "$STATE_MAX" ]; then
         echo "⚠️ Previous run completed (iteration $STATE_ITER >= max $STATE_MAX)"
         echo "Preserving issue_history, resetting iteration counter..."
+        # Reset per-session iteration, but PRESERVE session-independent total_rounds.
+        # (--reset is the only path that zeroes total_rounds; it deletes the file entirely.)
         jq --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-          '.iteration = 1 | .started_at = $started | .previous_urgent_count = null' \
+          --argjson ceiling "$MAX_ROUNDS" \
+          '.total_rounds = (.total_rounds // .iteration // 0)
+           | .iteration = 1
+           | .started_at = $started
+           | .previous_urgent_count = null
+           | .total_rounds_ceiling = $ceiling
+           | .urgent_count_history = (.urgent_count_history // [])' \
           .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
           mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
-        echo "Reset iteration to 1, preserved $(jq '.issue_history | length // 0' .claude-pr-fix-state.json) issue history entries"
+        echo "Reset iteration to 1 (total_rounds preserved at $(jq -r '.total_rounds' .claude-pr-fix-state.json)/$(jq -r '.total_rounds_ceiling' .claude-pr-fix-state.json)), preserved $(jq '.issue_history | length // 0' .claude-pr-fix-state.json) issue history entries"
         ITERATION=1
       else
         echo "✅ State file valid for PR #$CURRENT_PR — preserving issue_history"
         # Preserve issue_history but reset iteration for new loop session
+        # Reset per-session iteration, but PRESERVE session-independent total_rounds.
+        # (--reset is the only path that zeroes total_rounds; it deletes the file entirely.)
         jq --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-          '.iteration = 1 | .started_at = $started | .previous_urgent_count = null' \
+          --argjson ceiling "$MAX_ROUNDS" \
+          '.total_rounds = (.total_rounds // .iteration // 0)
+           | .iteration = 1
+           | .started_at = $started
+           | .previous_urgent_count = null
+           | .total_rounds_ceiling = $ceiling
+           | .urgent_count_history = (.urgent_count_history // [])' \
           .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
           mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
-        echo "Reset iteration to 1, preserved $(jq '.issue_history | length // 0' .claude-pr-fix-state.json) issue history entries"
+        echo "Reset iteration to 1 (total_rounds preserved at $(jq -r '.total_rounds' .claude-pr-fix-state.json)/$(jq -r '.total_rounds_ceiling' .claude-pr-fix-state.json)), preserved $(jq '.issue_history | length // 0' .claude-pr-fix-state.json) issue history entries"
         ITERATION=1
       fi
     fi
@@ -464,10 +536,11 @@ fi
 **If `--loop` is used (new loop session) and state file exists for same PR:**
 1. Read `.claude-pr-fix-state.json`
 2. Validate JSON and PR number (same as above)
-3. Preserve `issue_history` and `files_blacklisted` (accumulated knowledge)
-4. Reset `iteration` to 1, update `started_at`, clear `previous_urgent_count`
-5. Begin new loop session with full history context
-6. If state file has old schema (no `issue_history` field), migrate: set `issue_history: {}` and proceed
+3. Preserve `issue_history`, `files_blacklisted`, **`total_rounds`, and `urgent_count_history`** (accumulated knowledge — total_rounds is session-independent)
+4. Reset `iteration` to 1, update `started_at`, clear `previous_urgent_count`. Do NOT reset `total_rounds`.
+5. **Pre-flight ceiling check:** if `total_rounds >= total_rounds_ceiling`, STOP immediately with the "Round Ceiling Reached" handoff (see Loop Step 6) instead of starting another round. Re-invoking bare `--loop` must not silently bypass the ceiling — the human proceeds by passing `--reset` (start counting over) or `--max-rounds=<higher>` (raise the bar). This is the fix for issue #3953: re-invocation was the exact state reset that disarmed the old guards.
+6. Begin new loop session with full history context
+7. If state file has old schema (no `issue_history` field), migrate: set `issue_history: {}`. If it lacks `total_rounds`, migrate: `total_rounds = (.iteration // 0)` as a best-effort floor (historical resets under-count, so this is a lower bound), `total_rounds_ceiling = MAX_ROUNDS`, `urgent_count_history = []`.
 
 **If starting fresh:**
 Create initial state file using `jq` for proper variable interpolation:
@@ -483,11 +556,15 @@ jq -n \
   --arg branch "$CURRENT_BRANCH" \
   --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson maxiter "$MAX_ITER" \
+  --argjson ceiling "$MAX_ROUNDS" \
   '{
     pr_number: ($pr | tonumber),
     branch: $branch,
     iteration: 1,
     max_iterations: $maxiter,
+    total_rounds: 0,
+    total_rounds_ceiling: $ceiling,
+    urgent_count_history: [],
     started_at: $started,
     issue_history: {},
     files_blacklisted: [],
@@ -506,6 +583,28 @@ jq -n \
 **State file:** .claude-pr-fix-state.json
 
 Starting iteration 1...
+```
+
+**Pre-flight ceiling check (runs after state is loaded, before the first fix):**
+
+```bash
+# Session-independent ceiling. Catches a re-invoked --loop that is already at/over
+# the ceiling BEFORE it starts another round. --reset (deletes state) or a raised
+# --max-rounds=<N> are the explicit human decisions that allow proceeding.
+TOTAL_ROUNDS=$(jq -r '.total_rounds // 0' .claude-pr-fix-state.json)
+ROUNDS_CEILING=$(jq -r '.total_rounds_ceiling // 8' .claude-pr-fix-state.json)
+if [ "$TOTAL_ROUNDS" -ge "$ROUNDS_CEILING" ]; then
+  echo "## Loop Stopped — Round Ceiling Reached"
+  echo ""
+  echo "total_rounds ($TOTAL_ROUNDS) has reached the ceiling ($ROUNDS_CEILING) across all sessions on this PR."
+  echo "Severity trend: $(jq -rc '.urgent_count_history // []' .claude-pr-fix-state.json)"
+  echo ""
+  echo "This is an explicit-decision checkpoint, not a hard failure. To proceed:"
+  echo "  • Findings converging → the PR may just need a few more rounds: /fix-pr-reviews --loop --max-rounds=$((ROUNDS_CEILING + 4))"
+  echo "  • Findings thrashing (no downward trend) → hand to a human; more rounds won't converge."
+  echo "  • Start counting over: /fix-pr-reviews --loop --reset"
+  exit 0
+fi
 ```
 
 #### Loop Step 2: Fix Phase (Standard Workflow)
@@ -798,9 +897,18 @@ if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
 fi
 
 # Fetch comments newer than our push
+REVIEW_BOT="${REVIEW_BOT:-github-actions}"
+# SECURITY: Validate REVIEW_BOT before interpolating it into the double-quoted
+# --jq filter below (same guard as Step 2). Prevents shell command substitution
+# and jq string-literal breakout from a crafted REVIEW_BOT value.
+REVIEW_BOT_RE='^[A-Za-z0-9-]+(\[bot\])?$'
+if ! [[ "$REVIEW_BOT" =~ $REVIEW_BOT_RE ]]; then
+  echo "❌ Invalid REVIEW_BOT login: $REVIEW_BOT"
+  exit 1
+fi
 gh pr view "$PR_NUMBER" --json comments --jq "
   [.comments[]
-   | select(.author.login == \"claude\")
+   | select(.author.login == \"$REVIEW_BOT\")
    | select(.createdAt > \"$PUSH_TIME\")]
   | sort_by(.createdAt)
   | last
@@ -859,10 +967,16 @@ WORKFLOW_STATUS=$(gh run view "$RUN_ID" --json conclusion --jq '.conclusion')
 if [ -z "$REVIEW_BODY" ] || [ "$REVIEW_BODY" == "null" ] || [ "$REVIEW_BODY" == "{}" ]; then
   # Distinguish between "no issues" vs "workflow failed"
   if [ "$WORKFLOW_STATUS" == "success" ]; then
-    echo "✅ Workflow succeeded with no review comment - likely clean!"
-    URGENT_TOTAL=0  # Treat as success
+    # This repo's claude-code-review.yml FAILS when no review.md verdict artifact
+    # is produced, so a SUCCESSFUL run always posts a comment (findings or the
+    # explicit "✅ No critical issues found" marker). Success + empty fetch here
+    # means OUR fetch filter is wrong (REVIEW_BOT login or PUSH_TIME filter) —
+    # do NOT assume clean. Re-check the author filter before anything else.
+    echo "⚠️ Workflow succeeded but no comment matched the fetch filter"
+    echo "   Check REVIEW_BOT (expected: github-actions) and the timestamp filter"
+    URGENT_TOTAL=-1  # Signal unknown state - NOT clean
   elif [ "$WORKFLOW_STATUS" == "failure" ] || [ "$WORKFLOW_STATUS" == "cancelled" ]; then
-    echo "❌ Workflow $WORKFLOW_STATUS - review may not have run"
+    echo "❌ Workflow $WORKFLOW_STATUS - review may not have run (this includes the missing-verdict-artifact guard failing the run)"
     URGENT_TOTAL=-1  # Signal error state
   else
     echo "⚠️ Empty review body with workflow status: $WORKFLOW_STATUS"
@@ -984,7 +1098,20 @@ Before starting the next iteration, Claude MUST:
 3. **Compare issue counts** - Check for regression (more issues than before)
 4. **Check issue history** - Skip issues with 3+ attempts or `status == "skipped"`
 5. **Check "all skipped"** - If every remaining issue is skipped, exit loop
-6. **Verify iteration count** - Ensure we haven't exceeded MAX_ITERATIONS
+6. **Verify iteration count** - Ensure we haven't exceeded MAX_ITERATIONS (per-session)
+7. **Verify total_rounds** - Ensure `total_rounds < total_rounds_ceiling` (session-independent). This is the guard that actually fires on long-running PRs — the per-session iteration count resets on every re-invocation, `total_rounds` does not.
+
+**Round-ceiling check (perform after incrementing `total_rounds` at end of round, before looping):**
+```bash
+TOTAL_ROUNDS=$(jq -r '.total_rounds // 0' .claude-pr-fix-state.json)
+ROUNDS_CEILING=$(jq -r '.total_rounds_ceiling // 8' .claude-pr-fix-state.json)
+if [ "$TOTAL_ROUNDS" -ge "$ROUNDS_CEILING" ]; then
+  # Stop and hand to human with the severity trend. Do NOT loop to the next round.
+  # This is a checkpoint (exit 0), not a failure — the human decides whether to
+  # continue (--max-rounds=<higher>), start over (--reset), or ship/abort.
+  exit 0   # emit the "Loop Stopped — Round Ceiling Reached" heading below
+fi
+```
 
 ```
 ## Safety Check (Before Iteration 3)
@@ -1110,7 +1237,7 @@ These issues require manual intervention. They will not block loop termination.
 Continuing with actionable issues...
 ```
 
-**If max iterations reached:**
+**If max iterations reached (per-session cap):**
 ```
 ## Loop Stopped - Max Iterations Reached
 
@@ -1122,6 +1249,40 @@ State saved to .claude-pr-fix-state.json
 **Recommendation:** Review remaining issues manually or run
 `/fix-pr-reviews --continue` to resume with fresh context.
 ```
+
+**If total-rounds ceiling reached (session-independent cap — the guard for long-running PRs):**
+```
+## Loop Stopped — Round Ceiling Reached
+
+**Total rounds:** 8 of 8 ceiling (across all sessions on this PR)
+**This session's iterations:** 2
+**Issues remaining:** 3 (2 high, 1 bug)
+
+**Severity trend (urgent count per round):** 8 → 5 → 6 → 4 → 3 → 5 → 4 → 3
+                                             ▲ still finding real issues, trending down slowly
+
+State saved to .claude-pr-fix-state.json
+
+This is an explicit-decision checkpoint, not a failure. New findings each round
+is normal reviewer behavior on a substantial PR — the loop keeps fixing real
+issues, it just won't converge to zero findings on its own. Decide from the trend:
+
+  • Trending DOWN (converging) → a few more rounds likely finishes it:
+      /fix-pr-reviews --loop --max-rounds=12
+  • FLAT / thrashing (e.g. 5 → 6 → 5 → 7, no downward drift) → more rounds
+      won't help; hand to a human to break the deadlock.
+  • Start the count over after a scope change:
+      /fix-pr-reviews --loop --reset
+```
+
+**Why the trend, not a "stop on new findings" rule:** on this repo the review bot
+generates *new* findings most rounds (issue #3953). New findings are the loop
+**working** — each one is a real fix — not a failure to converge. A rule that
+stopped as soon as a round produced "only new findings" would abort the loop at
+its most productive. The ceiling caps *total effort* and surfaces the *severity
+trend* so a human judges convergence, without suppressing the new-issue discovery
+that is the whole point of looping. (Deliberately NOT implemented: the
+reviewer-churn stop rule from issue #3953 proposal #2.)
 
 **If auto-compaction occurs:**
 Auto-compaction is handled automatically by `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=40`.
@@ -1207,9 +1368,10 @@ The skill supports optional arguments:
 | Argument | Description | Example |
 |----------|-------------|---------|
 | `<PR_NUMBER>` | Specify PR number directly | `/fix-pr-reviews 2806` |
-| `--loop` | **Enable loop mode** - auto-iterate until clean | `/fix-pr-reviews --loop` |
+| `--loop` | **Enable loop mode** - auto-iterate until clean. Single-dash `-loop` is accepted as a typo-tolerant alias. | `/fix-pr-reviews --loop` |
 | `--workflow=<name>` | Specify review workflow (default: claude-code-review.yml) | `/fix-pr-reviews --loop --workflow=claude-review.yml` |
-| `--max-iterations=<N>` | Max loop iterations (default: 5) | `/fix-pr-reviews --loop --max-iterations=3` |
+| `--max-iterations=<N>` | Max loop iterations **per session** (default: 5) | `/fix-pr-reviews --loop --max-iterations=3` |
+| `--max-rounds=<N>` | Max **total rounds across all sessions** on a PR (default: 8, session-independent ceiling) | `/fix-pr-reviews --loop --max-rounds=12` |
 | `--all` | Include medium/low priority items too | `/fix-pr-reviews --all` |
 | `--critical-only` | Only critical/blockers (skip high, bugs, tests) | `/fix-pr-reviews --critical-only` |
 | `--no-tests` | Skip writing tests | `/fix-pr-reviews --no-tests` |
@@ -1232,7 +1394,7 @@ if [ "$RESET_FLAG" == "true" ] && [ -f ".claude-pr-fix-state.json" ]; then
   echo "✅ State cleared. Starting fresh."
 fi
 ```
-This is the only way to clear `issue_history` for a PR. Without `--reset`, history persists across all invocations on the same PR.
+This is the only way to clear `issue_history` **and `total_rounds`** for a PR (the whole state file is deleted, so a subsequent run starts a fresh count from 0). Without `--reset`, both history and `total_rounds` persist across all invocations on the same PR — which is exactly what lets the session-independent round ceiling fire.
 
 ---
 
@@ -1252,7 +1414,7 @@ Claude: I'll fetch the most recent code review for your current PR.
 → PR #2806: feat: Add ISO 14067 report frontend integration
 
 [Runs: gh pr view 2806 --json comments --jq '...']
-→ Found review from claude at 2026-01-15T12:39:34Z
+→ Found review from github-actions at 2026-01-15T12:39:34Z
 
 Parsing review...
 
@@ -1373,8 +1535,8 @@ Options:
 
 ### No Reviews Found
 ```
-No review comments from 'claude' found on PR #2806.
-The PR has comments from: vercel, github-actions
+No review comments from 'github-actions' found on PR #2806.
+The PR has comments from: vercel, claude
 
 Would you like me to check reviews from a different author?
 ```
@@ -1402,17 +1564,23 @@ Please specify: /fix-pr-reviews --loop --workflow=code-review.yml
 ```
 ⚠️ No new review found after 5 minutes
 
-The review workflow completed but no new comment from 'claude' was posted.
+The review workflow completed but no new comment from the review bot was posted.
 This might mean:
-1. The bot only comments when there are issues (good sign!)
+1. The fetch filter is wrong (REVIEW_BOT login or timestamp) — check first
 2. The workflow failed silently
 3. The bot uses a different comment mechanism
 
 Options:
 1. Check PR manually: gh pr view 2806 --web
-2. Assume clean and exit loop mode
+2. Re-check with a different author filter
 3. Wait longer for review (extend by 5 min)
 ```
+
+Note: this repo's `claude-code-review.yml` fails the run when the review step
+produces no `review.md` verdict artifact, and a clean review posts an explicit
+"✅ No critical issues found" comment. A SUCCESSFUL run with no matching comment
+therefore points at YOUR fetch filter, never at "bot only comments on issues" —
+do not assume clean.
 
 ### Loop Mode: Same Issues Persist
 ```
