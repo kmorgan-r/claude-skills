@@ -14,3 +14,7 @@ __pycache__/
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# Ship / fix-pr-reviews pipeline state (per-run scratch)
+.claude-ship-state.json
+.claude-pr-fix-state.json
