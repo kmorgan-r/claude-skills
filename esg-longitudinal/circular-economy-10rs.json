@@ -86,7 +86,7 @@
      "description": "Research into circular materials, processes, and technologies (e.g. recycled feedstock, bio-based inputs).",
      "supports": ["R2", "R5", "R6", "R8", "R9"]},
     {"id": "data_infrastructure", "name": "Digital and data infrastructure",
-     "description": "Digital product passports, material traceability, IoT tracking, and the data systems that make loops auditable.",
+     "description": "Broad digital and data systems — ERP, IoT, analytics platforms, and enterprise data infrastructure — that underpin circular operations at scale.",
      "supports": ["R3", "R4", "R5", "R8"]},
     {"id": "training", "name": "Workforce skills and training",
      "description": "Building the skills and capability needed to repair, refurbish, and run circular operations.",
@@ -102,6 +102,15 @@
      "supports": ["R1", "R2"]},
     {"id": "policy", "name": "Policy and standards engagement",
      "description": "Policy advocacy and regulatory alignment such as extended producer responsibility and right-to-repair.",
-     "supports": ["R0", "R4", "R8"]}
+     "supports": ["R0", "R4", "R8"]},
+    {"id": "measurement", "name": "Measurement & impact accounting",
+     "description": "Metering, KPI systems, and material/impact accounting that quantify circular flows across the ladder.",
+     "supports": ["R2", "R4", "R6", "R8"]},
+    {"id": "traceability", "name": "Traceability & product passports",
+     "description": "Digital/material passports and chain-of-custody tracking that make specific loops auditable.",
+     "supports": ["R3", "R5", "R8"]},
+    {"id": "procurement", "name": "Circular procurement",
+     "description": "Purchasing standards and supplier requirements that pull circular inputs (reused, refurbished, remanufactured, recycled) through the value chain.",
+     "supports": ["R2", "R3", "R5", "R6", "R8"]}
   ]
 }

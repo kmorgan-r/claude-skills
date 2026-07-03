@@ -6,8 +6,9 @@ from conftest import _load
 snapshot = _load("snapshot")
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-EXPECTED_ENABLERS = {"ecodesign", "rnd", "data_infrastructure", "training",
-                     "partnerships", "reverse_logistics", "finance", "policy"}
+EXPECTED_ENABLERS = {"ecodesign", "rnd", "data_infrastructure", "measurement",
+                     "traceability", "procurement", "training", "partnerships",
+                     "reverse_logistics", "finance", "policy"}
 VALID_R = {f"R{i}" for i in range(10)}
 
 

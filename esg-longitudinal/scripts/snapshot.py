@@ -46,8 +46,9 @@ VALID_STATUS = {"found", "not_found", "target"}
 # 13-column rows (which omit these fields) still pass. New fields are never required.
 VALID_ITEM_TYPE = {"kpi", "target", "qualitative"}
 VALID_R = {f"R{i}" for i in range(10)}  # R0..R9
-VALID_ENABLER = {"ecodesign", "rnd", "data_infrastructure", "training",
-                 "partnerships", "reverse_logistics", "finance", "policy"}
+VALID_ENABLER = {"ecodesign", "rnd", "data_infrastructure", "measurement",
+                 "traceability", "procurement", "training", "partnerships",
+                 "reverse_logistics", "finance", "policy"}
 VALID_HAS_KPI = {"yes", "no"}
 VALID_TARGET_STATUS = {"on_track", "achieved", "delayed", "changed",
                        "failed", "dropped", "too_early"}
