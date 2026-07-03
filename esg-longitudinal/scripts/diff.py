@@ -32,6 +32,7 @@ def num(v):
 
 
 TKEY = ("entity", "indicator")
+MATERIALITY = ("substance", "planetary_alignment", "priority_internal", "importance_external")
 
 
 def _latest_by(snap, status):
@@ -108,7 +109,17 @@ def main():
     found_new = latest_found(new)
     pairs = [k for k in new_t if k in found_new]
 
-    if new_targets or changed_targets or dropped_targets or pairs:
+    reassessed, newly_assessed = {}, {}
+    for k in (x for x in new_t if x in old_t):
+        for f in MATERIALITY:
+            ov = (old_t[k].get(f) or "").strip()
+            nv = (new_t[k].get(f) or "").strip()
+            if ov and nv and ov != nv:
+                reassessed.setdefault(k, []).append(f"{f}: {ov} -> {nv}")
+            elif not ov and nv:
+                newly_assessed.setdefault(k, []).append(f"{f}: -> {nv}")
+
+    if new_targets or changed_targets or dropped_targets or pairs or reassessed or newly_assessed:
         L.append("## Target movements\n")
         if new_targets:
             L.append("**New targets**\n")
@@ -148,8 +159,19 @@ def main():
                          f"{a.get('value','')} | {t.get('target_end_year','')} | "
                          f"{t.get('target_status','') or ''} |")
             L.append("")
+        if reassessed:
+            L.append("**Quality reassessed**\n")
+            for k in sorted(reassessed):
+                L.append(f"- {k[0]} / {k[1]}: " + "; ".join(reassessed[k]))
+            L.append("")
+        if newly_assessed:
+            L.append("**Newly assessed**\n")
+            for k in sorted(newly_assessed):
+                L.append(f"- {k[0]} / {k[1]}: " + "; ".join(newly_assessed[k]))
+            L.append("")
 
-    if not (added or changed or dropped):
+    if not (added or changed or dropped or new_targets or changed_targets
+            or dropped_targets or pairs or reassessed or newly_assessed):
         L.append("_No differences between the two snapshots._")
 
     report = "\n".join(L)
