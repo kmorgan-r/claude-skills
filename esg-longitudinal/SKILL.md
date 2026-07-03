@@ -45,12 +45,16 @@ simple key match.
 ```
 entity, lei, domain, indicator, value, unit, period, status,
 source, source_url, page, quote, retrieved_at,
-item_type, r_strategy, enabler_topic, target_end_year, target_has_kpi, target_status
+item_type, r_strategy, enabler_topic, target_end_year, target_has_kpi, target_status,
+smart_specific, smart_achievable, smart_relevant, substance,
+planetary_alignment, impact_scope, priority_internal, importance_external,
+linked_targets, assessment_notes
 ```
 
-The first 13 columns are the original core; the last 6 are the **classification
-layer** (see sections below). All 6 are optional — old 13-column snapshots still
-validate, and `diff.py` keys on `(entity, indicator, period)` regardless.
+The first 13 columns are the original core; the next 6 are the v1 **classification
+layer** and the last 10 are the v2 **SMART+ target-quality** block (see sections
+below). All 16 non-core columns are optional — old 13-column and 19-column snapshots
+still validate, and `diff.py` keys on `(entity, indicator, period)` regardless.
 
 - `period` = the **reporting year** the value describes (2022). Distinct from
   `retrieved_at` = the **run date** you pulled it (2026-06-29). Two time axes; keep
@@ -107,9 +111,12 @@ comparable across companies:
   R8, a "designed-out packaging" pledge is R0/R2. Pipe-separate when a commitment
   genuinely spans strategies (primary first).
 - **Enablers** (`enabler_topic`): some commitments are not an R-strategy but make
-  them possible — training, data/traceability infrastructure, R&D, partnerships,
-  reverse logistics, finance, policy. Tag these with the matching enabler id. A row
-  is usually an R-strategy item *or* an enabler item; occasionally both.
+  them possible — one of the 11 enabler ids in `circular-economy-10rs.json`. Prefer
+  `traceability` for product/material passports and chain-of-custody, `measurement`
+  for metering / KPI / impact accounting, and `data_infrastructure` only for broad
+  digital-systems commitments; the others are `ecodesign`, `rnd`, `procurement`,
+  `training`, `partnerships`, `reverse_logistics`, `finance`, `policy`. A row is
+  usually an R-strategy item *or* an enabler item; occasionally both.
 
 ## Target anatomy
 
@@ -141,6 +148,32 @@ Record this from what the report states. `scripts/diff.py` independently produce
 **Target movements** section (new / changed / dropped targets, plus a target-vs-actual
 table) by comparing `status=target` rows across snapshots — use it to catch silent
 changes the report does not admit, and reconcile against your `target_status`.
+
+## Target quality (SMART+)
+
+For `status=target` rows you may add a per-target quality/materiality assessment.
+These 10 columns are all optional and populate on target rows; each is validated
+only when present.
+
+- **S / A / R** (`smart_specific`, `smart_achievable`, `smart_relevant`) — `yes|no`.
+  The **M** and **T** of SMART are *not* separate columns: `target_has_kpi` is M and
+  `target_end_year` is T (both factual — see the Target scorecard for them).
+- `substance` — `symbolic|substantive`: a real operational commitment vs signaling.
+- `planetary_alignment` — `insufficient|pb_aligned|unknown`: aligned to a planetary
+  boundary / science-based pathway. `unknown` is a real finding (we checked, can't
+  tell) and is distinct from leaving the field blank ("not assessed").
+- `impact_scope` — `A|B|C|D` (Lukas's A–D scoping, **not** GHG Scope 1/2/3):
+  **A** = footprint, own operations; **B** = footprint, direct value chain (suppliers
+  + use phase); **C** = footprint, broader/enabled system; **D** = **handprint**
+  (positive contribution / avoided impact elsewhere). Blank = not assessed.
+- `priority_internal` / `importance_external` — `high|low`: strategic priority inside
+  the company vs external signaling importance.
+- `linked_targets` — free text: which other (ESG) targets this connects to, and how.
+- `assessment_notes` — free text rationale. **Required** whenever any of the eight
+  judgment columns (`smart_specific`, `smart_achievable`, `smart_relevant`,
+  `substance`, `planetary_alignment`, `impact_scope`, `priority_internal`,
+  `importance_external`) is set — opinion is permitted but never ungrounded. A
+  judgment value with empty `assessment_notes` is rejected by `snapshot.py`.
 
 ## Workflow
 
@@ -235,6 +268,12 @@ change report from step 8 if applicable, and a short narrative. Template below.
 | indicator | target | end year | has KPI | completeness | status |
 |---|---|---|---|---|---|
 (one row per status=target; completeness derived from end year + has KPI)
+
+## Target quality (SMART+)
+| indicator | S | A | R | substance | planetary | impact_scope | int.pri | ext.imp | notes |
+|---|---|---|---|---|---|---|---|---|---|
+(one row per status=target; S/A/R from smart_*; notes = assessment_notes.
+M and T are in the Target scorecard above — has KPI and end year.)
 
 ## Enablers
 (training / data infrastructure / R&D / … commitments, grouped by enabler_topic)

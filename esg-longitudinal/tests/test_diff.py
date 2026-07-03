@@ -11,12 +11,19 @@ snapshot = _load("snapshot")
 SCRIPTS = pathlib.Path(__file__).resolve().parents[1] / "scripts"
 
 
-def _write(path, rows):
+V1_COLS_19 = ["entity", "lei", "domain", "indicator", "value", "unit", "period", "status",
+              "source", "source_url", "page", "quote", "retrieved_at",
+              "item_type", "r_strategy", "enabler_topic",
+              "target_end_year", "target_has_kpi", "target_status"]
+
+
+def _write(path, rows, cols=None):
+    cols = cols or snapshot.COLS
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=snapshot.COLS, extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
         for r in rows:
-            w.writerow({c: r.get(c, "") for c in snapshot.COLS})
+            w.writerow({c: r.get(c, "") for c in cols})
 
 
 def _t(**over):
@@ -69,3 +76,59 @@ def test_target_vs_actual_pairs(tmp_path):
         capture_output=True, text=True)
     assert "Target vs latest actual" in out.stdout
     assert "18" in out.stdout and "25" in out.stdout
+
+
+def _run_diff(old, new):
+    return subprocess.run(
+        [sys.executable, str(SCRIPTS / "diff.py"), "--old", str(old), "--new", str(new)],
+        capture_output=True, text=True)
+
+
+def test_quality_reassessed_all_four_fields(tmp_path):
+    old, new = tmp_path / "old.csv", tmp_path / "new.csv"
+    _write(old, [_t(period="2025", substance="symbolic", planetary_alignment="insufficient",
+                    priority_internal="low", importance_external="low", assessment_notes="n")])
+    _write(new, [_t(period="2025", substance="substantive", planetary_alignment="pb_aligned",
+                    priority_internal="high", importance_external="high", assessment_notes="n")])
+    out = _run_diff(old, new)
+    assert out.returncode == 0, out.stderr
+    b = out.stdout
+    assert "Quality reassessed" in b
+    for f in ("substance", "planetary_alignment", "priority_internal", "importance_external"):
+        assert f in b
+
+
+def test_quality_only_change_still_renders(tmp_path):
+    # value + end year identical; only a materiality field changes; no found actual
+    old, new = tmp_path / "old.csv", tmp_path / "new.csv"
+    _write(old, [_t(period="2025", substance="symbolic", assessment_notes="n")])
+    _write(new, [_t(period="2025", substance="substantive", assessment_notes="n")])
+    out = _run_diff(old, new)
+    assert out.returncode == 0, out.stderr
+    b = out.stdout
+    assert "Target movements" in b
+    assert "Quality reassessed" in b
+    assert "substance: symbolic -> substantive" in b
+
+
+def test_newly_assessed_not_reassessed(tmp_path):
+    old, new = tmp_path / "old.csv", tmp_path / "new.csv"
+    _write(old, [_t(period="2025")])  # no materiality fields set
+    _write(new, [_t(period="2025", substance="substantive", assessment_notes="n")])
+    out = _run_diff(old, new)
+    assert out.returncode == 0, out.stderr
+    b = out.stdout
+    assert "Newly assessed" in b
+    assert "Quality reassessed" not in b  # blank->value is NOT a reassessment
+
+
+def test_no_churn_against_19col_baseline(tmp_path):
+    # old physically omits v2 columns -> DictReader yields absent keys (None on .get)
+    old, new = tmp_path / "old.csv", tmp_path / "new.csv"
+    _write(old, [_t(period="2025")], cols=V1_COLS_19)
+    _write(new, [_t(period="2025", substance="substantive", assessment_notes="n")])
+    out = _run_diff(old, new)
+    assert out.returncode == 0, out.stderr  # regression drop of `or ""` would CRASH -> catch it
+    b = out.stdout
+    assert "Quality reassessed" not in b  # first-time assessment, not a reassessment
+    assert "Newly assessed" in b          # positive proof the absent-key path ran (not empty stdout)

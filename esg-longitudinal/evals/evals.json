@@ -9,7 +9,7 @@
       "files": [],
       "assertions": [
         "A timestamped snapshot CSV is written under data/snapshots/ whose filename is the run date in YYYY-MM-DD.csv form.",
-        "The snapshot CSV header is exactly the 19-column tidy schema: entity,lei,domain,indicator,value,unit,period,status,source,source_url,page,quote,retrieved_at,item_type,r_strategy,enabler_topic,target_end_year,target_has_kpi,target_status.",
+        "The snapshot CSV header is exactly the 29-column tidy schema: entity,lei,domain,indicator,value,unit,period,status,source,source_url,page,quote,retrieved_at,item_type,r_strategy,enabler_topic,target_end_year,target_has_kpi,target_status,smart_specific,smart_achievable,smart_relevant,substance,planetary_alignment,impact_scope,priority_internal,importance_external,linked_targets,assessment_notes.",
         "The snapshot contains circular-domain rows (domain=circular) for recognizable circular indicators such as circular_revenue_pct, waste_recycled_pct, or product_takeback_scope.",
         "The series is longitudinal: at least one indicator (e.g. circular_revenue_pct) carries values for 3 or more distinct period years across the ~2015-2024 range.",
         "Every row with status=found or status=target has a non-empty value, source_url, and quote (the snapshot passes scripts/snapshot.py validation, exit code 0).",
@@ -27,7 +27,7 @@
       "expected_output": "Demonstrates domain + company generality: a climate-pack time-series for Unilever (e.g. scope1_emissions / scope2_emissions / scope3_emissions / renewable_electricity_pct, plus a netzero_target_year or emissions_reduction_target_pct as status=target), each found value sourced with URL + period + quote, normalized to the same tidy schema, snapshotted to a dated CSV. Should reuse the same workflow/scripts as eval 1 without bespoke per-company code.",
       "files": [],
       "assertions": [
-        "A timestamped snapshot CSV is written under data/snapshots/ using the identical 19-column schema as eval 1 (no renamed or dropped columns), proving schema reuse across a different company and domain.",
+        "A timestamped snapshot CSV is written under data/snapshots/ using the identical 29-column schema as eval 1 (no renamed or dropped columns), proving schema reuse across a different company and domain.",
         "Rows carry domain=climate and recognizable climate indicators such as scope1_emissions, scope2_emissions, scope3_emissions, or renewable_electricity_pct.",
         "The view is multi-year: at least one emissions or renewable indicator has values for 2 or more distinct period years.",
         "At least one status=target row captures a net-zero year or emissions-reduction goal (e.g. netzero_target_year or emissions_reduction_target_pct).",
@@ -47,7 +47,7 @@
         "A new snapshot CSV is written dated with today's run date, distinct from the 2025-06-29 baseline file.",
         "scripts/diff.py is run with --old pointing at the provided prior snapshot and --new pointing at the freshly written snapshot.",
         "A markdown change report is produced containing the diff's NEW / CHANGED / DROPPED structure (Newly disclosed / Changed values / Dropped sections).",
-        "The new snapshot uses the 19-column schema and matching key fields (entity=Royal Philips, indicator names like circular_revenue_pct, period years); the diff keys (entity, indicator, period) align with the older baseline (which predates the classification columns) via the shared key columns instead of showing spurious churn.",
+        "The new snapshot uses the 29-column schema and matching key fields (entity=Royal Philips, indicator names like circular_revenue_pct, period years); the diff keys (entity, indicator, period) align with the older baseline (which predates the classification columns) via the shared key columns instead of showing spurious churn.",
         "Any row reported under Changed with a numeric value type shows a numeric delta between the old and new value; text-valued indicators (e.g. product_takeback_scope) may show a blank delta.",
         "Rows in the new snapshot with status=found or status=target still carry value, source_url, and quote (provenance preserved on the re-run)."
       ]
@@ -55,15 +55,30 @@
     {
       "id": 4,
       "name": "philips-target-status-2yr",
-      "prompt": "Track Royal Philips' circular economy TARGETS specifically over the last two reporting years. For each target, tell me the R-strategy it maps to, whether it has a measurable KPI and a deadline year, and whether the prior year's target was achieved, delayed, changed, failed, or dropped.",
-      "expected_output": "A snapshot with status=target rows for Philips circular targets across two years, each carrying r_strategy (e.g. R1|R2 for circular_revenue_pct), target_end_year, target_has_kpi, and a target_status classification (on_track|achieved|delayed|changed|failed|dropped|too_early). A report with a Target scorecard (completeness derived from end year + has KPI) and, where a prior snapshot exists, a diff.py Target movements section.",
+      "prompt": "Track Royal Philips' circular economy TARGETS specifically over the last two reporting years. For each target, tell me the R-strategy it maps to, whether it has a measurable KPI and a deadline year, and whether the prior year's target was achieved, delayed, changed, failed, or dropped. Also judge each target's quality: whether it reads symbolic or substantive, whether it is science-based / planetary-aligned, and its internal (strategic) vs external (signaling) priority — with a short rationale for each call.",
+      "expected_output": "A snapshot with status=target rows for Philips circular targets across two years, each carrying r_strategy (e.g. R1|R2 for circular_revenue_pct), target_end_year, target_has_kpi, and a target_status classification (on_track|achieved|delayed|changed|failed|dropped|too_early), plus a SMART+ quality read on at least one target (substance symbolic|substantive, planetary_alignment insufficient|pb_aligned|unknown, and internal/external priority high|low) with assessment_notes rationale. A report with a Target scorecard (completeness derived from end year + has KPI) and, where a prior snapshot exists, a diff.py Target movements section.",
       "files": [],
       "assertions": [
         "Snapshot status=target rows carry item_type=target, r_strategy (R0-R9), target_end_year (YYYY), and target_has_kpi (yes|no).",
         "At least one target row carries a target_status from the set on_track|achieved|delayed|changed|failed|dropped|too_early.",
         "The snapshot passes scripts/snapshot.py validation (exit code 0), i.e. all classification values are drawn from the documented enums.",
         "The report includes a Target scorecard table with a derived completeness (both|kpi_only|year_only|none) per target.",
-        "When two years of targets are present, the report characterizes each prior target as achieved, delayed, changed, failed, or dropped rather than only listing current targets."
+        "When two years of targets are present, the report characterizes each prior target as achieved, delayed, changed, failed, or dropped rather than only listing current targets.",
+        "At least one status=target row carries SMART+ fields: a substance (symbolic|substantive), a planetary_alignment (insufficient|pb_aligned|unknown), and a priority_internal or importance_external (high|low).",
+        "The snapshot still passes scripts/snapshot.py validation (exit 0), so every target row carrying judgment fields also carries a non-empty assessment_notes (the D1 rationale rule)."
+      ]
+    },
+    {
+      "id": 5,
+      "name": "philips-smart-plus-scorecard",
+      "prompt": "For Royal Philips' circular economy targets, build a SMART+ quality scorecard. For each target, assess whether it is Specific, Achievable, and Relevant (yes/no), whether it is symbolic or substantive, whether it is science-based / planetary-aligned, its impact scope (A/B/C footprint or D handprint), and its internal strategic priority vs external signaling importance. Give a short rationale for each target and note any links to other ESG targets. Save a snapshot and produce a report with a SMART+ scorecard.",
+      "files": [],
+      "assertions": [
+        "A timestamped snapshot CSV is written under data/snapshots/ using the 29-column schema (header ends ...importance_external,linked_targets,assessment_notes).",
+        "At least one status=target row carries SMART+ judgment values drawn from the documented enums (smart_specific/achievable/relevant in yes|no, substance in symbolic|substantive, planetary_alignment in insufficient|pb_aligned|unknown, impact_scope in A|B|C|D, priority_internal/importance_external in high|low).",
+        "The snapshot passes scripts/snapshot.py validation (exit 0): every target row with any judgment field set also has a non-empty assessment_notes (D1 rationale rule).",
+        "The markdown report contains a SMART+ scorecard section (Target quality (SMART+)) with per-target S/A/R plus substance and impact_scope.",
+        "Values the analyst could not determine are left blank or recorded as planetary_alignment=unknown rather than guessed."
       ]
     }
   ]
