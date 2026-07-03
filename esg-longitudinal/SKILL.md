@@ -44,16 +44,38 @@ simple key match.
 
 ```
 entity, lei, domain, indicator, value, unit, period, status,
-source, source_url, page, quote, retrieved_at
+source, source_url, page, quote, retrieved_at,
+item_type, r_strategy, enabler_topic, target_end_year, target_has_kpi, target_status,
+smart_specific, smart_achievable, smart_relevant, substance,
+planetary_alignment, impact_scope, priority_internal, importance_external,
+linked_targets, assessment_notes
 ```
+
+The first 13 columns are the original core; the next 6 are the v1 **classification
+layer** and the last 10 are the v2 **SMART+ target-quality** block (see sections
+below). All 16 non-core columns are optional — old 13-column and 19-column snapshots
+still validate, and `diff.py` keys on `(entity, indicator, period)` regardless.
 
 - `period` = the **reporting year** the value describes (2022). Distinct from
   `retrieved_at` = the **run date** you pulled it (2026-06-29). Two time axes; keep
-  them separate or the longitudinal logic breaks.
+  them separate or the longitudinal logic breaks. **For `status=target` rows, set
+  `period` = the target's end year** (e.g. 2025) so a target never collides with the
+  same indicator's actual (period = disclosure year) under the snapshot key.
 - `status` = `found` | `not_found` | `target` (a forward-looking goal, e.g. "25% by
   2025").
 - `quote` = a short verbatim snippet from the source that contains the number.
   Required for `found`/`target` rows — see Provenance below.
+- `item_type` = `kpi` (a measured metric/indicator) | `target` (a forward-looking
+  goal) | `qualitative` (a narrative commitment with no number). Auto-filled from
+  `status` when blank (found→kpi, target→target).
+- `r_strategy` = which of the 10 R-strategies (R0–R9) a circular commitment
+  advances; pipe-separated with the primary first (e.g. `R2|R8`). See
+  `circular-economy-10rs.json`. Blank for non-circular rows.
+- `enabler_topic` = for commitments that *enable* circularity rather than being an
+  R-strategy themselves (training, data infrastructure, R&D, …); one of the enabler
+  ids in `circular-economy-10rs.json`. Independent of `r_strategy`.
+- `target_end_year` / `target_has_kpi` = target completeness (see Target anatomy).
+- `target_status` = year-over-year outcome (see Year-over-year target status).
 
 Example row (Philips):
 `Royal Philips | 724500... | circular | circular_revenue_pct | 18 | % | 2022 | found | Annual Report 2022 | https://… | p.41 | "circular revenues accounted for 18% of sales" | 2026-06-29`
@@ -76,6 +98,82 @@ Rules:
 
 `scripts/snapshot.py` enforces the `found ⇒ value+source_url+quote` rule and will
 reject rows that violate it. Do not weaken the rule to get past it — fix the data.
+
+## Classification layer (circular economy)
+
+Beyond the raw value, classify each circular row so the dataset is queryable and
+comparable across companies:
+
+- **R-strategy** (`r_strategy`): map the commitment to R0–R9 using
+  `circular-economy-10rs.json`. Shorter loops (R0 Refuse … R2 Reduce) are more
+  circular than long loops (R8 Recycle, R9 Recover). Use `references/indicators.yaml`
+  `r_hint` as a starting point, but read the text — a "recycled content" pledge is
+  R8, a "designed-out packaging" pledge is R0/R2. Pipe-separate when a commitment
+  genuinely spans strategies (primary first).
+- **Enablers** (`enabler_topic`): some commitments are not an R-strategy but make
+  them possible — one of the 11 enabler ids in `circular-economy-10rs.json`. Prefer
+  `traceability` for product/material passports and chain-of-custody, `measurement`
+  for metering / KPI / impact accounting, and `data_infrastructure` only for broad
+  digital-systems commitments; the others are `ecodesign`, `rnd`, `procurement`,
+  `training`, `partnerships`, `reverse_logistics`, `finance`, `policy`. A row is
+  usually an R-strategy item *or* an enabler item; occasionally both.
+
+## Target anatomy
+
+For `status=target` rows, record completeness so you can tell a hard commitment from
+an aspiration:
+
+- `target_end_year` — the deadline year (`2025`), or blank if none stated. This is
+  also the row's `period` for targets (see the schema note above).
+- `target_has_kpi` — `yes` if the target carries a quantified value/KPI ("25%
+  circular revenue"), `no` if it is directional only ("become fully circular").
+- Derived **completeness** (report only): `both` (kpi + year) → fully specified;
+  `kpi_only` → no deadline; `year_only` → deadline but no metric; `none` → vague
+  aspiration.
+
+## Year-over-year target status
+
+Once a target appears in more than one year, record what happened to it in
+`target_status`:
+
+- `on_track` — actuals moving toward the target, deadline unchanged.
+- `achieved` — the target was met (an actual now meets/exceeds it).
+- `delayed` — deadline pushed out.
+- `changed` — target value or scope restated.
+- `failed` — deadline passed without meeting the target.
+- `dropped` — the target disappeared from disclosure.
+- `too_early` — first year seen; not yet assessable.
+
+Record this from what the report states. `scripts/diff.py` independently produces a
+**Target movements** section (new / changed / dropped targets, plus a target-vs-actual
+table) by comparing `status=target` rows across snapshots — use it to catch silent
+changes the report does not admit, and reconcile against your `target_status`.
+
+## Target quality (SMART+)
+
+For `status=target` rows you may add a per-target quality/materiality assessment.
+These 10 columns are all optional and populate on target rows; each is validated
+only when present.
+
+- **S / A / R** (`smart_specific`, `smart_achievable`, `smart_relevant`) — `yes|no`.
+  The **M** and **T** of SMART are *not* separate columns: `target_has_kpi` is M and
+  `target_end_year` is T (both factual — see the Target scorecard for them).
+- `substance` — `symbolic|substantive`: a real operational commitment vs signaling.
+- `planetary_alignment` — `insufficient|pb_aligned|unknown`: aligned to a planetary
+  boundary / science-based pathway. `unknown` is a real finding (we checked, can't
+  tell) and is distinct from leaving the field blank ("not assessed").
+- `impact_scope` — `A|B|C|D` (Lukas's A–D scoping, **not** GHG Scope 1/2/3):
+  **A** = footprint, own operations; **B** = footprint, direct value chain (suppliers
+  + use phase); **C** = footprint, broader/enabled system; **D** = **handprint**
+  (positive contribution / avoided impact elsewhere). Blank = not assessed.
+- `priority_internal` / `importance_external` — `high|low`: strategic priority inside
+  the company vs external signaling importance.
+- `linked_targets` — free text: which other (ESG) targets this connects to, and how.
+- `assessment_notes` — free text rationale. **Required** whenever any of the eight
+  judgment columns (`smart_specific`, `smart_achievable`, `smart_relevant`,
+  `substance`, `planetary_alignment`, `impact_scope`, `priority_internal`,
+  `importance_external`) is set — opinion is permitted but never ungrounded. A
+  judgment value with empty `assessment_notes` is rejected by `snapshot.py`.
 
 ## Workflow
 
@@ -162,12 +260,27 @@ change report from step 8 if applicable, and a short narrative. Template below.
 # {Company} — {Domain} over time ({year range})
 
 ## Time series
-| indicator | unit | {2015} | {2018} | {2020} | {2022} | target |
-|---|---|---|---|---|---|---|
-(one row per indicator; cells blank where not_found)
+| indicator | R | unit | {2015} | {2018} | {2020} | {2022} | target |
+|---|---|---|---|---|---|---|---|
+(one row per indicator; R = r_strategy; cells blank where not_found)
+
+## Target scorecard
+| indicator | target | end year | has KPI | completeness | status |
+|---|---|---|---|---|---|
+(one row per status=target; completeness derived from end year + has KPI)
+
+## Target quality (SMART+)
+| indicator | S | A | R | substance | planetary | impact_scope | int.pri | ext.imp | notes |
+|---|---|---|---|---|---|---|---|---|---|
+(one row per status=target; S/A/R from smart_*; notes = assessment_notes.
+M and T are in the Target scorecard above — has KPI and end year.)
+
+## Enablers
+(training / data infrastructure / R&D / … commitments, grouped by enabler_topic)
 
 ## What changed since last snapshot
-(diff.py output, or "first snapshot — baseline established")
+(diff.py output — including the Target movements section — or
+"first snapshot — baseline established")
 
 ## Notable trajectory
 (2–4 sentences: direction of travel, gaps, restatements, target vs actual)

@@ -31,6 +31,33 @@ def num(v):
         return None
 
 
+TKEY = ("entity", "indicator")
+MATERIALITY = ("substance", "planetary_alignment", "priority_internal", "importance_external")
+
+
+def _latest_by(snap, status):
+    """Latest-period row per (entity, indicator) filtered to a status."""
+    out = {}
+    for r in snap.values():
+        if str(r.get("status", "")).strip() != status:
+            continue
+        k = tuple(r.get(x, "") for x in TKEY)
+        cur = out.get(k)
+        if cur is None or str(r.get("period", "")) > str(cur.get("period", "")):
+            out[k] = r
+    return out
+
+
+def target_rows(snap):
+    """Latest-period status=target row per (entity, indicator)."""
+    return _latest_by(snap, "target")
+
+
+def latest_found(snap):
+    """Latest-period status=found actual per (entity, indicator)."""
+    return _latest_by(snap, "found")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--old", required=True)
@@ -73,7 +100,78 @@ def main():
             L.append(f"- {k[0]} / {k[1]} / {k[2]} (was {old[k].get('value', '')})")
         L.append("")
 
-    if not (added or changed or dropped):
+    old_t, new_t = target_rows(old), target_rows(new)
+    new_targets = [k for k in new_t if k not in old_t]
+    dropped_targets = [k for k in old_t if k not in new_t]
+    changed_targets = [k for k in new_t if k in old_t and (
+        new_t[k].get("target_end_year") != old_t[k].get("target_end_year")
+        or new_t[k].get("value") != old_t[k].get("value"))]
+    found_new = latest_found(new)
+    pairs = [k for k in new_t if k in found_new]
+
+    reassessed, newly_assessed = {}, {}
+    for k in (x for x in new_t if x in old_t):
+        for f in MATERIALITY:
+            ov = (old_t[k].get(f) or "").strip()
+            nv = (new_t[k].get(f) or "").strip()
+            if ov and nv and ov != nv:
+                reassessed.setdefault(k, []).append(f"{f}: {ov} -> {nv}")
+            elif not ov and nv:
+                newly_assessed.setdefault(k, []).append(f"{f}: -> {nv}")
+
+    if new_targets or changed_targets or dropped_targets or pairs or reassessed or newly_assessed:
+        L.append("## Target movements\n")
+        if new_targets:
+            L.append("**New targets**\n")
+            for k in sorted(new_targets):
+                t = new_t[k]
+                L.append(f"- {k[0]} / {k[1]}: {t.get('value','')} by "
+                         f"{t.get('target_end_year','') or '?'} "
+                         f"(status: {t.get('target_status','') or 'n/a'})")
+            L.append("")
+        if changed_targets:
+            L.append("**Changed targets**\n")
+            for k in sorted(changed_targets):
+                o, n = old_t[k], new_t[k]
+                bits = []
+                if o.get("target_end_year") != n.get("target_end_year"):
+                    bits.append(f"end year {o.get('target_end_year','') or '?'} -> "
+                                f"{n.get('target_end_year','') or '?'}")
+                if o.get("value") != n.get("value"):
+                    bits.append(f"value {o.get('value','') or '?'} -> "
+                                f"{n.get('value','') or '?'}")
+                L.append(f"- {k[0]} / {k[1]}: " + "; ".join(bits))
+            L.append("")
+        if dropped_targets:
+            L.append("**Dropped targets** (verify achieved vs abandoned)\n")
+            for k in sorted(dropped_targets):
+                o = old_t[k]
+                L.append(f"- {k[0]} / {k[1]}: was {o.get('value','')} by "
+                         f"{o.get('target_end_year','') or '?'}")
+            L.append("")
+        if pairs:
+            L += ["**Target vs latest actual**\n",
+                  "| entity | indicator | target | actual | end year | status |",
+                  "|---|---|---|---|---|---|"]
+            for k in sorted(pairs):
+                t, a = new_t[k], found_new[k]
+                L.append(f"| {k[0]} | {k[1]} | {t.get('value','')} | "
+                         f"{a.get('value','')} | {t.get('target_end_year','')} | "
+                         f"{t.get('target_status','') or ''} |")
+            L.append("")
+        if reassessed:
+            L.append("**Quality reassessed**\n")
+            for k in sorted(reassessed):
+                L.append(f"- {k[0]} / {k[1]}: " + "; ".join(reassessed[k]))
+            L.append("")
+        if newly_assessed:
+            L.append("**Newly assessed**\n")
+            for k in sorted(newly_assessed):
+                L.append(f"- {k[0]} / {k[1]}: " + "; ".join(newly_assessed[k]))
+            L.append("")
+
+    if not (added or changed or dropped or new_targets or changed_targets
+            or dropped_targets or pairs or reassessed or newly_assessed):
         L.append("_No differences between the two snapshots._")
 
     report = "\n".join(L)
