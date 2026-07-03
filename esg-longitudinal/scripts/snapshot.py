@@ -7,7 +7,11 @@ against.
 
 Schema (one row per company-indicator-period):
     entity, lei, domain, indicator, value, unit, period, status,
-    source, source_url, page, quote, retrieved_at
+    source, source_url, page, quote, retrieved_at,
+    item_type, r_strategy, enabler_topic, target_end_year, target_has_kpi, target_status,
+    smart_specific, smart_achievable, smart_relevant, substance,
+    planetary_alignment, impact_scope, priority_internal, importance_external,
+    linked_targets, assessment_notes
 
 Required on every row: entity, domain, indicator, period, status, retrieved_at.
 If status == "found" or "target", then value + source_url + quote are also required
@@ -30,7 +34,10 @@ import sys
 COLS = ["entity", "lei", "domain", "indicator", "value", "unit", "period", "status",
         "source", "source_url", "page", "quote", "retrieved_at",
         "item_type", "r_strategy", "enabler_topic",
-        "target_end_year", "target_has_kpi", "target_status"]
+        "target_end_year", "target_has_kpi", "target_status",
+        "smart_specific", "smart_achievable", "smart_relevant", "substance",
+        "planetary_alignment", "impact_scope", "priority_internal", "importance_external",
+        "linked_targets", "assessment_notes"]
 REQUIRED = ["entity", "domain", "indicator", "period", "status", "retrieved_at"]
 SOURCED_STATUSES = {"found", "target"}
 VALID_STATUS = {"found", "not_found", "target"}
@@ -44,6 +51,18 @@ VALID_ENABLER = {"ecodesign", "rnd", "data_infrastructure", "training",
 VALID_HAS_KPI = {"yes", "no"}
 VALID_TARGET_STATUS = {"on_track", "achieved", "delayed", "changed",
                        "failed", "dropped", "too_early"}
+
+# v2 SMART+ enums — validated ONLY when the field is non-empty (backward compat).
+VALID_SUBSTANCE = {"symbolic", "substantive"}
+VALID_PLANETARY = {"insufficient", "pb_aligned", "unknown"}
+VALID_IMPACT_SCOPE = {"A", "B", "C", "D"}
+VALID_LEVEL = {"high", "low"}  # named for its values: shared by priority_internal AND importance_external
+# VALID_HAS_KPI {"yes","no"} is reused for the three smart_* columns (shared yes/no set).
+
+# The 8 judgment columns that require a rationale in assessment_notes (D1).
+JUDGMENT_COLS = ["smart_specific", "smart_achievable", "smart_relevant", "substance",
+                 "planetary_alignment", "impact_scope", "priority_internal",
+                 "importance_external"]
 
 
 def _autofill_item_type(row):
@@ -96,6 +115,34 @@ def validate(row):
     ey = str(row.get("target_end_year", "")).strip()
     if ey and not re.fullmatch(r"\d{4}", ey):
         errs.append(f"invalid target_end_year '{ey}' (use YYYY)")
+
+    for col in ("smart_specific", "smart_achievable", "smart_relevant"):
+        v = str(row.get(col, "")).strip()
+        if v and v not in VALID_HAS_KPI:
+            errs.append(f"invalid {col} '{v}' (use yes|no)")
+
+    sub = str(row.get("substance", "")).strip()
+    if sub and sub not in VALID_SUBSTANCE:
+        errs.append(f"invalid substance '{sub}' (use symbolic|substantive)")
+
+    pa = str(row.get("planetary_alignment", "")).strip()
+    if pa and pa not in VALID_PLANETARY:
+        errs.append(f"invalid planetary_alignment '{pa}' "
+                    "(use insufficient|pb_aligned|unknown)")
+
+    isc = str(row.get("impact_scope", "")).strip()
+    if isc and isc not in VALID_IMPACT_SCOPE:
+        errs.append(f"invalid impact_scope '{isc}' (use A|B|C|D, uppercase)")
+
+    for col in ("priority_internal", "importance_external"):
+        v = str(row.get(col, "")).strip()
+        if v and v not in VALID_LEVEL:
+            errs.append(f"invalid {col} '{v}' (use high|low)")
+
+    set_judgments = [c for c in JUDGMENT_COLS if str(row.get(c, "")).strip()]
+    if set_judgments and not str(row.get("assessment_notes", "")).strip():
+        errs.append(f"judgment field(s) {sorted(set_judgments)} set but "
+                    "assessment_notes empty (add rationale)")
 
     return errs
 
