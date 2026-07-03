@@ -281,7 +281,7 @@ EXPECTED_ENABLERS = {"ecodesign", "rnd", "data_infrastructure", "measurement",
 - [ ] **Step 2: Run enabler tests to verify they fail**
 
 Run: `python -m pytest esg-longitudinal/tests/test_reference_data.py -k enabler -v`
-Expected: FAIL (`test_enablers_present_and_well_formed`: JSON has 8 ids, expected 11; `test_enabler_ids_match_snapshot_validator`: `VALID_ENABLER` has 8).
+Expected: FAIL — specifically `test_enablers_present_and_well_formed` fails (JSON has 8 ids, but `EXPECTED_ENABLERS` now expects 11). `test_enabler_ids_match_snapshot_validator` stays GREEN here (it compares JSON ids to `VALID_ENABLER`, both still 8 and equal — a JSON↔validator invariant that holds at 8 before and 11 after Step 3). The suite exits non-zero on the one real failure.
 
 - [ ] **Step 3: Add 3 enablers + narrow `data_infrastructure` (implementation)**
 
