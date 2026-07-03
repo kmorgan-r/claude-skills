@@ -39,11 +39,15 @@ def test_circular_indicators_have_valid_r_hint():
 
 def test_skill_documents_new_columns():
     text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
-    for col in ["item_type", "r_strategy", "enabler_topic",
-                "target_end_year", "target_has_kpi", "target_status"]:
+    v1_cols = ["item_type", "r_strategy", "enabler_topic",
+               "target_end_year", "target_has_kpi", "target_status"]
+    v2_cols = ["smart_specific", "smart_achievable", "smart_relevant", "substance",
+               "planetary_alignment", "impact_scope", "priority_internal",
+               "importance_external", "linked_targets", "assessment_notes"]
+    for col in v1_cols + v2_cols:
         assert col in text, f"SKILL.md missing {col}"
     for section in ["Classification layer", "Target anatomy",
-                    "Year-over-year target status"]:
+                    "Year-over-year target status", "Target quality (SMART+)"]:
         assert section in text, f"SKILL.md missing section: {section}"
 
 
