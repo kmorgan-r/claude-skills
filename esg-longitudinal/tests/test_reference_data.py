@@ -51,16 +51,22 @@ def test_skill_documents_new_columns():
         assert section in text, f"SKILL.md missing section: {section}"
 
 
-def test_evals_reference_19_column_schema():
+def test_evals_reference_29_column_schema():
     data = json.loads((ROOT / "evals" / "evals.json").read_text(encoding="utf-8"))
     blob = json.dumps(data)
+    # no stale schema descriptors from prior migrations
     assert "13-column" not in blob and "13 column" not in blob
-    # the full 19-column header appears verbatim in at least one assertion
+    assert "19-column" not in blob and "19 column" not in blob
+    # the full 29-column header appears verbatim in at least one assertion
     header = ("entity,lei,domain,indicator,value,unit,period,status,source,"
               "source_url,page,quote,retrieved_at,item_type,r_strategy,"
-              "enabler_topic,target_end_year,target_has_kpi,target_status")
+              "enabler_topic,target_end_year,target_has_kpi,target_status,"
+              "smart_specific,smart_achievable,smart_relevant,substance,"
+              "planetary_alignment,impact_scope,priority_internal,"
+              "importance_external,linked_targets,assessment_notes")
     assert header in blob
-    # a classification assertion exists
+    # classification + SMART+ assertions exist
     assert "r_strategy" in blob and "target_status" in blob
+    assert "substance" in blob and "planetary_alignment" in blob
     ids = [e["id"] for e in data["evals"]]
-    assert 4 in ids  # new longitudinal target-status eval
+    assert 4 in ids and 5 in ids  # target-status eval + new SMART+ scorecard eval
