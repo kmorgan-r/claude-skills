@@ -322,29 +322,21 @@ The `mv` command on the same filesystem is atomic on Linux/macOS/Git Bash, so th
 **At the END of each iteration:**
 1. Increment `iteration` count (per-session)
 2. Increment `total_rounds` (session-independent — this is what the ceiling checks)
-3. Update `previous_urgent_count` for regression detection (skip when `URGENT_TOTAL == -1` — a parse/fetch failure must NOT overwrite the last real count; see "Regression detection")
-4. Append the current urgent count to `urgent_count_history` (skip when `URGENT_TOTAL == -1`; cap the array at the last 20 entries)
+3. Update `previous_urgent_count` for regression detection
+4. Append the current urgent count to `urgent_count_history` (cap the array at the last 20 entries)
 5. Write state file before commit (Write tool by default — see "State-file writes" above)
 
 These are the five field transitions; apply them however you write state. **Default: read the state with the Read tool, apply the changes, write the full document back with the Write tool** (the npm-shim jq truncates the file — see the jq Warning). The jq form below is normative for the LOGIC only; use it from bash **only if jq is verified working**.
 
-**When `URGENT_TOTAL == -1`** (parse/fetch failure): bump `iteration` and `total_rounds` ONLY — do NOT touch `previous_urgent_count` or `urgent_count_history`. Writing `-1` into either makes the next iteration compare a real count against `-1` (e.g. `3 -gt -1` → false "REGRESSION DETECTED") and pollutes the severity trend shown at the ceiling handoff. Same sentinel rule as "Regression detection" below.
+This bookkeeping only ever runs with `URGENT_TOTAL >= 0`. The Check Phase (Loop Step 5, "Handle error/unknown state") hard-stops the loop with `exit 1` on the `URGENT_TOTAL == -1` sentinel — a parse/fetch failure ends the session for manual `--continue`, it does NOT fall through to end-of-iteration bookkeeping or start another round. So there is no `-1` to guard against here, and `total_rounds` is never advanced by a failed round.
 ```bash
-if [ "$URGENT_TOTAL" -eq -1 ]; then
-  # Parse/fetch failure: advance counters only, preserve last real urgent state
-  jq '.iteration += 1
-     | .total_rounds = ((.total_rounds // 0) + 1)' \
-    .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
-    mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
-else
-  jq --argjson uc "$URGENT_TOTAL" \
-    '.iteration += 1
-     | .total_rounds = ((.total_rounds // 0) + 1)
-     | .previous_urgent_count = $uc
-     | .urgent_count_history = ((.urgent_count_history // []) + [$uc] | .[-20:])' \
-    .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
-    mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
-fi
+jq --argjson uc "$URGENT_TOTAL" \
+  '.iteration += 1
+   | .total_rounds = ((.total_rounds // 0) + 1)
+   | .previous_urgent_count = $uc
+   | .urgent_count_history = ((.urgent_count_history // []) + [$uc] | .[-20:])' \
+  .claude-pr-fix-state.json > .claude-pr-fix-state.json.tmp && \
+  mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
 ```
 
 This ensures that if auto-compaction occurs mid-iteration, Claude can recover state by reading the file.
@@ -557,9 +549,9 @@ fi
 2. Validate JSON and PR number (same as above)
 3. Preserve `issue_history`, `files_blacklisted`, **`total_rounds`, and `urgent_count_history`** (accumulated knowledge — total_rounds is session-independent)
 4. Reset `iteration` to 1, update `started_at`, clear `previous_urgent_count`. Do NOT reset `total_rounds`.
-5. **Pre-flight ceiling check:** if `total_rounds >= total_rounds_ceiling`, STOP immediately with the "Round Ceiling Reached" handoff (see Loop Step 6) instead of starting another round. Re-invoking bare `--loop` must not silently bypass the ceiling — the human proceeds by passing `--reset` (start counting over) or `--max-rounds=<higher>` (raise the bar). This is the fix for issue #3953: re-invocation was the exact state reset that disarmed the old guards.
-6. Begin new loop session with full history context
-7. If state file has old schema (no `issue_history` field), migrate: set `issue_history: {}`. If it lacks `total_rounds`, migrate: `total_rounds = (.iteration // 0)` as a best-effort floor (historical resets under-count, so this is a lower bound), `total_rounds_ceiling = MAX_ROUNDS`, `urgent_count_history = []`.
+5. **Migrate old-schema state FIRST (before the ceiling check).** If state file has old schema (no `issue_history` field), migrate: set `issue_history: {}`. If it lacks `total_rounds`, migrate: `total_rounds = (.iteration // 0)` as a best-effort floor (historical resets under-count, so this is a lower bound), `total_rounds_ceiling = MAX_ROUNDS`, `urgent_count_history = []`. This must run before step 6 so the pre-flight check reads the migrated `total_rounds`, not `0` — otherwise the very first post-upgrade `--loop` under-counts and can skip the ceiling for one round.
+6. **Pre-flight ceiling check:** if `total_rounds >= total_rounds_ceiling`, STOP immediately with the "Round Ceiling Reached" handoff (see Loop Step 6) instead of starting another round. Re-invoking bare `--loop` must not silently bypass the ceiling — the human proceeds by passing `--reset` (start counting over) or `--max-rounds=<higher>` (raise the bar). This is the fix for issue #3953: re-invocation was the exact state reset that disarmed the old guards.
+7. Begin new loop session with full history context
 
 **If starting fresh:**
 Create initial state file using `jq` for proper variable interpolation:
