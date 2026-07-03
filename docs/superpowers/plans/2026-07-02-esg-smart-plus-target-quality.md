@@ -49,7 +49,7 @@ Task order: **1 (schema/validator) → 2 (enablers) → 3 (diff) → 4 (docs) �
 
 - [ ] **Step 1: Rewrite the header test + add helpers/imports (test)**
 
-In `esg-longitudinal/tests/test_snapshot.py`, add `import pytest` at the top. Replace the existing `NEW_COLS` constant (lines 5-6) and `test_header_has_19_columns_in_order` (lines 18-23) with:
+In `esg-longitudinal/tests/test_snapshot.py`, add `import pytest` at the top. Make TWO edits (the regions are non-contiguous — **do NOT delete `_base` at lines 9-15, nor the imports/`snapshot` load at lines 1-3, which sit between them**): (a) replace the `NEW_COLS` constant (lines 5-6) with the `V1_COLS`/`V2_COLS`/`_target` block below, and (b) replace `test_header_has_19_columns_in_order` (lines 18-23) with the new header test below:
 
 ```python
 V1_COLS = ["item_type", "r_strategy", "enabler_topic",
@@ -97,7 +97,7 @@ COLS = ["entity", "lei", "domain", "indicator", "value", "unit", "period", "stat
         "linked_targets", "assessment_notes"]
 ```
 
-In the module docstring, replace the schema block (lines 9-11, the `Schema ... entity, ... retrieved_at` lines) with the full 29-column list so the file's own docs match `COLS`:
+In the module docstring, replace the schema block (lines 8-10 — the `Schema (one row per company-indicator-period):` header at line 8 plus the two column lines 9-10; keep the blank line 11) with the full 29-column list so the file's own docs match `COLS`:
 
 ```
 Schema (one row per company-indicator-period):
@@ -175,10 +175,14 @@ def test_full_v2_row_valid():
 
 
 def test_invalid_enum_and_missing_notes_both_reported():
-    # validate() must accumulate, not short-circuit
+    # validate() must accumulate, not short-circuit. The D1 message ALSO contains
+    # "substance" (in the column list), so pin the distinct enum message explicitly
+    # and assert exactly two errors — otherwise a short-circuit that dropped the enum
+    # error would still satisfy a bare `any("substance" ...)`.
     errs = snapshot.validate(_target(substance="maybe"))
-    assert any("substance" in e for e in errs)
-    assert any("assessment_notes" in e for e in errs)
+    assert any(e.startswith("invalid substance") for e in errs)  # the enum error
+    assert any("assessment_notes" in e for e in errs)            # the D1 error
+    assert len(errs) == 2
 
 
 def test_notes_without_judgment_is_valid():
@@ -187,8 +191,8 @@ def test_notes_without_judgment_is_valid():
 
 - [ ] **Step 6: Run the new tests to verify they fail**
 
-Run: `python -m pytest esg-longitudinal/tests/test_snapshot.py -k "v2 or judgment or linked_targets or whitespace_notes or notes_without" -v`
-Expected: FAIL (the v2 enum constants and D1 rule do not exist yet; e.g. rows with unknown enum values currently validate clean, so the "rejected" assertions fail).
+Run: `python -m pytest esg-longitudinal/tests/test_snapshot.py -k "invalid_v2_enum or judgment_column_requires or whitespace_notes or invalid_enum_and_missing" -v`
+Expected: FAIL (the v2 enum constants and D1 rule do not exist yet; rows with unknown enum values currently validate clean, so the "rejected" and D1 assertions fail). This `-k` deliberately excludes the negative tests (`test_linked_targets_alone_does_not_require_notes`, `test_notes_without_judgment_is_valid`) which correctly pass BOTH before and after implementation — including them would muddy the red signal.
 
 - [ ] **Step 7: Add enum constants + D1 rule (implementation)**
 
@@ -381,7 +385,9 @@ def test_quality_only_change_still_renders(tmp_path):
     old, new = tmp_path / "old.csv", tmp_path / "new.csv"
     _write(old, [_t(period="2025", substance="symbolic", assessment_notes="n")])
     _write(new, [_t(period="2025", substance="substantive", assessment_notes="n")])
-    b = _run_diff(old, new).stdout
+    out = _run_diff(old, new)
+    assert out.returncode == 0, out.stderr
+    b = out.stdout
     assert "Target movements" in b
     assert "Quality reassessed" in b
     assert "substance: symbolic -> substantive" in b
@@ -391,7 +397,9 @@ def test_newly_assessed_not_reassessed(tmp_path):
     old, new = tmp_path / "old.csv", tmp_path / "new.csv"
     _write(old, [_t(period="2025")])  # no materiality fields set
     _write(new, [_t(period="2025", substance="substantive", assessment_notes="n")])
-    b = _run_diff(old, new).stdout
+    out = _run_diff(old, new)
+    assert out.returncode == 0, out.stderr
+    b = out.stdout
     assert "Newly assessed" in b
     assert "Quality reassessed" not in b  # blank->value is NOT a reassessment
 
@@ -401,8 +409,11 @@ def test_no_churn_against_19col_baseline(tmp_path):
     old, new = tmp_path / "old.csv", tmp_path / "new.csv"
     _write(old, [_t(period="2025")], cols=V1_COLS_19)
     _write(new, [_t(period="2025", substance="substantive", assessment_notes="n")])
-    b = _run_diff(old, new).stdout
+    out = _run_diff(old, new)
+    assert out.returncode == 0, out.stderr  # regression drop of `or ""` would CRASH -> catch it
+    b = out.stdout
     assert "Quality reassessed" not in b  # first-time assessment, not a reassessment
+    assert "Newly assessed" in b          # positive proof the absent-key path ran (not empty stdout)
 ```
 
 - [ ] **Step 2: Run the diff tests to verify they fail**
@@ -459,6 +470,21 @@ Inside that block, after the `if pairs:` sub-block ends (after line 150, the `L.
             L.append("")
 ```
 
+Finally, fix the no-differences footer guard so a quality-only diff does not print both the reassessed subsection AND a contradictory "no differences" line. Change (line 152):
+
+```python
+    if not (added or changed or dropped):
+```
+
+to:
+
+```python
+    if not (added or changed or dropped or new_targets or changed_targets
+            or dropped_targets or pairs or reassessed or newly_assessed):
+```
+
+(This also fixes the pre-existing case where an end-year-only target change printed `_No differences between the two snapshots._`.)
+
 Note: `(old_t[k].get(f) or "")` normalizes an absent key (`None`, from a pre-v2 CSV) and an empty string identically — this is the both-non-empty guard that prevents `str(None)` churn.
 
 - [ ] **Step 4: Run the full diff test file to verify it passes**
@@ -511,7 +537,7 @@ Expected: FAIL (SKILL.md has none of the v2 column names nor the SMART+ section)
 
 - [ ] **Step 3: Update the schema block + prose (implementation)**
 
-In `esg-longitudinal/SKILL.md`, replace the schema code block (lines 45-49) with:
+In `esg-longitudinal/SKILL.md`, replace ONLY the inner content of the schema code block (lines 46-48 — **keep the ` ``` ` fences at lines 45 and 49**) with:
 
 ```
 entity, lei, domain, indicator, value, unit, period, status,
@@ -665,7 +691,7 @@ In `esg-longitudinal/evals/evals.json`, eval 4:
  Also judge each target's quality: whether it reads symbolic or substantive, whether it is science-based / planetary-aligned, and its internal (strategic) vs external (signaling) priority — with a short rationale for each call.
 ```
 
-- Add these two assertion strings to eval 4's `assertions` array (after the last existing assertion, line 66):
+- Add these two assertion strings to eval 4's `assertions` array. **First append a comma to eval 4's current last assertion** (line 66, `"...rather than only listing current targets."` — it has no trailing comma), then add the two new strings after it (the first new string ends with a comma, the second does not):
 
 ```json
         "At least one status=target row carries SMART+ fields: a substance (symbolic|substantive), a planetary_alignment (insufficient|pb_aligned|unknown), and a priority_internal or importance_external (high|low).",
