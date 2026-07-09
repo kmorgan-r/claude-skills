@@ -245,3 +245,42 @@ def build_workbook(columns, rows):
     legend = wb.create_sheet("Legend")
     _build_legend_sheet(legend)
     return wb
+
+
+def _default_out(snapshot_path):
+    base = os.path.splitext(os.path.basename(snapshot_path))[0]
+    return os.path.join("reports", f"{base}.xlsx")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Render a snapshot CSV into a formatted .xlsx (Data + Legend).")
+    ap.add_argument("--snapshot", required=True, help="path to a snapshot CSV")
+    ap.add_argument("--out", default="", help="output .xlsx (default reports/<basename>.xlsx)")
+    args = ap.parse_args(argv)
+
+    out = args.out or _default_out(args.snapshot)
+
+    try:
+        columns, rows = read_snapshot(args.snapshot)
+    except OSError as e:
+        print(f"error: cannot read snapshot '{args.snapshot}': {e}", file=sys.stderr)
+        return 1
+
+    try:
+        wb = build_workbook(columns, rows)
+    except ImportError:
+        print("error: openpyxl is required to export a workbook — "
+              "pip install openpyxl", file=sys.stderr)
+        return 2
+
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    wb.save(out)
+    print(f"wrote {len(rows)} data row(s) -> {out}")
+    if not rows:
+        print("note: snapshot had no data rows (header only)", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

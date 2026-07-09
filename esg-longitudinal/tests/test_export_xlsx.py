@@ -249,3 +249,54 @@ def test_header_only_still_valid():
     wb = _wb(["entity", "domain", "indicator", "period", "status"], [])
     assert wb.sheetnames == ["Data", "Legend"]
     assert wb["Data"].cell(row=1, column=1).value == "entity"
+
+
+import sys
+
+
+def test_default_out_derives_basename():
+    assert export_xlsx._default_out("data/snapshots/2026-07-03-Philips.csv") \
+        == os.path.join("reports", "2026-07-03-Philips.xlsx")
+
+
+def test_main_happy_path_writes_workbook(tmp_path):
+    pytest.importorskip("openpyxl")
+    src = tmp_path / "2026-07-03.csv"
+    _write_csv(src, ["entity", "domain", "indicator", "period", "status"],
+               [{"entity": "X", "domain": "circular", "indicator": "i",
+                 "period": "2022", "status": "found"}])
+    out = tmp_path / "out.xlsx"
+    rc = export_xlsx.main(["--snapshot", str(src), "--out", str(out)])
+    assert rc == 0
+    assert out.exists()
+    from openpyxl import load_workbook
+    assert load_workbook(str(out)).sheetnames == ["Data", "Legend"]
+
+
+def test_main_missing_snapshot_returns_nonzero_and_names_path(tmp_path, capsys):
+    missing = tmp_path / "nope.csv"
+    rc = export_xlsx.main(["--snapshot", str(missing), "--out", str(tmp_path / "o.xlsx")])
+    assert rc != 0
+    assert "nope.csv" in capsys.readouterr().err
+
+
+def test_main_unreadable_snapshot_dir_returns_nonzero(tmp_path):
+    d = tmp_path / "adir"
+    d.mkdir()
+    rc = export_xlsx.main(["--snapshot", str(d), "--out", str(tmp_path / "o.xlsx")])
+    assert rc != 0
+
+
+def test_main_missing_openpyxl_returns_nonzero_with_hint(tmp_path, capsys, monkeypatch):
+    # NOT importorskip-guarded: this path must run in an env that HAS openpyxl.
+    src = tmp_path / "s.csv"
+    _write_csv(src, ["entity", "domain", "indicator", "period", "status"],
+               [{"entity": "X", "domain": "circular", "indicator": "i",
+                 "period": "2022", "status": "found"}])
+    # Force ImportError regardless of import form / test order.
+    for name in [m for m in list(sys.modules) if m == "openpyxl" or m.startswith("openpyxl.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setitem(sys.modules, "openpyxl", None)
+    rc = export_xlsx.main(["--snapshot", str(src), "--out", str(tmp_path / "o.xlsx")])
+    assert rc != 0
+    assert "pip install openpyxl" in capsys.readouterr().err
