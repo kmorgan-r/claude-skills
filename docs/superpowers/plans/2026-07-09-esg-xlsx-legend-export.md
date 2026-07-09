@@ -104,9 +104,10 @@ def test_read_snapshot_header_only(tmp_path):
 
 
 def test_legend_covers_every_canonical_column():
-    documented = {c for c, _, _ in export_xlsx.LEGEND_COLUMNS}
-    for col in snapshot.COLS:
-        assert col in documented, f"Legend missing column {col}"
+    documented = [c for c, _, _ in export_xlsx.LEGEND_COLUMNS]
+    # set-equality (not subset): catches misspellings, omissions, AND extras/dupes.
+    assert set(documented) == set(snapshot.COLS)
+    assert len(documented) == len(snapshot.COLS)
 
 
 def test_legend_code_tables_cover_enums():
@@ -303,7 +304,10 @@ Append to `tests/test_export_xlsx.py`:
 
 ```python
 import pytest
-from openpyxl.utils import get_column_letter
+# NOTE: do NOT import any openpyxl symbol at module scope — that would run at
+# pytest collection time and error the whole module (defeating the openpyxl-free
+# tests and the importorskip fallback) when openpyxl is absent. Import openpyxl
+# names lazily, inside tests that already went through _wb()'s importorskip.
 
 
 def _wb(columns, rows):
@@ -353,6 +357,7 @@ def test_data_sheet_header_order_and_freeze():
 def test_autofilter_covers_full_range():
     rows = _data_rows()
     ws = _wb(DATA_COLS, rows)["Data"]
+    from openpyxl.utils import get_column_letter   # lazy: after _wb's importorskip
     last_col = get_column_letter(len(DATA_COLS))
     assert ws.auto_filter.ref == f"A1:{last_col}{len(rows) + 1}"
 
@@ -544,12 +549,17 @@ def test_legend_impact_scope_uses_code_table_cells_not_substring():
 def test_color_key_swatches_match_data_fills():
     wb = _wb(DATA_COLS, _data_rows())
     legend = wb["Legend"]
-    # collect the fills used on swatch cells
-    swatch_rgbs = {_fill_rgb(cell) for row in legend.iter_rows() for cell in row}
-    swatch_rgbs.discard(None)
-    for expected in (export_xlsx.FILL_FOUND, export_xlsx.FILL_TARGET,
-                     export_xlsx.FILL_NOT_FOUND, export_xlsx.FILL_NO):
-        assert expected in swatch_rgbs, f"color key missing swatch {expected}"
+    # Tie each swatch fill to its label's row (col1 swatch, col2 label) so a
+    # swapped swatch is caught, not just overall presence of the colors.
+    label_to_fill = {}
+    for row in legend.iter_rows():
+        cells = list(row)
+        if len(cells) >= 2 and cells[1].value:
+            f = _fill_rgb(cells[0])
+            if f is not None:
+                label_to_fill[cells[1].value] = f
+    for color, label in export_xlsx.LEGEND_COLOR_KEY:
+        assert label_to_fill.get(label) == color, f"swatch for {label!r} != {color}"
 
 
 # 13 / 19 / 29 column headers straight from snapshot.py's COLS.
