@@ -62,9 +62,13 @@ python scripts/export_xlsx.py --snapshot data/snapshots/2026-07-03.csv \
   `openpyxl`'s `save()` raises `FileNotFoundError` on a missing parent dir.
 - **Library:** `openpyxl` (multi-sheet, cell fills, freeze panes, autofilter, column
   widths). `openpyxl` is imported **lazily** inside the functions that need it so the
-  missing-dependency path is reachable and testable (see Entry points). If it is not
-  importable, the script prints a one-line install hint (`pip install openpyxl`) and
-  returns a non-zero exit code — an explicit failure, never a silent no-op.
+  missing-dependency path is reachable and testable (see Entry points). The first
+  openpyxl reference must be `import openpyxl` / `from openpyxl import Workbook`
+  (loading the top-level package), NOT a bare `import openpyxl.styles` — so that
+  nulling `sys.modules["openpyxl"]` in a test reliably raises `ImportError` even after
+  a sibling test cached `openpyxl.styles`. If it is not importable, the script prints
+  a one-line install hint (`pip install openpyxl`) and returns a non-zero exit code —
+  an explicit failure, never a silent no-op.
 
   (Note: this is deliberately *stricter* than `find_reports.py`, which degrades to a
   graceful exit-0 JSON payload when `ddgs` is absent. Here a missing library means no
@@ -81,11 +85,17 @@ The module exposes three seams so each behavior can be tested at the right level
   columns (file order) and rows, returns an in-memory `Workbook` with the `Data` and
   `Legend` sheets fully styled. Fill/sheet/freeze/autofilter assertions test this
   directly, with no file I/O.
-- `main(argv=None) -> int` — argparse front door. Resolves the default `--out`,
-  catches missing `openpyxl` (→ hint + non-zero return) and a missing/unreadable
-  snapshot (→ clear error + non-zero return), calls `read_snapshot` → `build_workbook`
-  → `makedirs` → `save`, and returns `0` on success. Exit-code and default-path
-  behaviors test this.
+- `main(argv=None) -> int` — argparse front door (`argv` defaults to `None` so the
+  zero-arg `main()` from `__main__` works). Resolves the default `--out`, catches
+  missing `openpyxl` (→ hint + non-zero return) and a missing/unreadable snapshot
+  (→ clear error naming the path + non-zero return), calls `read_snapshot` →
+  `build_workbook` → `makedirs` → `save`, and returns `0` on success. Exit-code,
+  default-path, and happy-path behaviors test this.
+
+The Legend's content — the column dictionary and the code tables — is defined as
+module-level **data structures** (e.g. `LEGEND_COLUMNS`, `LEGEND_CODE_TABLES`) that
+`build_workbook` renders into cells. This keeps the drift-guard test (below)
+openpyxl-free: it inspects those structures directly, without building a workbook.
 
 `if __name__ == "__main__": sys.exit(main())`.
 
@@ -125,10 +135,11 @@ hand-copied palettes:
   exploding the grid.
 
 **Sheet 2 — `Legend`**
-- Styled, colored content. Plain-English descriptions are authored statically (from
-  `SKILL.md`'s schema section); the **coded value lists** for the code tables are the
-  literal enum members, kept in sync with `snapshot.py` by a test (see Testing → drift
-  guard) rather than drifting silently.
+- Styled, colored content, rendered from the module-level `LEGEND_COLUMNS` /
+  `LEGEND_CODE_TABLES` data structures. Plain-English descriptions are authored
+  statically (from `SKILL.md`'s schema section); the **coded value lists** for the
+  code tables are the literal enum members, kept in sync with `snapshot.py` by a test
+  (see Testing → drift guard) rather than drifting silently.
 - **Column dictionary:** one row per canonical column → plain-English meaning +
   allowed/example values. Covers all known columns even if a given snapshot omits some
   (so the legend is complete regardless of schema version).
@@ -157,20 +168,23 @@ scripts/export_xlsx.py  ── openpyxl ──▶  reports/2026-07-03.xlsx
 ### Skill wiring (`SKILL.md`)
 
 - Add **Step 10 — Export workbook** after Step 9 (Report): run `export_xlsx.py` on the
-  snapshot just written; the `.xlsx` (with its Legend tab) is the shareable
-  deliverable, the CSV snapshot the canonical one. Note the one-time
-  `pip install openpyxl` prerequisite here so an agent installs it up front rather
-  than hitting the failure path mid-workflow.
+  **snapshot CSV written in Step 7** (it consumes the snapshot, not the Step 8/9 diff
+  report); the `.xlsx` (with its Legend tab) is the shareable deliverable, the CSV
+  snapshot the canonical one. Note the one-time `pip install openpyxl` prerequisite
+  here so an agent installs it up front rather than hitting the failure path
+  mid-workflow.
 - Add the workbook to the Output section and `export_xlsx.py` to Bundled resources
   (noting the `openpyxl` dependency).
 - Keep the edit small and additive; it must not alter the snapshot-first framing.
 
 ### Data hygiene (`.gitignore`)
 
-`reports/*.xlsx` is added to `.gitignore`. The workbook is a regenerable binary
-artifact derived from snapshot data; ignoring it is consistent with the repo's
-existing `**/outputs/*` posture (exports are not committed) while leaving the small,
-diff-friendly `reports/*.md` change reports tracked as they are today. The canonical
+`**/reports/*.xlsx` is added to `.gitignore` (any-depth glob, matching the existing
+`**/outputs/*` posture — a `reports/` created in a per-company working subdir under
+the Scaling flow is ignored too, not just a single root-level one). The workbook is a
+regenerable binary artifact derived from snapshot data; ignoring it is consistent
+with "exports are not committed" while leaving the small, diff-friendly
+`reports/*.md` change reports tracked as they are today. The canonical
 `data/snapshots/*.csv` remains committed — it is the durable baseline, so this does
 not touch it.
 
@@ -192,47 +206,77 @@ Two layers, both test-first (RED before GREEN).
 Follows the existing test convention: `from conftest import _load; export_xlsx =
 _load("export_xlsx")`. Output is written under `tmp_path` with an explicit `--out`
 (never the repo `reports/` default) so tests don't pollute the tree or collide in
-parallel. Fixtures are written with `encoding="utf-8-sig"` so they exercise the real
-BOM path.
+parallel. Fixtures that feed `read_snapshot` are written with `encoding="utf-8-sig"`
+so they exercise the real BOM path.
 
-Guard the openpyxl-dependent tests with `pytest.importorskip("openpyxl")` **inside a
-fixture / those test bodies**, NOT at module top — module-top `importorskip` would
-also skip the missing-dependency test below, which must run in an env that has
-openpyxl.
+Guard the **workbook-building / round-trip** tests with `pytest.importorskip(
+"openpyxl")` **inside a fixture / those test bodies**, NOT at module top — module-top
+`importorskip` would also skip the missing-dependency test (which must run in an env
+that *has* openpyxl) and the drift-guard test (which is openpyxl-free). Practically,
+openpyxl should be present wherever pytest runs; the importorskip is a graceful
+fallback, not a license to skip the suite in CI.
 
 Write the tests first and watch them fail (no script yet), then build the script to
 pass. Coverage:
 
-- **Sheets & header:** feed a fixture CSV (found / target / not_found rows) → build →
-  assert sheets are exactly `Data` and `Legend`; the Data header row carries every
-  input column, in order (first column `entity`, BOM stripped); `freeze_panes ==
-  "A2"`; `ws.auto_filter.ref` is set.
-- **Full fill matrix** (assert exact ARGB via the module's `FILL_*` constants, not a
-  literal or a truthy check): `status` found→`FILL_FOUND`, target→`FILL_TARGET`,
-  not_found→`FILL_NOT_FOUND`; `smart_*` yes→`FILL_YES`, no→`FILL_NO`; `substance`
-  substantive→`FILL_YES`, symbolic→`FILL_NO`; a blank SMART cell → `fill_type is
-  None`.
+- **Sheets & header (via `read_snapshot` → `build_workbook`):** feed a fixture CSV
+  (found / target / not_found rows) → assert sheets are exactly `Data` and `Legend`;
+  the Data header row carries every input column, in order, with the first column read
+  as `entity` (BOM stripped — the fixture is written *with* a BOM and read through
+  `read_snapshot`, so the assertion is not vacuous); `freeze_panes == "A2"`.
+- **Autofilter range:** assert `ws.auto_filter.ref` equals the full used range
+  (header row across all columns, e.g. `A1:{last_col}{last_row}`), not merely that it
+  is set — a one-cell `A1:A1` must fail.
+- **Fill matrix, enum-driven** (assert exact ARGB via the module's `FILL_*`
+  constants, never a literal or truthy check): parametrize over the relevant
+  `snapshot.py` enum members rather than a hand-fixed subset, so Data coloring can't
+  drift from the enums —
+  - `status`: found→`FILL_FOUND`, target→`FILL_TARGET`, not_found→`FILL_NOT_FOUND`;
+  - `smart_specific|smart_achievable|smart_relevant`: yes→`FILL_YES`, no→`FILL_NO`;
+  - `substance`: substantive→`FILL_YES`, symbolic→`FILL_NO`;
+  - blank SMART cell → `fill_type is None`;
+  - the **uncolored** coded columns (`item_type`, `planetary_alignment`,
+    `impact_scope`, `target_status`, `priority_internal`, `importance_external`)
+    render `fill_type is None` for their values — pinning that they are documented in
+    the Legend but deliberately not filled on Data.
 - **Unknown column:** include a non-canonical column in the fixture; assert its data
   cells have `fill_type is None` and it still appears in the header.
-- **Wrap:** a `quote` / `assessment_notes` data cell has `alignment.wrap_text` true.
+- **CSV correctness:** a `quote` / `assessment_notes` fixture value containing an
+  embedded comma **and** newline round-trips intact into a single cell (proves real
+  csv parsing, not a naive split); and that cell has `alignment.wrap_text` true.
 - **Legend content:** the Legend sheet contains each canonical column name and the
-  code values (`pb_aligned`, `handprint`/`D`, `not_found`, `too_early`, …).
+  multi-character code values (`pb_aligned`, `not_found`, `too_early`, `handprint`,
+  …). For single-letter `impact_scope` codes (A/B/C/D), assert against the Legend
+  code-table cells (e.g. the cell `D` paired with `handprint`), not a substring of the
+  whole-Legend text — `"D" in text` is vacuously true.
 - **Color-key equivalence:** each Legend color-key swatch fill equals the
   corresponding Data-cell fill (same `FILL_*` constant) — the "matches exactly"
   promise, tested.
 - **Schema tolerance:** parametrize the round-trip over representative 13-, 19-, and
   29-column headers; assert header order preserved and both sheets present on each.
 - **Header-only CSV:** workbook still valid with both sheets, no data rows.
+- **Happy path (`main()`):** run `main(["--snapshot", fixture, "--out",
+  tmp_path/…])`; assert it returns `0`, the output file exists, and reopening it
+  yields both `Data` and `Legend` sheets. Add one run exercising the **default**
+  `--out` (assert the computed `reports/<basename>.xlsx` path).
 - **Missing snapshot:** call `main()` with a nonexistent `--snapshot`; assert non-zero
-  return.
-- **Missing openpyxl** (NOT importorskip-guarded): force the import to fail
-  (`monkeypatch.setitem(sys.modules, "openpyxl", None)`), call `main()` with a valid
-  snapshot; assert non-zero return and that the install hint was printed. (This is why
-  openpyxl is imported lazily inside the functions.)
-- **Drift guard:** load `snapshot.py` via `_load("snapshot")`; assert every member of
-  its `VALID_STATUS`, `VALID_ITEM_TYPE`, `VALID_PLANETARY`, `VALID_IMPACT_SCOPE`, and
-  `VALID_TARGET_STATUS` sets, and every name in `COLS`, appears in the rendered Legend
-  text — so a future enum/column change that isn't reflected in the Legend fails CI.
+  return **and** that an error message naming the path was printed (symmetric with the
+  missing-openpyxl assertion). Add an **unreadable** case — a directory path (portable
+  on Windows) — also asserting non-zero.
+- **Missing openpyxl** (NOT importorskip-guarded): force the import to fail with
+  `monkeypatch.setitem(sys.modules, "openpyxl", None)` **and** delete any cached
+  `openpyxl.*` submodule keys from `sys.modules` (so the simulation is independent of
+  import form / test order); call `main()` with a valid snapshot; assert non-zero
+  return and that the install hint was printed. (This is why openpyxl is imported
+  lazily, top-level-first, inside the functions.)
+- **Drift guard (openpyxl-free):** load `snapshot.py` via `_load("snapshot")`; assert
+  every member of its `VALID_STATUS`, `VALID_ITEM_TYPE`, `VALID_PLANETARY`,
+  `VALID_IMPACT_SCOPE`, and `VALID_TARGET_STATUS` sets, and every name in `COLS`, is
+  present in the module-level `LEGEND_COLUMNS` / `LEGEND_CODE_TABLES` structures — so a
+  future enum/column change that isn't reflected in the Legend fails CI. (Scope note:
+  the guard binds the cross-domain status vocabulary the Legend itself decodes; R0–R9
+  and enabler ids are decoded in `circular-economy-10rs.json`, not the Legend, so
+  they are intentionally out of this guard.)
 
 ### 2. Skill behavior — RED/GREEN with subagents
 
@@ -247,9 +291,10 @@ Per the writing-skills Iron Law (an edit needs a failing test first):
 ## Deliverables
 
 - `scripts/export_xlsx.py` (new) — `read_snapshot` / `build_workbook` / `main` seams,
-  lazy `openpyxl` import, shared `FILL_*` constants.
+  lazy top-level-first `openpyxl` import, shared `FILL_*` constants, module-level
+  `LEGEND_COLUMNS` / `LEGEND_CODE_TABLES`.
 - `tests/test_export_xlsx.py` (new) — the coverage above.
 - `SKILL.md` — Step 10, Output, and Bundled resources updates (additive), openpyxl
   prerequisite noted.
-- `.gitignore` — add `reports/*.xlsx`.
+- `.gitignore` — add `**/reports/*.xlsx`.
 - Isolated on branch `feat/esg-xlsx-legend-export` off `main`; its own PR.
