@@ -128,3 +128,62 @@ def read_snapshot(path):
         columns = list(reader.fieldnames or [])
         rows = [dict(r) for r in reader]
     return columns, rows
+
+
+def _cell_fill(name, value):
+    """ARGB fill for a data cell, or None (blank, uncolored column, or unknown)."""
+    v = (value or "").strip()
+    if not v:
+        return None
+    if name == "status":
+        return STATUS_FILLS.get(v)
+    if name in SMART_COLS:
+        return SMART_YESNO_FILLS.get(v)
+    if name == "substance":
+        return SUBSTANCE_FILLS.get(v)
+    return None
+
+
+def _solid(color):
+    from openpyxl.styles import PatternFill
+    return PatternFill(start_color=color, end_color=color, fill_type="solid")
+
+
+def _build_data_sheet(ws, columns, rows):
+    from openpyxl.styles import Font, Alignment
+    from openpyxl.utils import get_column_letter
+
+    header_font = Font(bold=True, color="FFFFFFFF")
+    header_fill = _solid(FILL_HEADER)
+    for c, name in enumerate(columns, start=1):
+        cell = ws.cell(row=1, column=c, value=name)
+        cell.font = header_font
+        cell.fill = header_fill
+
+    for r, row in enumerate(rows, start=2):
+        for c, name in enumerate(columns, start=1):
+            value = row.get(name, "")
+            cell = ws.cell(row=r, column=c, value=value)
+            fill = _cell_fill(name, value)
+            if fill:
+                cell.fill = _solid(fill)
+            if name in WRAP_COLS:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    ws.freeze_panes = "A2"
+    last_col = get_column_letter(len(columns)) if columns else "A"
+    ws.auto_filter.ref = f"A1:{last_col}{len(rows) + 1}"
+
+    for c, name in enumerate(columns, start=1):
+        width = min(WIDE_COLS.get(name, DEFAULT_WIDTH), MAX_WIDTH)
+        ws.column_dimensions[get_column_letter(c)].width = width
+
+
+def build_workbook(columns, rows):
+    """Build a Workbook with a Data sheet (Legend added in Task 3)."""
+    from openpyxl import Workbook
+    wb = Workbook()
+    data = wb.active
+    data.title = "Data"
+    _build_data_sheet(data, columns, rows)
+    return wb
