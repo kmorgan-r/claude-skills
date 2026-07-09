@@ -184,6 +184,21 @@ the **indicators** of interest. Pull canonical indicator names + units from
 named a domain loosely ("their recycling goals"), map it to the indicator pack
 (circular → `waste_recycled_pct`, `circular_revenue_pct`, `product_takeback_scope`).
 
+**Confirm the categories before running.** Unless the user already named the
+domain(s) explicitly, ask which category(ies) to analyze this run — the four packs in
+`references/indicators.yaml` are:
+
+- **climate** — emissions (Scope 1/2/3), energy, net-zero / SBTi targets
+- **circular** — circular revenue, recycled input, waste, take-back, material circularity
+- **biodiversity** — TNFD, deforestation, land/water use, nature-positive, sourcing
+- **social_gov** — diversity, safety (LTIFR), turnover, pay gap, board independence, CSRD
+
+Ask this even when a company is given but no domain — the scope drives which reports
+you fetch and which indicators you extract, so narrowing it up front keeps the run
+cheap. Multi-select is fine (e.g. climate + circular); "all four" is a valid answer.
+Record the chosen domain(s) — every snapshot row carries `domain`, so a partial-scope
+run stays valid and a later run can add the domains you skipped.
+
 ### 2. Resolve (entity ID)
 For a single well-known company you can skip this. For matching across time or across
 a list, anchor each entity to its **LEI** via the free GLEIF API (no key) so a
