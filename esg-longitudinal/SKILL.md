@@ -269,6 +269,24 @@ captured.
 Produce a markdown report with: a tidy time-series table (the backward trend), the
 change report from step 8 if applicable, and a short narrative. Template below.
 
+### 10. Export workbook (shareable)
+Turn the snapshot CSV written in step 7 into a formatted, colored Excel workbook
+with a **Legend** tab that explains every column and coded value:
+
+```bash
+pip install openpyxl   # one-time
+python scripts/export_xlsx.py --snapshot data/snapshots/2026-06-29.csv \
+                              --out reports/2026-06-29.xlsx
+```
+
+It reads the canonical snapshot (never modifies it) and writes an `.xlsx` with a
+**Data** sheet (frozen, filtered, color-coded `status` and SMART cells) and a
+**Legend** sheet (a plain-English data dictionary + code tables + color key). The
+`.xlsx` is the shareable deliverable for a non-author; the CSV snapshot stays the
+canonical, diff-able source of truth. `--out` defaults to
+`reports/<snapshot-basename>.xlsx`. If `openpyxl` is missing the script prints an
+install hint and exits non-zero.
+
 ## Output: report structure
 
 ```markdown
@@ -303,6 +321,9 @@ M and T are in the Target scorecard above — has KPI and end year.)
 ## Sources
 (every report used, with URL and year)
 ```
+
+Alongside the markdown report, step 10 emits `reports/<date>.xlsx` — a colored
+Data + Legend workbook rendered from the snapshot for sharing.
 
 ## First run vs re-run (the longitudinal payoff)
 
@@ -354,6 +375,8 @@ extraction the further you get from climate.
 - `scripts/snapshot.py` — write/validate a timestamped snapshot CSV (enforces
   provenance).
 - `scripts/diff.py` — diff two snapshots → markdown change report.
+- `scripts/export_xlsx.py` — render a snapshot CSV into a formatted `.xlsx`
+  (Data + Legend tabs, colored); requires `openpyxl` (`pip install openpyxl`).
 - `references/indicators.yaml` — canonical indicator packs per domain.
 - `references/data_sources.md` — free ESG/CSR data source catalog + API notes.
 
