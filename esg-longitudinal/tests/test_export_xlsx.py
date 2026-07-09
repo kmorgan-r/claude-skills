@@ -196,9 +196,6 @@ def test_legend_lists_column_names_and_multichar_codes():
     text = "\n".join(str(v) for v in _all_cell_values(ws))
     for name in ("entity", "impact_scope", "planetary_alignment", "target_status"):
         assert name in text
-    for code in ("pb_aligned", "not_found", "too_early", "Handprint", "handprint"):
-        # at least the lowercased forms are present
-        pass
     for code in ("pb_aligned", "not_found", "too_early"):
         assert code in text
 
@@ -288,7 +285,8 @@ def test_main_unreadable_snapshot_dir_returns_nonzero(tmp_path):
 
 
 def test_main_missing_openpyxl_returns_nonzero_with_hint(tmp_path, capsys, monkeypatch):
-    # NOT importorskip-guarded: this path must run in an env that HAS openpyxl.
+    # NOT importorskip-guarded: monkeypatching sys.modules forces ImportError,
+    # so this exercises the missing-dep path whether or not openpyxl is installed.
     src = tmp_path / "s.csv"
     _write_csv(src, ["entity", "domain", "indicator", "period", "status"],
                [{"entity": "X", "domain": "circular", "indicator": "i",

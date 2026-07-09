@@ -107,10 +107,10 @@ LEGEND_CODE_TABLES = {
 # Color-key rows for the Legend (fill constant, label). Same FILL_* the Data
 # sheet uses, so the swatches match the data cells exactly.
 LEGEND_COLOR_KEY = [
-    (FILL_FOUND, "found / yes / substantive"),
+    (FILL_FOUND, "found / SMART yes / substantive"),
     (FILL_TARGET, "target"),
     (FILL_NOT_FOUND, "not_found"),
-    (FILL_NO, "no / symbolic"),
+    (FILL_NO, "SMART no / symbolic"),
 ]
 
 # Pointer note for codes decoded elsewhere (not duplicated into a code table).
