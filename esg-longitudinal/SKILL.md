@@ -199,6 +199,15 @@ cheap. Multi-select is fine (e.g. climate + circular); "all four" is a valid ans
 Record the chosen domain(s) — every snapshot row carries `domain`, so a partial-scope
 run stays valid and a later run can add the domains you skipped.
 
+**Confirm the time range before running.** Unless the user already gave an explicit
+range ("2015–2024", "the last five years"), ask how far back to go before fetching
+anything — each extra year is another report PDF to fetch and extract, so the range
+drives the run's cost as much as the domain does. Propose a sensible default (the
+company's available report archive, typically ~10 years) but do not assume it
+silently. Record the chosen range as `--years START-END` for `find_reports.py`; a
+later re-run can extend it, and the diff step compares against whatever periods this
+run captured.
+
 ### 2. Resolve (entity ID)
 For a single well-known company you can skip this. For matching across time or across
 a list, anchor each entity to its **LEI** via the free GLEIF API (no key) so a
