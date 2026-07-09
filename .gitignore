@@ -8,6 +8,10 @@ __pycache__/
 **/outputs/*
 !**/outputs/.gitkeep
 
+# Generated Excel workbooks (regenerable presentation artifacts derived from
+# snapshot data); the canonical snapshot CSVs stay tracked.
+**/reports/*.xlsx
+
 # Eval scratch
 **/evals/predictions.json
 

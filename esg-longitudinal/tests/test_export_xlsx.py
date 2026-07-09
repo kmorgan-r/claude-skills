@@ -300,3 +300,23 @@ def test_main_missing_openpyxl_returns_nonzero_with_hint(tmp_path, capsys, monke
     rc = export_xlsx.main(["--snapshot", str(src), "--out", str(tmp_path / "o.xlsx")])
     assert rc != 0
     assert "pip install openpyxl" in capsys.readouterr().err
+
+
+import pathlib
+
+_SKILL_DIR = pathlib.Path(__file__).resolve().parents[1]
+_REPO_ROOT = _SKILL_DIR.parent
+
+
+def test_skill_md_documents_export_step():
+    text = (_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    assert "### 10." in text
+    assert "export_xlsx.py" in text
+    # export_xlsx.py appears in the Bundled resources list
+    bundled = text.split("## Bundled resources", 1)[1]
+    assert "export_xlsx.py" in bundled
+
+
+def test_gitignore_excludes_report_workbooks():
+    gi = (_REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "**/reports/*.xlsx" in gi
