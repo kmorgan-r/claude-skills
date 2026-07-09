@@ -177,3 +177,75 @@ def test_wrap_text_on_long_columns():
     ws = _wb(DATA_COLS, _data_rows())["Data"]
     c = _col_idx(ws, "quote")
     assert ws.cell(row=2, column=c).alignment.wrap_text is True
+
+
+def _all_cell_values(ws):
+    out = []
+    for row in ws.iter_rows(values_only=True):
+        out.extend(v for v in row if v is not None)
+    return out
+
+
+def test_sheets_are_exactly_data_and_legend():
+    wb = _wb(DATA_COLS, _data_rows())
+    assert wb.sheetnames == ["Data", "Legend"]
+
+
+def test_legend_lists_column_names_and_multichar_codes():
+    ws = _wb(DATA_COLS, _data_rows())["Legend"]
+    text = "\n".join(str(v) for v in _all_cell_values(ws))
+    for name in ("entity", "impact_scope", "planetary_alignment", "target_status"):
+        assert name in text
+    for code in ("pb_aligned", "not_found", "too_early", "Handprint", "handprint"):
+        # at least the lowercased forms are present
+        pass
+    for code in ("pb_aligned", "not_found", "too_early"):
+        assert code in text
+
+
+def test_legend_impact_scope_uses_code_table_cells_not_substring():
+    # 'D' as a bare substring is vacuous; assert D sits in a cell paired with its meaning.
+    ws = _wb(DATA_COLS, _data_rows())["Legend"]
+    found = False
+    for row in ws.iter_rows(values_only=True):
+        cells = [str(c) for c in row if c is not None]
+        if "D" in cells and any("handprint" in c.lower() for c in cells):
+            found = True
+            break
+    assert found, "impact_scope D / handprint row not found as discrete cells"
+
+
+def test_color_key_swatches_match_data_fills():
+    wb = _wb(DATA_COLS, _data_rows())
+    legend = wb["Legend"]
+    # Tie each swatch fill to its label's row (col1 swatch, col2 label) so a
+    # swapped swatch is caught, not just overall presence of the colors.
+    label_to_fill = {}
+    for row in legend.iter_rows():
+        cells = list(row)
+        if len(cells) >= 2 and cells[1].value:
+            f = _fill_rgb(cells[0])
+            if f is not None:
+                label_to_fill[cells[1].value] = f
+    for color, label in export_xlsx.LEGEND_COLOR_KEY:
+        assert label_to_fill.get(label) == color, f"swatch for {label!r} != {color}"
+
+
+# 13 / 19 / 29 column headers straight from snapshot.py's COLS.
+@pytest.mark.parametrize("width", [13, 19, 29])
+def test_schema_tolerance_round_trip(width):
+    pytest.importorskip("openpyxl")
+    columns = snapshot.COLS[:width]
+    row = {c: "" for c in columns}
+    row.update({"entity": "X", "domain": "circular", "indicator": "i",
+                "period": "2022", "status": "found", "value": "1"})
+    wb = export_xlsx.build_workbook(columns, [row])
+    assert wb.sheetnames == ["Data", "Legend"]
+    header = [wb["Data"].cell(row=1, column=c).value for c in range(1, len(columns) + 1)]
+    assert header == columns
+
+
+def test_header_only_still_valid():
+    wb = _wb(["entity", "domain", "indicator", "period", "status"], [])
+    assert wb.sheetnames == ["Data", "Legend"]
+    assert wb["Data"].cell(row=1, column=1).value == "entity"

@@ -179,11 +179,69 @@ def _build_data_sheet(ws, columns, rows):
         ws.column_dimensions[get_column_letter(c)].width = width
 
 
+def _build_legend_sheet(ws):
+    from openpyxl.styles import Font
+
+    bold = Font(bold=True)
+    title = Font(bold=True, size=14)
+    r = 1
+
+    def heading(txt):
+        nonlocal r
+        cell = ws.cell(row=r, column=1, value=txt)
+        cell.font = title
+        r += 2
+
+    def subhead(*cols):
+        nonlocal r
+        for c, txt in enumerate(cols, start=1):
+            ws.cell(row=r, column=c, value=txt).font = bold
+        r += 1
+
+    heading("ESG snapshot — Legend")
+
+    subhead("column", "meaning", "allowed / example values")
+    for name, meaning, allowed in LEGEND_COLUMNS:
+        ws.cell(row=r, column=1, value=name).font = bold
+        ws.cell(row=r, column=2, value=meaning)
+        ws.cell(row=r, column=3, value=allowed)
+        r += 1
+    r += 1
+
+    for table_name, entries in LEGEND_CODE_TABLES.items():
+        subhead(f"{table_name} — codes", "meaning")
+        for code, meaning in entries:
+            ws.cell(row=r, column=1, value=code)
+            ws.cell(row=r, column=2, value=meaning)
+            r += 1
+        r += 1
+
+    subhead("coded elsewhere", "pointer")
+    for name, note in LEGEND_POINTERS:
+        ws.cell(row=r, column=1, value=name)
+        ws.cell(row=r, column=2, value=note)
+        r += 1
+    r += 1
+
+    subhead("color key", "meaning")
+    for color, label in LEGEND_COLOR_KEY:
+        swatch = ws.cell(row=r, column=1, value="")
+        swatch.fill = _solid(color)
+        ws.cell(row=r, column=2, value=label)
+        r += 1
+
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 60
+    ws.column_dimensions["C"].width = 44
+
+
 def build_workbook(columns, rows):
-    """Build a Workbook with a Data sheet (Legend added in Task 3)."""
+    """Build a Workbook with a Data sheet and a Legend sheet."""
     from openpyxl import Workbook
     wb = Workbook()
     data = wb.active
     data.title = "Data"
     _build_data_sheet(data, columns, rows)
+    legend = wb.create_sheet("Legend")
+    _build_legend_sheet(legend)
     return wb
