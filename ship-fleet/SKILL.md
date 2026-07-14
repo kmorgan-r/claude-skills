@@ -445,14 +445,98 @@ issues with reasons + remedies.
 The monitor never merges, never acks DB gates, never answers ship's
 questions.
 
-<!-- Task 5 -->
 ## Subcommands: status / resume / cleanup
 
-<!-- Task 5 continues -->
+**Clearing a gate (the human's path, documented for the operator):** `cd`
+into the worktree, run `claude` interactively, invoke `/ship`. Ship's First
+action surfaces the blocker/checklist in full context. The state file is
+shared truth; the monitor (or next `status`) sees the outcome.
+
+**`status`** — read-only, any session (manifest paths are absolute). Read
+manifest + every worktree state file live; print the dashboard plus a
+"needs you" list: blockers verbatim, DB-gate checklists, PRs awaiting
+merge. Report monitor liveness (heartbeat age). Never writes.
+
+**`resume`** — subject to the single-writer rule: live heartbeat →
+report-only (print what it WOULD do and how to proceed); stale heartbeat →
+act, with three duties:
+1. For each instance with a dead PID and `in-progress` state, EXCLUDING
+   the terminal-clean set (statuses blocked/awaiting-db-gates/done,
+   `phase:"awaiting-merge"`) AND the db-gates rail (`phase:"db-gates"` +
+   in-progress — an uncleared P6.5 gate; a headless respawn just re-asks
+   its question to nobody): respawn headless (the Spawn procedure —
+   `claude -p --dangerously-skip-permissions` via the bootstrap file) with
+   the stored `bootstrap`, reset `restarts` to 0, clear
+   `last_snapshot_hash` (human intervention earns fresh retries and re-arms
+   the no-progress rail).
+2. Spawn instances still `queued` — a dead monitor orphans the queue;
+   queued instances have no PID or state file, so no other path starts
+   them. Seed from the manifest's stored `plan_path`/`spec_path` (never
+   guess from the slug). **Only into free slots:** liveness-confirmed
+   running instances < `max_concurrent`; the restarted monitor's slot
+   accounting drains the rest (headless instances survive a dead monitor
+   session, so the cap must count them).
+3. Restart the monitor loop, taking over `monitor_pid` + heartbeat.
+
+**`cleanup`** —
+- `done` instances (or instances whose PR reports MERGED via
+  `gh pr view <pr> --json state`): `git worktree remove "<worktree>"`;
+  if the remove fails because the tree is dirty, show the dirt and ask the
+  human before `--force`; delete the branch if merged
+  (`git branch -d "feat/<slug>"`, `git push origin --delete "feat/<slug>"`
+  if it was pushed); drop the instance from the manifest.
+- `wedged` / permanently-`halted` instances: offered INDIVIDUALLY with
+  explicit confirmation — remove worktree, optionally delete the
+  `feat/<slug>` branch (local + origin). Without this exit, a wedged
+  instance's leftover branch makes its issue permanently un-fleetable via
+  the branch-exists skip rule.
+- When the last instance is dropped, archive the manifest to
+  `<worktrees-root>\archive\<fleet_id>.json` and delete
+  `.claude-fleet-state.json`.
+
 ## Edge cases
 
-<!-- Task 5 continues -->
+- Fleet invoked while a manifest with non-terminal instances exists →
+  behaves as `status` + offers `resume`; never double-spawns (liveness
+  check + heartbeat + single-writer rule are the guards).
+- **A second fleet requires the first fully cleaned up, not merely
+  terminal.** "Terminal" includes halted/awaiting-merge/wedged — live
+  worktrees, branches, unanswered human gates that the single per-repo
+  manifest still tracks; overwriting it would orphan them from every
+  dashboard. Refuse until every instance is `done`/`skipped` AND worktrees
+  removed (`cleanup`). Archive the prior manifest on new-fleet start.
+- Dirty primary working tree is fine (worktrees branch from
+  origin/<default>; the manifest write needs no clean tree) — EXCEPT Fleet
+  setup step 3 must be able to fast-forward the local default branch; if it
+  can't, the fleet stops before creating anything.
+- Rate-limit storms kill instances → the crash path self-heals; the restart
+  cap (2 per instance per unattended run) bounds token burn.
+- An interactive gate session committing in a worktree is fine — the state
+  file remains the single truth, and sticky halted/wedged keeps the monitor
+  from spawning a headless twin while the human works.
+- **Shared `.git` contention:** all worktrees share the primary repo's
+  object store and refs; with ~10 instances fetching/committing/pushing,
+  transient `index.lock`/`packed-refs` errors are expected occasionally.
+  Ship converts such a failure to `status:"blocked"` — these are safely
+  cleared by re-invoking `/ship` in the worktree; the "needs you" output
+  says so when blocker text looks lock-shaped (mentions `index.lock` /
+  `packed-refs` / `Another git process`).
+
 ## Coupling contract
+
+Fleet depends on ship's documented state schema and First-action resume
+semantics (ship SKILL.md "State file" section). One-way: ship never knows
+fleet exists; if ship's schema changes, fleet breaks and gets updated; solo
+`/ship` is never affected.
+
+Load-bearing assumptions (a ship change breaking one of these breaks
+fleet — check here first):
+(a) ship's deliberate halts write `blocked`/`awaiting-db-gates`/`done` or
+    reach `phase:"awaiting-merge"` before exiting;
+(b) P6.5 asks its human decision BEFORE writing any status (hence the
+    db-gates rail);
+(c) First action resumes an `in-progress` state at `phase` after a
+    branch-name check a fleet worktree satisfies by construction.
 
 <!-- Task 6 -->
 ## First-run validation
