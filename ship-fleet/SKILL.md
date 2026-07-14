@@ -49,9 +49,11 @@ resume semantics). Dependency is one-way: ship never knows fleet exists.
 >    ticking).
 > 3. If you were mid-setup (instances still `queued`, no monitor running),
 >    resume Per-instance setup for the first **`queued`** instance —
->    but only while liveness-confirmed running instances < `max_concurrent`
->    (queued-beyond-max instances deliberately lack pids; do not over-spawn
->    past the cap).
+>    but only while occupied slots (`fleet_status` `running`, `crashed`, or
+>    `spawning` — the single occupied-slot definition used everywhere;
+>    instances spawned before any tick sit at `crashed`/`spawning`, never
+>    yet liveness-confirmed) < `max_concurrent`. Do not over-spawn past the
+>    cap.
 > 4. Preserve: `fleet_id`, `default_branch`, `max_concurrent`, every
 >    instance's `worktree`/`branch`/`bootstrap`/`plan_path`/`spec_path`/
 >    `restarts`.
