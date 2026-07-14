@@ -216,11 +216,94 @@ artifact | skip_reason` — plus every command that WOULD run (worktree adds,
 seed-file contents, spawn lines) and stops. Zero side effects: no worktrees,
 no branches, no bootstrap files, no manifest, no spawns.
 
-<!-- Task 3 -->
 ## Per-instance setup
 
-<!-- Task 3 continues -->
+Replaces ship P0 entirely (P0's `git checkout <default>` cannot run in a
+worktree while another tree has the branch checked out). In order:
+
+1. **Worktree:**
+   `git worktree add -b "feat/<slug>" "<worktrees-root>\<slug>" "origin/$DEFAULT_BRANCH"`
+2. **Committed gitignore entries** (in the worktree — tail-byte-safe append
+   exactly as ship P0 does, then commit if changed):
+   ```bash
+   cd <worktree>
+   [ -f .gitignore ] && [ -n "$(tail -c1 .gitignore 2>/dev/null)" ] && printf '\n' >> .gitignore
+   for e in '.claude-ship-state.json' '.claude-pr-fix-state*.json' '.claude-fleet-state.json' 'ship-run.log' 'ship-run.err.log' 'bootstrap.txt'; do
+     grep -qxF "$e" .gitignore 2>/dev/null || echo "$e" >> .gitignore
+   done
+   git add .gitignore
+   git diff --cached --quiet || git commit -m "chore: ignore ship/fleet state and log files"
+   ```
+   The glob `.claude-pr-fix-state*.json` covers fix-pr-reviews' numbered
+   backups (`.claude-pr-fix-state.1016.bak.json`). Without the log entries,
+   ship's P4/P5 commits sweep live log files into the PR.
+3. **Seed** `<worktree>\.claude-ship-state.json` (Write tool) with ship's
+   exact schema — `phase` per mode (`plan` → `"plan-review"`, `spec`/`bare`
+   → `"spec-review"`):
+   ```json
+   {
+     "topic": "<slug>",
+     "spec": <spec_path or dictated bare path, or null in plan mode with no matching spec>,
+     "plan": <plan_path or null>,
+     "branch": "feat/<slug>",
+     "default_branch": "<DEFAULT_BRANCH>",
+     "pr": null,
+     "phase": "<plan-review|spec-review>",
+     "status": "in-progress",
+     "focus_next": "<one sentence for the seeded phase, e.g. 'P3: reviewing-plans auto double-pass on the plan.'>",
+     "phase_log": [ { "phase": "init", "result": "fleet-seeded worktree from origin/<DEFAULT_BRANCH>" } ],
+     "blockers": [],
+     "test_paths": [],
+     "db_gate": null
+   }
+   ```
+   Ship's First action treats this as an in-progress pipeline and resumes
+   at `phase` — zero ship changes.
+4. **Bootstrap + spawn** (next section).
+
+**Setup-failure rollback:** any failure in steps 1–4 must not strand a
+half-created instance — an orphaned `feat/<slug>` branch makes the issue
+permanently un-fleetable via the branch-exists skip rule. Roll back
+(`git worktree remove --force "<worktree>"`; `git branch -D "feat/<slug>"`)
+and record the instance `skipped` with the failure as its reason; if
+rollback itself fails, record `wedged` with the leftover paths so cleanup
+and the final report cover it.
+
 ## Spawn
+
+`Start-Process -ArgumentList` space-joins array elements without quoting,
+so a prompt containing spaces (all of ours; bare mode's is multi-line)
+arrives as shredded argv tokens — and `claude` may resolve to an npm `.cmd`
+shim that won't launch under the redirect-implied `UseShellExecute=$false`.
+The prompt therefore travels by file, and the process is a `pwsh` wrapper
+piping it to stdin (`claude -p` with no prompt argument reads stdin):
+
+```powershell
+Set-Content -Path "$worktree\bootstrap.txt" -Value $bootstrap
+$proc = Start-Process pwsh -PassThru -WindowStyle Hidden `
+  -WorkingDirectory $worktree `
+  -ArgumentList @('-NoProfile','-Command',
+    'Get-Content -Raw .\bootstrap.txt | claude -p --dangerously-skip-permissions ' +
+    '1> .\ship-run.log 2> .\ship-run.err.log')
+# manifest: pid = $proc.Id
+#           spawned_at = $proc.StartTime.ToUniversalTime().ToString('o')
+```
+
+Wrapper liveness equals run liveness **for natural exits only** (`pwsh`
+exits when the pipeline exits). Killing the wrapper orphans the `claude`
+child — deliberate termination is always `taskkill /PID <pid> /T /F`.
+
+**Bootstrap prompts** (store the exact string in the manifest per instance;
+respawns MUST reuse it):
+- `plan` / `spec` mode: `Invoke the ship skill.`
+- `bare` mode (idempotent — a respawn after a pre-spec crash must not
+  double-author):
+  `If docs/superpowers/specs/<today>-<slug>-design.md does not already exist and committed: read GitHub issue #N (gh issue view N), write a design doc to that exact path following the style of existing docs in docs/superpowers/specs/, and commit it. Then invoke the ship skill.`
+
+Stagger spawns ~30s apart (soften the API burst). Issues beyond `--max`
+enter the manifest as `queued` (no pid, no worktree yet — their worktree is
+created when a slot frees, not upfront, so a dead fleet leaves no orphan
+trees for never-started work).
 
 <!-- Task 4 -->
 ## Fleet manifest
