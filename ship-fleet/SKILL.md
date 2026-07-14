@@ -1,6 +1,6 @@
 ---
 name: ship-fleet
-description: Use when shipping a batch of GitHub issues in parallel - spawns headless Claude Code instances each running the full /ship pipeline in its own git worktree, with crash recovery, monitoring, and human-gate surfacing
+description: Use when shipping a batch of GitHub issues in parallel - spawns headless Claude Code instances each running the full /ship pipeline in its own git worktree, with crash recovery, monitoring, and human-gate surfacing. Windows-only - requires PowerShell 7 (pwsh) and taskkill on PATH
 ---
 
 # ship-fleet — Parallel Ship Pipeline Dispatcher
@@ -11,6 +11,11 @@ worktree, coordinated through a fleet manifest and a polling monitor.
 Ship itself is never modified — fleet consumes only ship's documented
 state-file contract (`.claude-ship-state.json` schema + First-action
 resume semantics). Dependency is one-way: ship never knows fleet exists.
+
+**Needs:** Windows with PowerShell 7 (`pwsh`) — the spawn, liveness, and
+kill mechanics are PowerShell (`Start-Process`/`Get-Process`,
+`taskkill /PID <pid> /T /F`) and worktree paths use Windows separators.
+Not portable to macOS/Linux as written.
 
 > This is a Claude Code skill (an instruction set Claude follows at
 > runtime). The invoking session does resolution, worktree setup, state
@@ -76,14 +81,17 @@ manifest is not in cwd — locate the main tree first: `git rev-parse
   and what the operator can do (wait, or kill the monitor session first).
   Never write the manifest, never spawn.
 - **Present, heartbeat stale, some instances non-terminal by
-  `fleet_status`** (`queued`, `running`, or `crashed` — `fleet_status` is
+  `fleet_status`** (`queued`, `spawning`, `running`, or `crashed` —
+  `fleet_status` is
   the authoritative criterion here; a `halted` instance whose ship state is
   still in-progress is TERMINAL for this dispatch and belongs to the next
-  branch) → the monitor died. Behave as `status`, then offer `resume`. A
+  branch) → the monitor died. Behave as `status`, then offer `resume` (a
+  `spawning` instance is resolved there by the stuck-`spawning`
+  reconciliation — see Spawn — never by a blind respawn). A
   request to start a NEW fleet is refused until this one is terminal and
   cleaned up. `cleanup` here is allowed but operates only on instances
   already individually terminal (`done`/`wedged`/`skipped`/merged-PR) — it
-  never touches `queued`/`running`/`crashed` ones.
+  never touches `queued`/`spawning`/`running`/`crashed` ones.
 - **Present, all instances terminal by `fleet_status`** (`awaiting-merge`/
   `halted`/`done`/`wedged`/`skipped`) → fleet finished but may not be
   cleaned up. `status` → dashboard. `resume` → see Subcommands (its duty 1
@@ -595,6 +603,11 @@ overwrites cannot do a true compare-and-swap; claim → re-read-verify →
 per-spawn re-verify shrinks the race to the single write and guarantees
 a losing session halts instead of double-spawning.)
 1. For each instance with a dead PID and `in-progress` state, EXCLUDING
+   `fleet_status:"spawning"` instances (their `pid:null` always reads as
+   a dead PID — route them through the stuck-`spawning` reconciliation
+   (Spawn section) instead, exactly as the Monitor loop's classification
+   carve-out does; a blind respawn here would create the twin that
+   section prevents), EXCLUDING
    the terminal-clean set (statuses blocked/awaiting-db-gates/done,
    `phase:"awaiting-merge"`) AND the db-gates rail (`phase:"db-gates"` +
    in-progress — an uncleared P6.5 gate; a headless respawn just re-asks
