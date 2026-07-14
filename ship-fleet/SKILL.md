@@ -37,9 +37,11 @@ resume semantics). Dependency is one-way: ship never knows fleet exists.
 > Preserved during auto-compaction. After ANY compaction, immediately:
 > 1. Read `.claude-fleet-state.json` at the main repo root.
 > 2. If you were the monitor (your `monitor_pid` is in the manifest and the
->    heartbeat is yours), resume the Monitor loop at the next tick.
+>    heartbeat is yours), resume the Monitor loop at the next tick (rule 3
+>    takes precedence when `queued` instances remain — finish setup before
+>    ticking).
 > 3. If you were mid-setup (instances still `queued`, no monitor running),
->    resume Per-instance setup for the first instance lacking a `pid` —
+>    resume Per-instance setup for the first **`queued`** instance —
 >    but only while liveness-confirmed running instances < `max_concurrent`
 >    (queued-beyond-max instances deliberately lack pids; do not over-spawn
 >    past the cap).
@@ -50,6 +52,10 @@ resume semantics). Dependency is one-way: ship never knows fleet exists.
 ## First action (EVERY invoke)
 
 Read `.claude-fleet-state.json` at the repo root (absolute paths inside it):
+If invoked from inside a fleet worktree (where gate-clearing happens), the
+manifest is not in cwd — locate the main tree first: `git rev-parse
+--path-format=absolute --git-common-dir` → the manifest sits next to that
+`.git` directory's parent working tree.
 
 - **Absent** → no fleet exists. `status`/`resume`/`cleanup` → report "no
   fleet manifest" and stop. Issue arguments → start a new fleet (Fleet
@@ -66,7 +72,9 @@ Read `.claude-fleet-state.json` at the repo root (absolute paths inside it):
   still in-progress is TERMINAL for this dispatch and belongs to the next
   branch) → the monitor died. Behave as `status`, then offer `resume`. A
   request to start a NEW fleet is refused until this one is terminal and
-  cleaned up.
+  cleaned up. `cleanup` here is allowed but operates only on instances
+  already individually terminal (`done`/`wedged`/`skipped`/merged-PR) — it
+  never touches `queued`/`running`/`crashed` ones.
 - **Present, all instances terminal by `fleet_status`** (`awaiting-merge`/
   `halted`/`done`/`wedged`/`skipped`) → fleet finished but may not be
   cleaned up. `status` → dashboard. `resume` → see Subcommands (its duty 1
@@ -196,7 +204,11 @@ worktree branched from origin):
 6. **Bare-mode dictated spec path:**
    `docs/superpowers/specs/<today>-<slug>-design.md` — the bare slug
    already carries `issue-N-`; do NOT add another prefix (that would double
-   it: `…-issue-1040-issue-1040-…`).
+   it: `…-issue-1040-issue-1040-…`). Store this dictated path in the
+   instance's `spec_path` manifest field at resolution (the `mode` field
+   disambiguates bare from spec mode). It is computed ONCE at resolution
+   and never recomputed — `<today>` drifts if the queue drains past
+   midnight, and the stored bootstrap already carries this exact path.
 
 **Skips never abort the fleet.** Each skip carries its remedy into the
 final report — e.g. for a stale leftover branch with no open PR:
@@ -214,7 +226,10 @@ proceeds deliberately.
 **Dry-run** prints the full resolution table — `issue | mode | slug |
 artifact | skip_reason` — plus every command that WOULD run (worktree adds,
 seed-file contents, spawn lines) and stops. Zero side effects: no worktrees,
-no branches, no bootstrap files, no manifest, no spawns.
+no branches, no bootstrap files, no manifest, no spawns. Dry-run runs Fleet
+setup steps 1–2 (preconditions + fetch/derive) and resolution ONLY — never
+step 3's local fast-forward, step 4's ignore-file writes, step 5's mkdir,
+or step 6's manifest write.
 
 ## Per-instance setup
 
@@ -328,6 +343,7 @@ seed with `plan:null` is a state ship cannot resume.
     "issue": 1032,
     "slug": "issue-1032-...",
     "mode": "plan",
+    "skip_reason": null,
     "worktree": "C:\\Users\\kmorg\\ship-fleet\\<primary-dirname>\\<slug>",
     "branch": "feat/<slug>",
     "pid": 1234,
@@ -357,6 +373,9 @@ seed with `plan:null` is a state ship cannot resume.
   unknown PID; without stickiness the monitor would see dead+in-progress
   mid-session and spawn a headless twin into the same worktree.
 
+`skip_reason` is null unless `fleet_status:"skipped"`; the dashboard and
+final report read it verbatim.
+
 **Single-writer rule:** `monitor_pid` + `monitor_heartbeat` make monitor
 liveness decidable. The monitor stamps the heartbeat every tick; a
 heartbeat older than 2× the poll interval (10 min) = dead monitor. Live
@@ -375,7 +394,12 @@ with that PID exists AND is `pwsh` AND its start time matches `spawned_at`
 try { $p = Get-Process -Id $inst.pid -ErrorAction Stop } catch { $p = $null }
 $alive = $false
 if ($p -and $p.ProcessName -eq 'pwsh') {
-  $delta = [math]::Abs(($p.StartTime.ToUniversalTime() - [datetime]::Parse($inst.spawned_at).ToUniversalTime()).TotalSeconds)
+  # ConvertFrom-Json may have already produced a [datetime]; a string must be
+  # parsed with RoundtripKind or the Z suffix is lost and every live instance
+  # reads as dead in a non-UTC timezone.
+  $saUtc = if ($inst.spawned_at -is [datetime]) { $inst.spawned_at.ToUniversalTime() }
+           else { [datetime]::Parse($inst.spawned_at, $null, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() }
+  $delta = [math]::Abs(($p.StartTime.ToUniversalTime() - $saUtc).TotalSeconds)
   if ($delta -le 2) { $alive = $true }
 }
 ```
@@ -429,11 +453,17 @@ skipping sticky `halted`/`wedged` except a read-only snapshot refresh:
      before authoring its spec must re-run the idempotent bare bootstrap —
      plain "Invoke the ship skill." at `spec-review` with a nonexistent
      spec just wedges); record new `pid`/`spawned_at`, set
-     `last_snapshot_hash` to the current hash, increment `restarts`, →
-     `running`. Else mark `wedged`, notify, leave state + logs for autopsy.
+     `last_snapshot_hash` to the current hash, increment `restarts`;
+     `fleet_status` stays `crashed` until the next tick confirms the new
+     PID alive (→ `running`) — a crash is never silently absorbed. Else
+     mark `wedged`, notify, leave state + logs for autopsy.
 5. **Slot accounting:** running instances < `max_concurrent` and queue
    non-empty → run Per-instance setup + Spawn for the next `queued`
-   instance (one per free slot, still ~30s staggered).
+   instance (one per free slot, still ~30s staggered). Restamp
+   `monitor_heartbeat` after each spawn in a multi-spawn tick — several
+   ~30s staggers plus classification can otherwise push the inter-write
+   gap toward the 10-minute staleness threshold and momentarily authorize
+   a takeover.
 6. **Dashboard** (every tick):
    `issue | slug | phase | status | pr | restarts | fleet_status`.
 
@@ -460,6 +490,12 @@ merge. Report monitor liveness (heartbeat age). Never writes.
 **`resume`** — subject to the single-writer rule: live heartbeat →
 report-only (print what it WOULD do and how to proceed); stale heartbeat →
 act, with three duties:
+First — before any duty — claim the writer lock exactly as Fleet setup
+step 6 does: write `monitor_pid` (this session) + a fresh
+`monitor_heartbeat`, and restamp the heartbeat on every subsequent
+manifest write. Duties 1–2 spawn over multiple minutes; an unclaimed lock
+during that window authorizes a second concurrent `resume` to
+double-spawn.
 1. For each instance with a dead PID and `in-progress` state, EXCLUDING
    the terminal-clean set (statuses blocked/awaiting-db-gates/done,
    `phase:"awaiting-merge"`) AND the db-gates rail (`phase:"db-gates"` +
@@ -472,11 +508,13 @@ act, with three duties:
 2. Spawn instances still `queued` — a dead monitor orphans the queue;
    queued instances have no PID or state file, so no other path starts
    them. Seed from the manifest's stored `plan_path`/`spec_path` (never
-   guess from the slug). **Only into free slots:** liveness-confirmed
+   guess from the slug; for bare mode, `spec_path` holds the dictated path
+   stored at resolution). **Only into free slots:** liveness-confirmed
    running instances < `max_concurrent`; the restarted monitor's slot
    accounting drains the rest (headless instances survive a dead monitor
    session, so the cap must count them).
-3. Restart the monitor loop, taking over `monitor_pid` + heartbeat.
+3. Restart the monitor loop (the lock is already claimed; just continue
+   ticking).
 
 **`cleanup`** —
 - `done` instances (or instances whose PR reports MERGED via
@@ -490,6 +528,8 @@ act, with three duties:
   `feat/<slug>` branch (local + origin). Without this exit, a wedged
   instance's leftover branch makes its issue permanently un-fleetable via
   the branch-exists skip rule.
+- `skipped` instances have no worktree or branch — drop them from the
+  manifest directly.
 - When the last instance is dropped, archive the manifest to
   `<worktrees-root>\archive\<fleet_id>.json` and delete
   `.claude-fleet-state.json`.
