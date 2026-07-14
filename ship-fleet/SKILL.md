@@ -94,11 +94,127 @@ Read `.claude-fleet-state.json` at the repo root (absolute paths inside it):
 Range and list may not be combined with a subcommand. Unparseable args →
 show this table and stop.
 
-<!-- Task 2 -->
 ## Fleet setup
 
-<!-- Task 2 continues -->
+Runs once per new fleet, before anything is created. Any failure → stop,
+nothing created.
+
+1. **Preconditions:** `claude` CLI on PATH (`Get-Command claude`),
+   `gh auth status` exits 0, `git remote get-url origin` exits 0.
+2. **Fetch + default branch:**
+   ```bash
+   git fetch origin
+   DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null \
+     || git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')
+   [ -z "$DEFAULT_BRANCH" ] && { echo "ERROR: could not derive default branch"; exit 1; }
+   ```
+3. **Fast-forward the LOCAL default branch.** Ship P4 (`git merge-base
+   "$DEFAULT_BRANCH" HEAD`) and P6.5 (DB diffs vs merge-base) resolve the
+   local ref; `git fetch` alone does not move it, and a stale local default
+   pollutes every instance's `test_paths` and false-triggers DB gates.
+   - Not checked out in any worktree (`git worktree list` shows no tree on
+     it): `git fetch origin "$DEFAULT_BRANCH:$DEFAULT_BRANCH"`.
+   - Checked out in the primary tree and fast-forwardable:
+     `git -C <primary-tree> pull --ff-only origin "$DEFAULT_BRANCH"`.
+   - Otherwise (diverged / conflicting local changes) → STOP: tell the
+     human to reconcile. Nothing is created before this passes.
+4. **Gitignore hygiene, two layers:**
+   - Primary tree, uncommitted: ensure `.git/info/exclude` contains
+     `.claude-fleet-state.json` (append if missing — the manifest lives at
+     the main repo root and a committed ignore entry only reaches the
+     default branch after some fleet PR merges).
+   - Per feature branch, committed: handled in Per-instance setup step 2.
+5. **Worktrees root:** `<worktrees-root>` = sibling directory
+   `..\ship-fleet\<primary-tree-dirname>` where `<primary-tree-dirname>`
+   is the **directory basename of the primary working tree** (e.g.
+   `climatepoint-eco-report-backend3`), NOT the origin repo name — sibling
+   clones (`…backend2`, `…backend3`) must not collide in one shared folder.
+   Create it (and `archive\` under it) if absent. Record the ABSOLUTE path.
+6. **Initial manifest write — BEFORE any worktree or spawn.** After
+   resolution, write `.claude-fleet-state.json` with every resolved
+   instance at `fleet_status:"queued"` (`pid:null`, `spawned_at:null`,
+   `plan_path`/`spec_path` from resolution) and every skip recorded
+   (`fleet_status:"skipped"` + reason). **This first write claims the
+   writer lock:** stamp `monitor_pid` (this session) and a fresh
+   `monitor_heartbeat` (UTC now), and restamp the heartbeat on every
+   subsequent manifest write during setup (each pid/spawned_at recording) —
+   otherwise the whole multi-minute setup window reads as
+   "stale heartbeat + non-terminal instances" to a concurrent invoke, whose
+   `resume` would double-spawn mid-setup. A session crash mid-setup must
+   leave nothing invisible to `status`/`resume`/`cleanup` — the manifest
+   exists before the first side effect, and the Compact instructions'
+   mid-setup recovery path depends on it.
+
 ## Issue resolution (per issue N)
+
+For each requested issue N, resolve against **origin/<default-branch>**
+(never the local tree — local uncommitted plans/specs are invisible to a
+worktree branched from origin):
+
+1. `gh issue view N --json state,title,url` → closed → **skip**
+   (`skip_reason: "issue closed"`). Title is bare-mode slug material.
+2. **Plan?** `git ls-tree -r --name-only "origin/$DEFAULT_BRANCH" -- docs/superpowers/plans/ | grep -E -- "-issue-N-[^/]*\.md$"`
+   — note the anchored trailing hyphen: `issue-103-` must NOT match
+   `issue-1032-…`. Exactly one hit → `mode: plan`, `plan_path` = the hit.
+   Multiple hits → ambiguous → **skip** listing candidates.
+3. **Spec match** — runs for EVERY issue, plan or no plan. Two-step:
+   - Filename: `git ls-tree -r --name-only "origin/$DEFAULT_BRANCH" -- docs/superpowers/specs/ | grep -E -- "-issue-N-[^/]*-design\.md$"`
+   - Content: `git grep -l -E "(#N\b|issues/N\b)" "origin/$DEFAULT_BRANCH" -- docs/superpowers/specs/ | sed 's/^[^:]*://'`
+     — `git grep -l` against a ref prefixes every hit with `origin/main:`;
+     the `sed` strips it. Without the strip, a spec matching BOTH steps
+     (the common case — issue-numbered specs also contain `#N` in the
+     body) appears as two distinct strings and a real single match reads
+     as ambiguous, and a seeded `origin/main:docs/…` path is unreadable in
+     the worktree.
+   Union of both, deduped on the bare repo-relative path. Semantics depend
+   on mode:
+   - **No plan found (step 2 empty):** exactly one match → `mode: spec`,
+     `spec_path` = the match, echoed at spawn time (not only in dry-run) so
+     the operator can catch a wrong hit. More than one → ambiguous →
+     **skip** listing candidates (operator picks and re-runs, or
+     deliberately lets it go bare by deleting the stale references). Zero →
+     `mode: bare`.
+   - **Plan found (`mode: plan`):** exactly one match → set `spec_path`
+     too (ship's handoff and any spec-reading phase see it). Zero or
+     multiple → `spec_path: null` deliberately — no skip; the plan is the
+     driving artifact and ambiguity here is harmless.
+4. **Slug:** apply ship P0's normalization (lowercase; spaces/underscores →
+   hyphens; strip chars outside `[a-z0-9-]`; collapse repeated hyphens) to:
+   - plan/spec mode: the artifact filename minus `YYYY-MM-DD-` prefix and
+     `.md` (and `-design` suffix stays — it is part of spec-derived slugs
+     only when present in the filename; plan-derived slugs have none),
+   - bare mode: the issue title, then **prefix the result with `issue-N-`**
+     (bare branches sort with plan-derived ones like `feat/issue-1032-…`).
+   Validate: `git check-ref-format --branch "feat/<slug>"`. Empty/invalid →
+   **skip** (`skip_reason: "invalid slug"`).
+5. **Collision checks:** `git branch --list "feat/<slug>"` non-empty, or
+   `git ls-remote --heads origin "feat/<slug>"` non-empty → **skip**
+   (`skip_reason: "branch exists"`). Open PR referencing the issue —
+   `gh pr list --state open --json number,title,body,headRefName` and match
+   `#N\b` in title/body or `issue-N-` in headRefName → **skip**
+   (`skip_reason: "open PR #<num>"`).
+6. **Bare-mode dictated spec path:**
+   `docs/superpowers/specs/<today>-<slug>-design.md` — the bare slug
+   already carries `issue-N-`; do NOT add another prefix (that would double
+   it: `…-issue-1040-issue-1040-…`).
+
+**Skips never abort the fleet.** Each skip carries its remedy into the
+final report — e.g. for a stale leftover branch with no open PR:
+`git push origin --delete feat/<slug>` + `git branch -D feat/<slug>`, then
+re-run; or finish the existing branch manually.
+
+**Unmerged-plans trap:** because resolution reads origin/<default>, plans
+sitting in an unmerged PR are invisible and their issues silently go
+`bare` (duplicate specs). Check open PRs touching plans:
+`gh pr list --state open --json number,files --jq '.[] | select([.files[].path] | any(startswith("docs/superpowers/plans/"))) | .number'`
+— if any returned PR's files match a requested issue's `issue-N-` pattern,
+warn "merge PR #<num> first" and mark the issue skipped unless the operator
+proceeds deliberately.
+
+**Dry-run** prints the full resolution table — `issue | mode | slug |
+artifact | skip_reason` — plus every command that WOULD run (worktree adds,
+seed-file contents, spawn lines) and stops. Zero side effects: no worktrees,
+no branches, no bootstrap files, no manifest, no spawns.
 
 <!-- Task 3 -->
 ## Per-instance setup
