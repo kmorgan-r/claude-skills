@@ -305,11 +305,145 @@ enter the manifest as `queued` (no pid, no worktree yet — their worktree is
 created when a slot frees, not upfront, so a dead fleet leaves no orphan
 trees for never-started work).
 
-<!-- Task 4 -->
 ## Fleet manifest
 
-<!-- Task 4 continues -->
+`.claude-fleet-state.json` at the **main repo root**, gitignored via
+`.git/info/exclude`, written with the Write tool (full overwrite), updated
+every tick. **All paths absolute** — `status`/`resume`/`cleanup` run in
+later sessions where cwd may differ. Exception: `plan_path`/`spec_path`
+are repo-relative (ship's own convention), stored per instance so a LATER
+session (resume duty 2, post-compaction mid-setup recovery) can seed a
+still-`queued` instance's ship state without re-running resolution — the
+slug alone cannot recover them (date prefix stripped), and a plan-mode
+seed with `plan:null` is a state ship cannot resume.
+
+```json
+{
+  "fleet_id": "<YYYY-MM-DD>-issues-<first>-<last>",
+  "default_branch": "main",
+  "max_concurrent": 10,
+  "monitor_pid": 5678,
+  "monitor_heartbeat": "2026-07-13T14:05:00Z",
+  "instances": [{
+    "issue": 1032,
+    "slug": "issue-1032-...",
+    "mode": "plan",
+    "worktree": "C:\\Users\\kmorg\\ship-fleet\\<primary-dirname>\\<slug>",
+    "branch": "feat/<slug>",
+    "pid": 1234,
+    "spawned_at": "2026-07-13T14:00:00Z",
+    "plan_path": "docs/superpowers/plans/2026-07-10-issue-1032-....md",
+    "spec_path": null,
+    "bootstrap": "Invoke the ship skill.",
+    "log": "<worktree>\\ship-run.log",
+    "restarts": 0,
+    "last_snapshot_hash": null,
+    "fleet_status": "queued|running|crashed|halted|awaiting-merge|done|wedged|skipped",
+    "snapshot": { "phase": null, "status": null, "pr": null }
+  }]
+}
+```
+
+`fleet_status` semantics:
+- `crashed` is written the moment the monitor detects dead+in-progress
+  (BEFORE the respawn decision) and remains until the instance is next
+  confirmed alive (→ `running`) or exhausts its rails (→ `wedged`/`halted`)
+  — a crash is observable in the manifest, never silently absorbed.
+- `halted` and `wedged` are **sticky for the monitor**: it refreshes their
+  snapshots read-only (a human's interactive progress may transition them
+  to `done`/`awaiting-merge`) but NEVER respawns them. Respawn authority
+  for sticky instances belongs exclusively to `/ship-fleet resume`. This
+  closes a race: a human clearing a gate interactively runs under an
+  unknown PID; without stickiness the monitor would see dead+in-progress
+  mid-session and spawn a headless twin into the same worktree.
+
+**Single-writer rule:** `monitor_pid` + `monitor_heartbeat` make monitor
+liveness decidable. The monitor stamps the heartbeat every tick; a
+heartbeat older than 2× the poll interval (10 min) = dead monitor. Live
+heartbeat → any other session is report-only (no manifest writes, no
+spawns). Only a stale heartbeat authorizes takeover.
+
+**Liveness check (PID reuse):** Windows recycles PIDs. Liveness = process
+with that PID exists AND is `pwsh` AND its start time matches `spawned_at`
+— compared in UTC on both sides, ±2s tolerance:
+
+```powershell
+# try/catch, not -ErrorAction SilentlyContinue: in the Claude Code
+# PowerShell tool a suppressed non-terminating error still exits 1, and a
+# dead PID is the NORMAL end-state of every instance — a healthy tick must
+# not read as a failed command.
+try { $p = Get-Process -Id $inst.pid -ErrorAction Stop } catch { $p = $null }
+$alive = $false
+if ($p -and $p.ProcessName -eq 'pwsh') {
+  $delta = [math]::Abs(($p.StartTime.ToUniversalTime() - [datetime]::Parse($inst.spawned_at).ToUniversalTime()).TotalSeconds)
+  if ($delta -le 2) { $alive = $true }
+}
+```
+
+(`Get-Process` `StartTime` is local; `spawned_at` is stored UTC — skipping
+the `.ToUniversalTime()` on either side classifies every live instance as
+dead in any non-UTC timezone and double-spawns twins.)
+
 ## Monitor loop
+
+Runs in the spawning session. Poll interval 5 minutes. **Tick mechanics:**
+each tick is ONE PowerShell tool call with `timeout: 600000` that begins
+with `Start-Sleep -Seconds 300`, then gathers facts for every instance
+(liveness per the check above + raw state-file text); the session then
+applies the classification rules below, rewrites the manifest (Write tool),
+spawns/notifies as needed, prints the dashboard, and issues the next tick
+call. Long fleets survive compaction via Compact instructions.
+
+Each tick: stamp `monitor_heartbeat` (UTC now), then per instance —
+skipping sticky `halted`/`wedged` except a read-only snapshot refresh:
+
+1. Read `<worktree>\.claude-ship-state.json` + liveness check. **State
+   read/parse failure is transient, never diagnostic** (ship's overwrite is
+   not atomic; a poll can land mid-write): keep the previous `snapshot`,
+   retry next tick, never classify an instance or abort the loop from a
+   failed read.
+2. **Alive** → `running`; refresh `snapshot` (phase/status/pr).
+3. **Dead + terminal-clean state** (`status` ∈ blocked / awaiting-db-gates
+   / done, or `phase == "awaiting-merge"`) → mark `halted` (blocked,
+   awaiting-db-gates) / `awaiting-merge` / `done`; notify ONCE
+   (PushNotification if available, else a loud dashboard line) carrying the
+   blocker/checklist text verbatim. "Once" has a mechanism: notify only on
+   the `fleet_status` TRANSITION — when this tick's manifest write changes
+   the recorded value. The prior value is durable in the manifest, so the
+   rule survives monitor takeover without a separate notified-flag.
+4. **Dead + still `in-progress`** → mark `crashed`, then apply the rails
+   IN ORDER before any respawn:
+   - **db-gates rail:** `phase == "db-gates"` → ALWAYS a human gate (ship
+     P6.5 sets the phase on entry, then asks its one apply-now/defer/abort
+     question before writing any status; a headless run dies on that
+     question). Mark `halted`, notify with the last ~20 lines of
+     `ship-run.log`. Never respawn.
+   - **No-progress rail:** hash the snapshot (`phase|status|pr` string). If
+     it equals `last_snapshot_hash` from the previous respawn — the restart
+     made zero progress; it is dying on the same question or hard error —
+     mark `halted`, notify with the log tail, stop restarting.
+   - **Genuine crash** (rate-limit kill, OOM, network): if `restarts < 2`,
+     respawn — re-run the Spawn procedure (`claude -p
+     --dangerously-skip-permissions` via the bootstrap file) with the
+     instance's **stored `bootstrap`** (a bare-mode instance that died
+     before authoring its spec must re-run the idempotent bare bootstrap —
+     plain "Invoke the ship skill." at `spec-review` with a nonexistent
+     spec just wedges); record new `pid`/`spawned_at`, set
+     `last_snapshot_hash` to the current hash, increment `restarts`, →
+     `running`. Else mark `wedged`, notify, leave state + logs for autopsy.
+5. **Slot accounting:** running instances < `max_concurrent` and queue
+   non-empty → run Per-instance setup + Spawn for the next `queued`
+   instance (one per free slot, still ~30s staggered).
+6. **Dashboard** (every tick):
+   `issue | slug | phase | status | pr | restarts | fleet_status`.
+
+**Fleet exit:** all instances terminal (`awaiting-merge`, `halted`, `done`,
+`wedged`, `skipped`). Final report: PRs opened (URLs), gates awaiting the
+human (blocker/checklist text), wedged autopsy pointers (log paths), skipped
+issues with reasons + remedies.
+
+The monitor never merges, never acks DB gates, never answers ship's
+questions.
 
 <!-- Task 5 -->
 ## Subcommands: status / resume / cleanup
