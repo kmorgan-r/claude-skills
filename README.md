@@ -12,6 +12,7 @@ follows at runtime) plus any bundled scripts, references, and evals.
 | [`linkedin-outreach-odoo`](./linkedin-outreach-odoo) | Picks up where `find-cold-leads` leaves off: reads eligible `mailing.contact` leads from Odoo, drafts a personalized LinkedIn connection note per lead, sends connection requests via the ConnectSafely API (dry-run by default), and writes outreach state back to Odoo. |
 | [`fix-pr-reviews`](./fix-pr-reviews) | Fetches the most recent GitHub PR review comments and systematically addresses each one — no copy-pasting from the PR. Supports a `--loop` mode. |
 | [`ship`](./ship) | Conductor that drives the post-brainstorm dev pipeline hands-off — spec-review, plan, plan-review, implementation, PR, then the `fix-pr-reviews` loop — resuming across `/clear` via a state file, stopping only on failure or final merge. |
+| [`ship-fleet`](./ship-fleet) | Runs up to 10 `/ship` pipelines in parallel: one headless Claude Code instance per GitHub issue, each in its own git worktree, coordinated by a fleet manifest and a polling monitor with crash recovery. Human gates (merge, DB acks) stay human. **Windows-only** (PowerShell). |
 | [`reviewing-plans`](./reviewing-plans) | Reviews a written implementation plan before execution: dispatches 2–5 domain-specific reviewer agents in parallel, consolidates findings, and applies approved fixes to the plan file. |
 | [`esg-longitudinal`](./esg-longitudinal) | Tracks a company's ESG / CSR / sustainability commitments over time using **free** public data: finds sustainability/annual report PDFs, extracts targets and metrics into a tidy time-series with source + period + verbatim quote per value, saves a timestamped snapshot, and diffs against earlier snapshots to surface what changed. Re-runnable next year; scales from one company toward tens of thousands. |
 
@@ -101,6 +102,20 @@ cp -r find-cold-leads ~/.claude/skills/
   defines them* (absent scripts are skipped, not treated as failures) plus the
   change's own test files — so it works across repos without those scripts.
 - Invoke `/ship` once; it runs phases P0–P7 hands-off.
+
+### ship-fleet
+- **Builds on [`ship`](./ship)** — install `ship` (and the skills it delegates to)
+  first; each fleet instance runs the full `/ship` pipeline headless. Fleet consumes
+  only ship's documented state-file contract; ship is never modified.
+- **Needs** Windows with PowerShell 7 (`pwsh`) on PATH and the GitHub CLI (`gh`)
+  authenticated. Spawn/liveness/kill mechanics are PowerShell — not portable to
+  macOS/Linux as written.
+- **Spawned instances run `claude -p --dangerously-skip-permissions`** in their own
+  worktrees. Bare mode (no plan/spec on the issue) only accepts issues authored by
+  OWNER/MEMBER/COLLABORATOR, and issue content is always treated as data, never
+  instructions.
+- Invoke `/ship-fleet <issue numbers>` (e.g. `/ship-fleet 101 102 103 --max 5`), then
+  `/ship-fleet status|resume|cleanup` to manage the fleet.
 
 ### reviewing-plans
 - Takes a path to an existing plan markdown file (or finds the most recently referenced
