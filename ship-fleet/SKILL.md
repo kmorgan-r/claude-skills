@@ -538,5 +538,15 @@ fleet — check here first):
 (c) First action resumes an `in-progress` state at `phase` after a
     branch-name check a fleet worktree satisfies by construction.
 
-<!-- Task 6 -->
 ## First-run validation
+
+Before the first real batch, run the staged rollout from the design spec
+(`docs/superpowers/specs/2026-07-12-ship-fleet-design.md` in the
+climatepoint backend repo, "Testing" section): seed-acceptance check →
+dry-run → precondition drills → single-instance lifecycle with fault
+injection (tree-kills at different/same phases; db-gates rail injection by
+hand-editing a dead instance's state to `phase:"db-gates"`,
+`status:"in-progress"`; PR-diff hygiene check; dirty-worktree cleanup
+prompt) → bare-mode run with pre-spec kill → queue drain (3 issues,
+`--max 2`, required monitor-kill + takeover + double-invoke refusal tests)
+→ real batch. Stages 1–2 are safe to re-run anytime; they touch nothing.
