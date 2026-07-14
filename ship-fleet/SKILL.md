@@ -318,7 +318,20 @@ $proc = Start-Process pwsh -PassThru -WindowStyle Hidden `
     '1> .\ship-run.log 2> .\ship-run.err.log')
 # manifest: pid = $proc.Id
 #           spawned_at = $proc.StartTime.ToUniversalTime().ToString('o')
+#           fleet_status = "crashed"   # occupies a slot immediately;
+#                                      # -> "running" only when the next
+#                                      # tick's liveness check confirms it
 ```
+
+**Every spawn — first-time (`queued`) or respawn — sets
+`fleet_status:"crashed"` at spawn time and writes the manifest before the
+next spawn.** `crashed` here means "a process was launched and holds a
+slot until a later tick proves it alive" (identical to the respawn
+convention); it is what makes the occupied-slot count
+(`fleet_status` `running`|`crashed`) increment as each slot fills, so a
+multi-spawn loop cannot blow past `max_concurrent` within one tick. A
+freshly-spawned instance left at `"queued"` would read as unoccupied and
+defeat the cap.
 
 Wrapper liveness equals run liveness **for natural exits only** (`pwsh`
 exits when the pipeline exits). Killing the wrapper orphans the `claude`
@@ -430,9 +443,17 @@ Runs in the spawning session. Poll interval 5 minutes. **Tick mechanics:**
 each tick is ONE PowerShell tool call with `timeout: 600000` that begins
 with `Start-Sleep -Seconds 300`, then gathers facts for every instance
 (liveness per the check above + raw state-file text); the session then
-applies the classification rules below, rewrites the manifest (Write tool),
-spawns/notifies as needed, prints the dashboard, and issues the next tick
-call. Long fleets survive compaction via Compact instructions.
+applies the classification rules below and rewrites the manifest (Write
+tool) with all classification results. Spawning (step 5) then happens as a
+SEPARATE write PER SPAWN, not part of that first write: each spawn is
+preceded by an ownership re-read and followed by its own manifest write
+recording the new `pid`/`spawned_at`/`fleet_status:"crashed"` and a
+restamped heartbeat (a slow ~30s-staggered multi-spawn loop must not let
+the heartbeat go stale, and each spawned instance's slot must be recorded
+before the next spawn so the cap holds). So a tick writes the manifest
+once for classification, then once more per spawn. Finally print the
+dashboard and issue the next tick call. Long fleets survive compaction via
+Compact instructions.
 
 Each tick: stamp `monitor_heartbeat` (UTC now), then per instance —
 skipping sticky `halted`/`wedged` except a read-only snapshot refresh:
