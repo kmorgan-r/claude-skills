@@ -473,9 +473,12 @@ skipping sticky `halted`/`wedged` except a read-only snapshot refresh:
      `fleet_status` stays `crashed` until the next tick confirms the new
      PID alive (→ `running`) — a crash is never silently absorbed. Else
      mark `wedged`, notify, leave state + logs for autopsy.
-5. **Slot accounting:** running instances < `max_concurrent` and queue
-   non-empty → run Per-instance setup + Spawn for the next `queued`
-   instance (one per free slot, still ~30s staggered). Restamp
+5. **Slot accounting:** occupied slots (`fleet_status` `running` or
+   `crashed`) < `max_concurrent` and queue non-empty → run Per-instance
+   setup + Spawn for the next `queued` instance (one per free slot, still
+   ~30s staggered). Immediately before EACH spawn, re-read the manifest
+   and verify `monitor_pid` is still this session (see resume's ownership
+   rule) — if not, another session took over; stop instantly. Restamp
    `monitor_heartbeat` after each spawn in a multi-spawn tick — several
    ~30s staggers plus classification can otherwise push the inter-write
    gap toward the 10-minute staleness threshold and momentarily authorize
@@ -508,10 +511,18 @@ report-only (print what it WOULD do and how to proceed); stale heartbeat →
 act, with three duties:
 First — before any duty — claim the writer lock exactly as Fleet setup
 step 6 does: write `monitor_pid` (this session) + a fresh
-`monitor_heartbeat`, and restamp the heartbeat on every subsequent
-manifest write. Duties 1–2 spawn over multiple minutes; an unclaimed lock
-during that window authorizes a second concurrent `resume` to
-double-spawn.
+`monitor_heartbeat`, then **re-read the manifest and verify `monitor_pid`
+is still this session** — two sessions that both saw a stale heartbeat can
+both write a claim, and the overwrite is last-write-wins; the re-read
+makes the loser see it lost and drop to report-only. Ownership is
+re-verified continuously, not once: **immediately before EVERY spawn or
+respawn** (duties 1–2 here, and Monitor loop step 5 after takeover),
+re-read the manifest; if `monitor_pid` is no longer this session, another
+session took over — stop instantly, write nothing further, spawn nothing
+further. Restamp the heartbeat on every manifest write. (Write-tool
+overwrites cannot do a true compare-and-swap; claim → re-read-verify →
+per-spawn re-verify shrinks the race to the single write and guarantees
+a losing session halts instead of double-spawning.)
 1. For each instance with a dead PID and `in-progress` state, EXCLUDING
    the terminal-clean set (statuses blocked/awaiting-db-gates/done,
    `phase:"awaiting-merge"`) AND the db-gates rail (`phase:"db-gates"` +
@@ -520,17 +531,25 @@ double-spawn.
    `claude -p --dangerously-skip-permissions` via the bootstrap file) with
    the stored `bootstrap`, reset `restarts` to 0, clear
    `last_snapshot_hash` (human intervention earns fresh retries and re-arms
-   the no-progress rail).
+   the no-progress rail), and set `fleet_status:"crashed"` — same semantics
+   as the Monitor loop's crash respawn: `crashed` until the next tick
+   confirms the new PID alive. A duty-1 respawn OCCUPIES A SLOT the moment
+   it spawns.
 2. Spawn instances still `queued` — a dead monitor orphans the queue;
    queued instances have no PID or state file, so no other path starts
    them. Seed from the manifest's stored `plan_path`/`spec_path` (never
    guess from the slug; for bare mode, `spec_path` holds the dictated path
-   stored at resolution). **Only into free slots:** liveness-confirmed
-   running instances < `max_concurrent`; the restarted monitor's slot
+   stored at resolution). **Only into free slots, counted as: occupied =
+   every instance whose `fleet_status` is `running` or `crashed`**
+   (duty-1 respawns are `crashed`, so they count; `crashed` means a spawned
+   process is live-or-pending until the next tick proves otherwise — never
+   trust a pre-takeover `running`/`crashed` without having re-run the
+   liveness check on it during this invocation's initial manifest read).
+   Spawn while occupied < `max_concurrent`; the restarted monitor's slot
    accounting drains the rest (headless instances survive a dead monitor
    session, so the cap must count them).
 3. Restart the monitor loop (the lock is already claimed; just continue
-   ticking).
+   ticking, re-verifying ownership before each spawn per the rule above).
 
 **`cleanup`** —
 - `done` instances (or instances whose PR reports MERGED via
