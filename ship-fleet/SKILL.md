@@ -168,15 +168,6 @@ worktree branched from origin):
 
 1. `gh issue view N --json state,title,url` → closed → **skip**
    (`skip_reason: "issue closed"`). Title is bare-mode slug material.
-   **Author trust gate (bare mode only):**
-   `gh api "repos/{owner}/{repo}/issues/N" --jq .author_association` —
-   if resolution lands on `bare` (step 3) and the association is not
-   `OWNER`/`MEMBER`/`COLLABORATOR`, **skip**
-   (`skip_reason: "bare mode refused: untrusted issue author (<association>)"`).
-   Plan/spec modes are exempt: their driving artifacts are maintainer-committed
-   repo content. Bare mode hands the issue body to a
-   `--dangerously-skip-permissions` agent (Hard rule 6) — an untrusted
-   author must never reach that path.
 2. **Plan?** `git ls-tree -r --name-only "origin/$DEFAULT_BRANCH" -- docs/superpowers/plans/ | grep -E -- "-issue-N-[^/]*\.md$"`
    — note the anchored trailing hyphen: `issue-103-` must NOT match
    `issue-1032-…`. Exactly one hit → `mode: plan`, `plan_path` = the hit.
@@ -202,6 +193,17 @@ worktree branched from origin):
      too (ship's handoff and any spec-reading phase see it). Zero or
      multiple → `spec_path: null` deliberately — no skip; the plan is the
      driving artifact and ambiguity here is harmless.
+3b. **Author trust gate — MANDATORY when step 3 resolved `mode: bare`,
+   skipped otherwise.** This is the SOLE control (Hard rule 6) stopping
+   attacker-controlled issue text from reaching a
+   `--dangerously-skip-permissions` agent, so it is its own step gated
+   directly on the step-3 outcome, not an aside under step 1. If
+   `mode == bare`:
+   `gh api "repos/{owner}/{repo}/issues/N" --jq .author_association` — if
+   the association is not `OWNER`/`MEMBER`/`COLLABORATOR`, **skip**
+   (`skip_reason: "bare mode refused: untrusted issue author (<association>)"`).
+   Plan/spec modes never reach this step (their driving artifacts are
+   maintainer-committed repo content, not the raw issue body).
 4. **Slug:** apply ship P0's normalization (lowercase; spaces/underscores →
    hyphens; strip chars outside `[a-z0-9-]`; collapse repeated hyphens) to:
    - plan/spec mode: the artifact filename minus `YYYY-MM-DD-` prefix and
@@ -259,7 +261,7 @@ worktree while another tree has the branch checked out). In order:
    ```bash
    cd <worktree>
    [ -f .gitignore ] && [ -n "$(tail -c1 .gitignore 2>/dev/null)" ] && printf '\n' >> .gitignore
-   for e in '.claude-ship-state.json' '.claude-pr-fix-state*.json' '.claude-fleet-state.json' 'ship-run.log' 'ship-run.err.log' 'bootstrap.txt'; do
+   for e in '.claude-ship-state.json' '.claude-pr-fix-state*.json' '.claude-fleet-state.json' 'ship-run.log' 'ship-run.err.log' 'bootstrap.txt' 'pwsh.pid'; do
      grep -qxF "$e" .gitignore 2>/dev/null || echo "$e" >> .gitignore
    done
    git add .gitignore
@@ -326,6 +328,11 @@ Set-Content -Path "$worktree\bootstrap.txt" -Value $bootstrap
 $proc = Start-Process pwsh -PassThru -WindowStyle Hidden `
   -WorkingDirectory $worktree `
   -ArgumentList @('-NoProfile','-Command',
+    # The wrapper's FIRST act is to write its own PID into the worktree —
+    # this is the deterministic worktree->pid link that makes a stuck-
+    # spawning entry recoverable (Get-Process exposes no working-directory
+    # to correlate a bare pwsh back to its worktree).
+    '$PID | Set-Content -NoNewline .\pwsh.pid; ' +
     'Get-Content -Raw .\bootstrap.txt | claude -p --dangerously-skip-permissions ' +
     '1> .\ship-run.log 2> .\ship-run.err.log')
 # 2. RECORD PID: update the entry — pid = $proc.Id,
@@ -342,14 +349,26 @@ would read as unoccupied and defeat the cap). Every spawn — first-time
 (`queued`) or respawn — follows this persist→launch→record sequence.
 
 **Stuck-`spawning` reconciliation** (tick killed between the two writes, so
-the pid was never recorded): a later tick / `resume` finds an instance at
-`fleet_status:"spawning"` with `pid:null`. Read its worktree's
-`.claude-ship-state.json` — progressed beyond the `init` seed → a process
-IS running unrecorded; adopt it by finding the live `pwsh`/`claude` under
-that worktree (or leave it and let the next tick record the pid once
-observable), never blind-respawn (that would make the twin this whole
-section prevents). Still only the seed AND no live process under the
-worktree → the launch never happened; re-run the Spawn procedure.
+`pid` is still null in the manifest): a later tick / `resume` finds an
+instance at `fleet_status:"spawning"` with `pid:null`. Recovery is
+deterministic via the wrapper's `<worktree>\pwsh.pid` file — no
+working-directory correlation, no blind respawn:
+- **`pwsh.pid` exists and that PID passes the liveness check** (live
+  `pwsh`) → the launch succeeded but its pid was never recorded; **adopt
+  it**: read the pid from the file, set `pid`/`spawned_at` (from
+  `(Get-Process -Id <pid>).StartTime.ToUniversalTime()`), flip to
+  `crashed`. Now it is a normally-managed instance.
+- **`pwsh.pid` absent, OR present but its PID is dead** → the wrapper never
+  reached its first line (absent) or already exited (dead). Confirm with
+  the worktree's `.claude-ship-state.json`: only the `init` seed and no
+  live process → the launch never took hold → re-run the Spawn procedure
+  (safe: nothing is running). Progressed beyond the seed but the recorded
+  pid is dead → the run exited on its own → hand to normal classification
+  (dead + state status decides crash vs terminal-clean), NOT a spawn.
+
+The `pid:null` liveness-fail path must NEVER route a `spawning` instance
+straight to crash-respawn — that is the twin this section prevents;
+`spawning` is sticky against respawn until this reconciliation resolves it.
 
 Wrapper liveness equals run liveness **for natural exits only** (`pwsh`
 exits when the pipeline exits). Killing the wrapper orphans the `claude`
@@ -480,7 +499,11 @@ dashboard and issue the next tick call. Long fleets survive compaction via
 Compact instructions.
 
 Each tick: stamp `monitor_heartbeat` (UTC now), then per instance —
-skipping sticky `halted`/`wedged` except a read-only snapshot refresh:
+skipping sticky `halted`/`wedged` except a read-only snapshot refresh.
+A `spawning` instance (`pid:null`) is NOT classified by steps 1–4 either:
+it goes to stuck-`spawning` reconciliation (see Spawn) — routing its
+`pid:null` liveness-fail into the crash path below would produce the twin
+that section prevents.
 
 1. Read `<worktree>\.claude-ship-state.json` + liveness check. **State
    read/parse failure is transient, never diagnostic** (ship's overwrite is
@@ -585,16 +608,17 @@ a losing session halts instead of double-spawning.)
    queued instances have no PID or state file, so no other path starts
    them. Seed from the manifest's stored `plan_path`/`spec_path` (never
    guess from the slug; for bare mode, `spec_path` holds the dictated path
-   stored at resolution). **Only into free slots, counted as: occupied =
-   every instance whose `fleet_status` is `running` or `crashed`**
-   (duty-1 respawns are `crashed`, so they count; `crashed` means a spawned
-   process is live-or-pending until the next tick proves otherwise — never
-   trust a pre-takeover `running`/`crashed` without having re-run the
-   liveness check on it during this invocation's initial manifest read).
-   Spawn while occupied < `max_concurrent` (occupied also includes any
-   `spawning` placeholder — see Spawn's persist-before-launch); the
-   restarted monitor's slot accounting drains the rest (headless instances
-   survive a dead monitor session, so the cap must count them).
+   stored at resolution). **Only into free slots, where occupied = every
+   instance whose `fleet_status` is `running`, `crashed`, or `spawning`**
+   — the single occupied-slot definition used everywhere (Spawn, Monitor
+   step 5). Duty-1 respawns are `crashed` and `spawning` placeholders are
+   written before launch, so both count; `crashed`/`spawning` means a
+   spawned process is live-or-pending until the next tick proves otherwise
+   (never trust a pre-takeover `running`/`crashed` without having re-run
+   the liveness check on it during this invocation's initial manifest
+   read). Spawn while occupied < `max_concurrent`; the restarted monitor's
+   slot accounting drains the rest (headless instances survive a dead
+   monitor session, so the cap must count them).
 3. Restart the monitor loop (the lock is already claimed; just continue
    ticking, re-verifying ownership before each spawn per the rule above).
 
