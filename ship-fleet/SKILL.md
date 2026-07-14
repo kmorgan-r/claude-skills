@@ -309,29 +309,47 @@ shim that won't launch under the redirect-implied `UseShellExecute=$false`.
 The prompt therefore travels by file, and the process is a `pwsh` wrapper
 piping it to stdin (`claude -p` with no prompt argument reads stdin):
 
+**Persist-before-launch — the manifest entry precedes `Start-Process`.**
+Launching first and recording the pid second means a tick killed at its
+600s ceiling (the tool maximum — no headroom) between the two steps leaves
+a live `--dangerously-skip-permissions` process recorded NOWHERE: invisible
+to `status`/`resume`/liveness/slot-accounting/`cleanup`, never counted,
+never killed. So write the manifest FIRST with a `"spawning"` placeholder
+(slot-occupying, `pid:null`), THEN launch, THEN fill in the pid:
+
 ```powershell
 Set-Content -Path "$worktree\bootstrap.txt" -Value $bootstrap
+# 1. PERSIST FIRST: write this instance into the manifest with
+#    fleet_status="spawning", pid=null, spawned_at=null. "spawning" counts
+#    as an occupied slot, so even a crash before launch cannot over-spawn,
+#    and the instance is never invisible.
 $proc = Start-Process pwsh -PassThru -WindowStyle Hidden `
   -WorkingDirectory $worktree `
   -ArgumentList @('-NoProfile','-Command',
     'Get-Content -Raw .\bootstrap.txt | claude -p --dangerously-skip-permissions ' +
     '1> .\ship-run.log 2> .\ship-run.err.log')
-# manifest: pid = $proc.Id
-#           spawned_at = $proc.StartTime.ToUniversalTime().ToString('o')
-#           fleet_status = "crashed"   # occupies a slot immediately;
-#                                      # -> "running" only when the next
-#                                      # tick's liveness check confirms it
+# 2. RECORD PID: update the entry — pid = $proc.Id,
+#    spawned_at = $proc.StartTime.ToUniversalTime().ToString('o'),
+#    fleet_status = "crashed" (occupies the slot until the next tick's
+#    liveness check confirms it -> "running").
 ```
 
-**Every spawn — first-time (`queued`) or respawn — sets
-`fleet_status:"crashed"` at spawn time and writes the manifest before the
-next spawn.** `crashed` here means "a process was launched and holds a
-slot until a later tick proves it alive" (identical to the respawn
-convention); it is what makes the occupied-slot count
-(`fleet_status` `running`|`crashed`) increment as each slot fills, so a
-multi-spawn loop cannot blow past `max_concurrent` within one tick. A
-freshly-spawned instance left at `"queued"` would read as unoccupied and
-defeat the cap.
+**`spawning` and `crashed` both occupy a slot** — the occupied-slot count
+(`fleet_status` `running`|`crashed`|`spawning`) increments as each slot
+fills, so a multi-spawn loop cannot blow past `max_concurrent` within one
+tick, and a freshly-spawned instance is never left at `"queued"` (which
+would read as unoccupied and defeat the cap). Every spawn — first-time
+(`queued`) or respawn — follows this persist→launch→record sequence.
+
+**Stuck-`spawning` reconciliation** (tick killed between the two writes, so
+the pid was never recorded): a later tick / `resume` finds an instance at
+`fleet_status:"spawning"` with `pid:null`. Read its worktree's
+`.claude-ship-state.json` — progressed beyond the `init` seed → a process
+IS running unrecorded; adopt it by finding the live `pwsh`/`claude` under
+that worktree (or leave it and let the next tick record the pid once
+observable), never blind-respawn (that would make the twin this whole
+section prevents). Still only the seed AND no live process under the
+worktree → the launch never happened; re-run the Spawn procedure.
 
 Wrapper liveness equals run liveness **for natural exits only** (`pwsh`
 exits when the pipeline exits). Killing the wrapper orphans the `claude`
@@ -383,17 +401,23 @@ seed with `plan:null` is a state ship cannot resume.
     "log": "<worktree>\\ship-run.log",
     "restarts": 0,
     "last_snapshot_hash": null,
-    "fleet_status": "queued|running|crashed|halted|awaiting-merge|done|wedged|skipped",
+    "fleet_status": "queued|spawning|running|crashed|halted|awaiting-merge|done|wedged|skipped",
     "snapshot": { "phase": null, "status": null, "pr": null }
   }]
 }
 ```
 
 `fleet_status` semantics:
+- `spawning` is written BEFORE `Start-Process` (see Spawn) with `pid:null`;
+  it occupies a slot and flips to `crashed` once the pid is recorded. A
+  `spawning` entry that outlives its tick (pid never recorded) is the
+  stuck-spawn case reconciled in the Spawn section — never invisible,
+  never blind-respawned.
 - `crashed` is written the moment the monitor detects dead+in-progress
-  (BEFORE the respawn decision) and remains until the instance is next
-  confirmed alive (→ `running`) or exhausts its rails (→ `wedged`/`halted`)
-  — a crash is observable in the manifest, never silently absorbed.
+  (BEFORE the respawn decision), and also at every (re)spawn once the pid
+  is recorded; it remains until the instance is next confirmed alive
+  (→ `running`) or exhausts its rails (→ `wedged`/`halted`) — a crash or a
+  pending spawn is observable in the manifest, never silently absorbed.
 - `halted` and `wedged` are **sticky for the monitor**: it refreshes their
   snapshots read-only (a human's interactive progress may transition them
   to `done`/`awaiting-merge`) but NEVER respawns them. Respawn authority
@@ -494,10 +518,11 @@ skipping sticky `halted`/`wedged` except a read-only snapshot refresh:
      `fleet_status` stays `crashed` until the next tick confirms the new
      PID alive (→ `running`) — a crash is never silently absorbed. Else
      mark `wedged`, notify, leave state + logs for autopsy.
-5. **Slot accounting:** occupied slots (`fleet_status` `running` or
-   `crashed`) < `max_concurrent` and queue non-empty → run Per-instance
-   setup + Spawn for the next `queued` instance (one per free slot, still
-   ~30s staggered). Immediately before EACH spawn, re-read the manifest
+5. **Slot accounting:** occupied slots (`fleet_status` `running`,
+   `crashed`, or `spawning`) < `max_concurrent` and queue non-empty → run
+   Per-instance setup + Spawn for the next `queued` instance (one per free
+   slot, still ~30s staggered). Spawn's persist-before-launch records each
+   new slot before the next spawn, so the count is correct mid-loop. Immediately before EACH spawn, re-read the manifest
    and verify `monitor_pid` is still this session (see resume's ownership
    rule) — if not, another session took over; stop instantly. Restamp
    `monitor_heartbeat` after each spawn in a multi-spawn tick — several
@@ -566,9 +591,10 @@ a losing session halts instead of double-spawning.)
    process is live-or-pending until the next tick proves otherwise — never
    trust a pre-takeover `running`/`crashed` without having re-run the
    liveness check on it during this invocation's initial manifest read).
-   Spawn while occupied < `max_concurrent`; the restarted monitor's slot
-   accounting drains the rest (headless instances survive a dead monitor
-   session, so the cap must count them).
+   Spawn while occupied < `max_concurrent` (occupied also includes any
+   `spawning` placeholder — see Spawn's persist-before-launch); the
+   restarted monitor's slot accounting drains the rest (headless instances
+   survive a dead monitor session, so the cap must count them).
 3. Restart the monitor loop (the lock is already claimed; just continue
    ticking, re-verifying ownership before each spawn per the rule above).
 
