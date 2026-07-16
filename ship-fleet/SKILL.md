@@ -265,7 +265,12 @@ Replaces ship P0 entirely (P0's `git checkout <default>` cannot run in a
 worktree while another tree has the branch checked out). In order:
 
 1. **Worktree:**
-   `git worktree add -b "feat/<slug>" "<worktrees-root>\<slug>" "origin/$DEFAULT_BRANCH"`
+   `git worktree add -b "feat/<slug>" "<worktrees-root>\issue-<N>" "origin/$DEFAULT_BRANCH"`
+   The worktree DIRECTORY is `issue-<N>`, not `<slug>`, to keep deep artifact
+   paths under Windows' 260-char MAX_PATH — the slug already recurs inside the
+   tree in artifact filenames (`docs/superpowers/specs/<today>-<slug>-design.md`),
+   so a long-slug directory on top overflows it. The branch (`feat/<slug>`) and
+   those filenames keep the full slug; `issue-<N>` is unique within a fleet.
 2. **Committed gitignore entries** (in the worktree — tail-byte-safe append
    exactly as ship P0 does, then commit if changed):
    ```bash
@@ -420,7 +425,7 @@ seed with `plan:null` is a state ship cannot resume.
     "slug": "issue-1032-...",
     "mode": "plan",
     "skip_reason": null,
-    "worktree": "C:\\Users\\kmorg\\ship-fleet\\<primary-dirname>\\<slug>",
+    "worktree": "C:\\Users\\kmorg\\ship-fleet\\<primary-dirname>\\issue-<N>",
     "branch": "feat/<slug>",
     "pid": 1234,
     "spawned_at": "2026-07-13T14:00:00Z",
