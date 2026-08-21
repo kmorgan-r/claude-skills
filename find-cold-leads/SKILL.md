@@ -31,6 +31,7 @@ ICP fit and which titles count as buyers.
    - `dpp-rollout-sectors`
    - `eu-taxonomy-lca`
    - `standards-triggered-prospects`
+   - `linkedin-assisted-cross-reference` (user supplies LinkedIn profile URLs)
    - custom (run the Discovery Interview)
 5. Ask for geography (region filter), the credit budget (**default 25**), max
    contacts to enrich, and the output filename if not provided.
@@ -83,8 +84,14 @@ mentioning standards such as ISO 14067, ISO 14064-1, PEFCR, product environmenta
 footprint, or product carbon footprint (these surface as `lead_signals` for
 Stage Q).
 
-Use `linkedin-assisted-cross-reference` only when the user provides LinkedIn URLs
-or licensed/manual LinkedIn data. Do not crawl LinkedIn. Store LinkedIn only as a
+Use `linkedin-assisted-cross-reference` when the user supplies a list of LinkedIn
+profile URLs (manual or licensed LinkedIn data). It runs the **same Apollo people
+pipeline** as the other themes — only the Phase 1 search key differs: free
+`apollo_mixed_people_api_search` by `person_linkedin_urls` (instead of by company
+domain + buyer titles), then the same Stage Q qualify → cap → paid bulk enrichment
+→ dedup/suppression → export → Odoo upload. `contact_search_titles` is not a search
+filter here (the URLs already name the people); it still documents which titles
+Stage Q treats as buyers. Do not crawl LinkedIn. Store LinkedIn URLs only as a
 reference.
 
 ## Qualification (Stage Q)

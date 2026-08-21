@@ -190,12 +190,62 @@ Best when searching for companies already using language that maps directly to y
 
 ## LinkedIn-Assisted Cross-Reference
 
-Use only when the user supplies manual or licensed LinkedIn data.
+Use only when the user supplies a list of LinkedIn profile URLs (manual or licensed
+LinkedIn data). It runs the **same Apollo people pipeline** as the other themes —
+only the Phase 1 search key differs.
 
-- Do not crawl LinkedIn.
-- Do not automate login, session browsing, connection graph collection, profile scraping, or contact extraction from LinkedIn.
-- Store LinkedIn URLs only as references.
-- Find actual contact evidence from public non-LinkedIn pages such as company websites, press pages, team pages, conference speaker pages, filings, and official contact pages.
+- **Ingest = LinkedIn profile URLs**, not company domains. The user hands you a list
+  of `https://www.linkedin.com/in/…` URLs.
+- **Phase 1 — free people search (0 credits):** call `apollo_mixed_people_api_search`
+  with `person_linkedin_urls` (the user's URL list, batched per call; page through
+  while `has_more`) **instead of** `q_organization_domains_list` + `person_titles`.
+  Because the URLs already name the people, `contact_search_titles` is **not** a
+  search filter in this theme — it is kept in the JSON below for schema consistency
+  and to document which titles Stage Q treats as buyers. The free result returns the
+  same fields as the domain pipeline (`id`, masked name, `title`, `has_email`,
+  `organization.name`).
+- **Stage Q qualify** on the free signals (org industry + title + resolved domain)
+  using `sectors` / `buyer_title_terms` / `lead_signals` — identical to the domain
+  pipeline. `strong` / `possible` proceed; `reject` dropped. **Never enrich to
+  qualify** — Stage Q runs on the free result, before any paid match.
+- **Phase 2 → export → Odoo upload:** rank + cap 3/company, paid
+  `apollo_people_bulk_match` (1 credit/match, budget default 25), dedup + suppression
+  vs Odoo, Excel export, gated Odoo upload — all identical to the domain pipeline.
+- Do not crawl LinkedIn. Do not automate login, session browsing, connection graph
+  collection, profile scraping, or contact extraction from LinkedIn. Store LinkedIn
+  URLs only as references (`linkedin_reference_url`).
+
+```json
+{
+  "id": "linkedin-assisted-cross-reference",
+  "label": "LinkedIn-Assisted Cross-Reference",
+  "sectors": ["any B2B company"],
+  "keywords": [],
+  "contact_search_titles": [
+    "Chief Executive Officer",
+    "Chief Operating Officer",
+    "Vice President",
+    "Director",
+    "Head of Operations",
+    "General Manager",
+    "Procurement Manager",
+    "Supply Chain Manager"
+  ],
+  "buyer_title_terms": [
+    "chief", "vp", "vice president", "director", "head",
+    "manager", "procurement", "supply chain", "operations"
+  ],
+  "lead_signals": [],
+  "high_priority_title_terms": ["chief", "vp", "director", "head"],
+  "medium_priority_title_terms": ["manager", "procurement", "supply chain", "operations"]
+}
+```
+
+> `contact_search_titles` is unused as a search filter in this theme (Phase 1 keys on
+> `person_linkedin_urls`, not titles). It is retained so Stage Q title matching and
+> the field-reference table stay consistent across themes. If a user-supplied URL
+> resolves to a person whose title is off-ICP, Stage Q tiers it `reject` on the free
+> result — no credit spent.
 
 ## Custom Theme Inputs
 

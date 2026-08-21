@@ -34,6 +34,15 @@ Call `apollo_mixed_people_api_search`:
 Page through (`page` + `per_page`) while `has_more`. 0 credits regardless of
 result count.
 
+> **Variant — `linkedin-assisted-cross-reference` theme:** when the user supplies
+> LinkedIn profile URLs instead of company domains, replace `q_organization_domains_list`
+> + `person_titles` with `person_linkedin_urls` (the user's URL list, batched per call;
+> page while `has_more`). The URLs already name the people, so `person_titles` is not
+> applied. The free result returns the same fields, Stage Q qualifies on the same free
+> signals, and every downstream step (rank + cap, Phase 2 bulk enrichment, dedup +
+> suppression, export, Odoo upload) is identical to the domain pipeline above. See
+> `search-themes.md` → LinkedIn-Assisted Cross-Reference.
+
 **What you get per person:** `id`, `first_name`, `last_name` (often
 masked/obfuscated in search results — expected, does not block enrichment),
 `title`, `has_email` flag, `organization.name`. You do **not** get emails or
