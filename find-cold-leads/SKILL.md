@@ -134,7 +134,9 @@ The primary workflow. Full recipe in `references/apollo-people-pipeline.md`.
    0 no-match.
 5. **Reconcile credits** vs the post-run `apollo_usage_stats` delta. Surface the
    `mcp_credits` block.
-6. **Dedup vs Odoo** `mailing.contact` before export.
+6. **Dedup + suppression vs Odoo** before export — check `mail.blacklist` +
+   `mailing.contact` + `res.partner` + `crm.lead`; skip suppressed rows; never
+   unset `opt_out`; re-check immediately before any create.
 7. **Export** the Excel workbook (Leads, Remaining Candidates, Sources, Run
    Config, Credit Ledger).
 
@@ -166,12 +168,17 @@ Treat credits as scarce. Iron rules:
 
 The Excel workbook contains:
 
-- `Leads`: one row per enriched named contact — `contact_name`, `first_name`,
+- `Leads`: one row per enriched, **non-suppressed**, non-duplicate named
+  contact — `contact_name`, `first_name`,
   `last_name`, `job_title`, `business_email`, `email_status`,
   `linkedin_reference_url`, company firmographics, `seniority`, Apollo IDs,
   source fields, and compliance fields (`outreach_allowed_review`,
   `gdpr_legitimate_interest_basis`, `art14_source_notice`, `opt_out_provided`,
-  `personal_email_used`, `waterfall_used`, `odoo_ready`, `odoo_dupcheck`).
+  `personal_email_used`, `waterfall_used`, `odoo_ready`, `odoo_dupcheck`,
+  `suppression_status`, `suppression_reason`).
+- `Suppressed`: enriched people who hit an Odoo suppression source
+  (`suppression_status=suppressed`) — kept separate so they are never surfaced
+  as fresh/importable in `Leads`.
 - `Remaining Candidates`: `has_email=true` people not enriched (budget cap),
   company-level, for the next cycle.
 - `Sources`: Phase 1 free-search batches + Phase 2 enrichment batches, with
@@ -188,8 +195,14 @@ Before handing leads to cold email or Odoo work:
 3. Check `seniority` and `job_title` match the buyer persona.
 4. Keep `outreach_allowed_review` as `needs review` until the user confirms
    outreach basis.
-5. Confirm `odoo_dupcheck` = no duplicates.
-6. Mark `odoo_ready=yes` only after user review.
+5. Confirm `suppression_status` = `clear` — no row in `Leads` may be
+   suppressed. Suppressed contacts belong in the `Suppressed` sheet, never
+   re-targeted. This check runs against `mail.blacklist` + `mailing.contact` +
+   `res.partner` + `crm.lead`, and is re-run immediately before any Odoo
+   create.
+6. Confirm `odoo_dupcheck` = `clear` (no duplicate subscription / partner /
+   lead).
+7. Mark `odoo_ready=yes` only after user review.
 
 ## Custom Theme JSON
 
@@ -285,7 +298,10 @@ matching.
   reference only.
 - Cap 3 candidates per company; rank by seniority, `has_email=true` first.
 - Never enrich to qualify — Stage Q on free signals first.
-- Deduplicate by normalized email; dedup vs Odoo `mailing.contact` before upload.
+- Deduplicate by normalized email; dedup + suppression vs Odoo
+  (`mail.blacklist` + `mailing.contact` + `res.partner` + `crm.lead`) before
+  upload. A blacklisted / opted-out contact is never re-targeted —
+  `suppression_status=suppressed` overrides a clear `odoo_dupcheck`.
 - Keep source evidence and the Stage Q tier in the workbook.
 - Do not claim outreach compliance; prepare leads for human review.
   `outreach_allowed_review` stays `needs review`; `odoo_ready=yes` only after the

@@ -102,24 +102,79 @@ a future budget cycle.
 - **Surface the `mcp_credits` block to the user** whenever Apollo returns one —
   estimated cost before a spend, actual spend + new balance after.
 
-## Dedup vs Odoo (before export)
+## Dedup + suppression vs Odoo (before export)
 
-Query Odoo `mailing.contact` for the matched business emails (via the
-climatepoint-odoo MCP `search_read`). Mark `odoo_dupcheck` per row. Do not upload
-duplicates. Upload only after the user reviews and marks `odoo_ready=yes`.
+A contact can be legally uncontactable even when it has no `mailing.contact`
+row — it may be on the master blacklist (opted out / bounced / complained).
+**Suppression is a separate check from duplication**, and it is the hard
+backstop against re-contacting someone who must not be contacted again. Run
+both checks via the climatepoint-odoo MCP `search_read`, keyed on the
+normalized business email.
+
+### 1. Suppression check (run FIRST — hard backstop)
+
+For each matched business email, query every suppression source:
+
+| Model | Domain | Suppressed when |
+|---|---|---|
+| `mail.blacklist` | `[["email","=",<normalized>],["active","=",true]]` | any active row exists — **master suppression list; critical backstop** |
+| `mailing.contact` | `email_normalized` = `<normalized>`; read `is_blacklisted`, `opt_out`, `message_bounce` | `is_blacklisted=true` OR `opt_out=true` (high `message_bounce` = treat as suppressed too) |
+| `res.partner` | `email_normalized` = `<normalized>`; read `is_blacklisted` | `is_blacklisted=true` |
+| `crm.lead` | `email_from` = `<normalized>`; read `partner_is_blacklisted` | `partner_is_blacklisted=true` |
+
+Set `suppression_status` per row:
+- **`suppressed`** — any source above hit. **Do not upload. Do not surface as a
+  fresh/importable contact.** Move to a **Suppressed** sheet (or mark and
+  exclude from the Leads sheet) so the row is never re-targeted. Record the
+  source in `suppression_reason` (`blacklist` / `opt_out` / `bounce` /
+  `partner_blacklisted`).
+- **`clear`** — no suppression hit anywhere.
+
+`odoo_dupcheck` (below) is a *duplicate* check only — it says nothing about
+suppression status. A row can be `odoo_dupcheck=clear` and still
+`suppression_status=suppressed`. **A suppressed row is never importable,
+regardless of dupcheck.** Do not let a clear dupcheck override a suppression.
+
+### 2. Duplicate check
+
+| Model | Domain | Result |
+|---|---|---|
+| `mailing.contact` | `email_normalized` = `<normalized>` | existing subscription → `odoo_dupcheck=existing_subscription` |
+| `res.partner` | `email_normalized` = `<normalized>` | existing contact → `odoo_dupcheck=existing_partner` |
+| `crm.lead` | `email_from` = `<normalized>` and `active=true` | existing lead → `odoo_dupcheck=existing_lead` |
+| — | no hit anywhere | `odoo_dupcheck=clear` |
+
+Do not upload any duplicate. If a `mailing.contact` row already exists with
+`opt_out=true`, **never unset `opt_out`** on the existing subscription — leave
+it untouched and exclude the row from upload.
+
+### 3. Fresh re-check immediately before any create
+
+Suppression/dup state can change between the dedup pass and the actual Odoo
+create. Re-query `mail.blacklist` + `mailing.contact` (and `res.partner` /
+`crm.lead` if relevant) **immediately before** each create. If the row is now
+suppressed or duplicate, skip it — do not create.
+
+Upload only after the user reviews and marks `odoo_ready=yes`.
 
 ## Export — Excel workbook
 
 Sheets:
 
-- **Leads** — one row per enriched person. Columns: `contact_name`,
+- **Leads** — one row per enriched, **non-suppressed**, non-duplicate person.
+  Columns: `contact_name`,
   `first_name`, `last_name`, `job_title`, `business_email`, `email_status`,
   `linkedin_reference_url`, `company_name`, `company_domain`, `company_country`,
   `company_industry`, `company_employees`, `company_revenue`, `seniority`,
   `apollo_person_id`, `apollo_org_id`, `source_provider`, `source_basis`,
   `outreach_allowed_review`, `gdpr_legitimate_interest_basis`,
   `art14_source_notice`, `opt_out_provided`, `personal_email_used`,
-  `waterfall_used`, `odoo_ready`, `odoo_dupcheck`.
+  `waterfall_used`, `odoo_ready`, `odoo_dupcheck`, `suppression_status`,
+  `suppression_reason`.
+- **Suppressed** — enriched people who hit a suppression source
+  (`suppression_status=suppressed`): `business_email`, company, the matched
+  model (`suppression_reason`), and the source row. Kept separate so suppressed
+  contacts are never surfaced as fresh/importable in the Leads sheet.
 - **Remaining Candidates** — `has_email=true` people not enriched (budget cap),
   company-level, for next cycle.
 - **Sources** — Phase 1 free-search batches + Phase 2 enrichment batches, with
@@ -145,7 +200,12 @@ Style: header fill `1F4E78`, white bold font, `freeze_panes = "A2"`.
 - **Art. 14 source notice + opt-out** — data came from Apollo (not the person);
   include a source notice + right to object in outreach. Record in
   `art14_source_notice` / `opt_out_provided`.
-- **Dedup vs Odoo** before any upload.
+- **Dedup + suppression vs Odoo** before any upload — check `mail.blacklist` +
+  `mailing.contact` + `res.partner` + `crm.lead`; skip suppressed
+  (`is_blacklisted`/`opt_out`/`active`-blacklist) rows; never unset `opt_out` on
+  an existing subscription; re-check immediately before any create. A
+  `odoo_dupcheck=clear` row that is `suppression_status=suppressed` is **never**
+  importable.
 - **`odoo_ready=yes` only after user review.**
 - Region posture (Germany strict, EU/UK, US, unknown) — see
   `source-compliance.md`. Tag `region` at search time, not from enrich `country`.
