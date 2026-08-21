@@ -16,10 +16,12 @@ send-ready address.
 
 ## Region is set at SEARCH time
 
-Tag `region` from the search location filter (Mode A `person_locations` / Mode O
-query region) — **not** from Apollo's enrich-only `country`, because most rows are
-never enriched. Enrich `country` only *refines* the search-time region (override if
-it clearly contradicts). Unknown region → conservative EU posture.
+Tag `region` from the Phase 1 Apollo search location filter
+(`person_locations` / `organization_locations` on `apollo_mixed_people_api_search`)
+— **not** from the enrich-only `country` returned by `apollo_people_bulk_match`,
+because most rows are never enriched. Enrich `country` only *refines* the
+search-time region (override if it clearly contradicts). Unknown region →
+conservative EU posture.
 
 ## Per-region posture
 
@@ -30,7 +32,8 @@ it clearly contradicts). Unknown region → conservative EU posture.
 | **US** | `n/a (opt-out)` | `ok with working unsubscribe + sender ID` | CAN-SPAM: named-email outreach defensible with unsubscribe + accurate identity. |
 | **Unknown** | `unknown` | `needs review` | Conservative EU default. |
 
-`compliance_fields()` in the script applies this.
+`compliance_fields()` in the legacy crawler script applied this; the Apollo
+pipeline applies the same posture when it builds the Leads sheet.
 
 ## GDPR specifics for EU rows
 
@@ -43,13 +46,25 @@ it clearly contradicts). Unknown region → conservative EU posture.
 - **Role-based addresses** (`sustainability@`, `info@`) are weakly/not personal
   data → lower risk; prefer them for strict regions.
 
-## Public-web sources (Mode O)
+## Apollo as the source
 
-Prefer the company's **own** pages: homepage, about, team/leadership, impressum,
-sustainability/EPD/PCF/LCA pages, press releases, official registries. Record
-`source_url` + `evidence_snippet` for every lead. A contact's evidence must come
-from the company's own registrable domain (`contact_provenance_ok`), **never** a
-data-vendor snippet (the old ZoomInfo-snippet failure).
+The pipeline's contact data comes from **Apollo** (licensed public professional
+data), not from crawling the company's own pages. That changes the provenance
+rule but not the compliance wall:
+
+- Record `source_provider` (`apollo_mixed_people_api_search +
+  apollo_people_bulk_match`) and `source_basis` (`Apollo people DB; business
+  email; public professional data`) on every lead.
+- Apollo's `linkedin_url` is licensed data and fine to store as
+  `linkedin_reference_url` — still do not scrape LinkedIn (see boundary below).
+- Stage Q evidence (`evidence_snippet`, `source_url`,
+  `business_relevance_basis`) is still recorded from the free Phase 1 search
+  result (org industry + title + domain) so the qualify-or-reject call is
+  auditable.
+- The old ZoomInfo-snippet failure (a contact whose evidence was a third-party
+  data-vendor snippet rather than the company's own pages) is not a concern
+  here, because Stage Q qualifies on Apollo's structured org/title fields, not
+  on a scraped snippet.
 
 ## LinkedIn boundary
 

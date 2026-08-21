@@ -1,6 +1,10 @@
 # Search Themes
 
-Use these as starting points. Adjust geography, sector language, and exclusions before running the crawler.
+Use these as starting points. A theme defines what the Apollo people pipeline
+needs: **sectors** (Stage Q ICP fit), **`contact_search_titles`** (→ Apollo
+`person_titles`), and **`lead_signals`** / **`buyer_title_terms`** (intent and
+title matching for Stage Q). Adjust geography, sector language, and exclusions
+before running the pipeline.
 
 ## Generic B2B
 
@@ -53,12 +57,13 @@ Use only when the user supplies manual or licensed LinkedIn data.
 
 For a custom theme, ask for:
 
-- Sector or activity type
-- Geography
-- Buying trigger or compliance driver
+- Sector or activity type (→ `sectors`, Stage Q ICP fit)
+- Geography (→ Apollo `person_locations` / `organization_locations`)
+- Buying trigger or compliance driver (→ `lead_signals`, Stage Q intent)
+- Buyer job titles (→ `contact_search_titles`, Apollo `person_titles`)
 - Required keywords
 - Excluded terms or domains
-- Maximum leads
+- Maximum contacts and credit budget
 - Output filename
 
 Then translate into a custom theme JSON with the extended schema:
@@ -85,14 +90,14 @@ Then translate into a custom theme JSON with the extended schema:
 |-------|---------|----------|
 | `id` | Theme identifier | Yes |
 | `label` | Human-readable name | Yes |
-| `sectors` | Search query sectors | Yes |
-| `keywords` | Search query keywords | No |
+| `sectors` | ICP sectors for Stage Q fit | Yes |
+| `keywords` | Intent keywords (Stage Q evidence) | No |
 | `subthemes` | Worksheet labels / tags | No |
 | `target_personas` | Description of ideal buyer roles | No (defaults to generic) |
-| `contact_search_titles` | Job titles to search for per company | No (defaults to generic exec titles) |
-| `buyer_title_terms` | Keywords that indicate a relevant contact title | No (defaults to generic exec terms) |
-| `lead_signals` | Snippet keywords that boost the lead score | No (defaults to none) |
-| `high_priority_title_terms` | Terms that boost contact confidence (+25) | No |
-| `medium_priority_title_terms` | Terms that boost contact confidence (+15) | No |
+| `contact_search_titles` | Job titles → Apollo `person_titles` | No (defaults to generic exec titles) |
+| `buyer_title_terms` | Terms that indicate a relevant contact title (Stage Q) | No (defaults to generic exec terms) |
+| `lead_signals` | Intent keywords for Stage Q | No (defaults to none) |
+| `high_priority_title_terms` | Terms that boost title-match confidence | No |
+| `medium_priority_title_terms` | Terms that boost title-match confidence | No |
 
 Missing optional fields fall back to generic B2B defaults, so old themes without the new fields still work.
