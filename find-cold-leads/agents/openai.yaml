@@ -1,4 +1,4 @@
 interface:
   display_name: "Find Cold Leads"
-  short_description: "Find leads and screen Odoo duplicates"
-  default_prompt: "Use $find-cold-leads to find reviewed cold leads, export them to Excel, screen Odoo duplicates, and prepare an Odoo mailing-list upload."
+  short_description: "Find real named B2B cold leads via the Apollo people pipeline"
+  default_prompt: "Use $find-cold-leads to find named B2B cold leads — specific people at target companies with verified business emails — via the Apollo people pipeline, and export them to Excel for review."

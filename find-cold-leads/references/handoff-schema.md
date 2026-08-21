@@ -1,17 +1,19 @@
 # Handoff Schema — find-cold-leads → climatepoint-contact-intelligence
 
-The skill produces qualified leads two ways, both feeding the
-`climatepoint-contact-intelligence` classifier:
+The skill produces qualified named contacts via the **Apollo people pipeline**
+(`apollo_mixed_people_api_search` → Stage Q → `apollo_people_bulk_match`) and
+maps them to the `climatepoint-contact-intelligence` classifier's columns.
 
-- **Mode O (open web):** `scripts/lead_crawler.py` writes an **XLSX workbook**.
-  Its column schema is the `LEAD_COLUMNS` constant in the script (the single
-  source of truth — the creation path and the export read the same list).
-- **Mode A (Apollo MCP):** the agent enriches qualified rows with
-  `apollo_people_match` and maps the result to the classifier's columns (below).
+- **Primary (Apollo MCP):** the agent runs the pipeline via MCP tools and maps
+  the enriched result to the classifier's columns (below).
+- **Legacy (open web):** `scripts/lead_crawler.py` was removed when the skill
+  moved to the Apollo pipeline; there is no crawler on disk to fall back to or
+  inspect. Its `LEAD_COLUMNS` schema is preserved here for reference only, in
+  case old workbooks produced before the switch are fed to the classifier.
 
-## Mode O workbook (`LEAD_COLUMNS`)
+## Legacy Mode O workbook (`LEAD_COLUMNS`) — reference only
 
-The **Leads** sheet carries, in order: `company_name`, `domain`, `website`,
+The **Leads** sheet carried, in order: `company_name`, `domain`, `website`,
 `country`, `region`, `sector`, `theme`, `matched_signal`, `target_persona`,
 `contact_name`, `contact_title`, `contact_email`, `contact_page`,
 `contact_link`, `contact_source_url`, `contact_confidence`, `contact_data_type`,
@@ -19,24 +21,17 @@ The **Leads** sheet carries, in order: `company_name`, `domain`, `website`,
 `email_verification_status`, `email_confidence`, `do_not_contact_reason`,
 `linkedin_reference_url`, `lead_score`, `source_url`, `evidence_snippet`,
 `business_relevance_basis`, `consent_status`, `outreach_allowed_review`,
-`legitimate_interest_basis`, `delete_if_not_used_by`, `notes`, `odoo_ready`,
-`odoo_duplicate`, `odoo_duplicate_status`, `odoo_duplicate_model`,
-`odoo_duplicate_id`, `odoo_duplicate_reason`, `odoo_import_eligible`.
+`legitimate_interest_basis`, `delete_if_not_used_by`, `notes`, `odoo_ready`.
 Plus sheets: **Sources**, **Rejected**, **Run Config**.
-
-The Odoo duplicate fields are agent-annotated. `odoo_duplicate_status=not_screened`
-means no completed Odoo screen has been recorded; `clear` means the read-only
-screen found no match; `duplicate`, `possible_duplicate`, `blacklisted`, and
-`screen_error` block or pause import through `odoo_import_eligible`.
 
 To feed the classifier, save the Leads sheet to CSV and map columns
 (`company_name`→Company, `website`/`domain`→Website/Domain, `contact_name`→Name,
 `contact_title`→Title, `contact_email`→Email, `country`→Country / HQ).
 
-## Mode A Apollo `apollo_people_match` → classifier column map
+## Apollo `apollo_people_bulk_match` → classifier column map
 
-The agent applies this mapping (there is no `map_apollo_person` helper in the
-script — Apollo enrichment is MCP/agent-driven):
+The agent applies this mapping (Apollo enrichment is MCP/agent-driven; there
+is no helper script — the mapping is done inline by the agent):
 
 | Classifier column | Apollo field |
 |---|---|
@@ -62,8 +57,13 @@ email vs `sun-garden.eu` org):
 
 ### Credit accounting
 
-A matched person costs 1 credit; a no-match costs 0. Track the per-row spend so
-the Run Config total reconciles against a post-run `apollo_usage_stats` delta.
+`apollo_people_bulk_match`: 1 credit per matched person, 0 per no-match, max 10
+per request. (Single `apollo_people_match` is the same unit cost for one person.)
+No-match rows cost nothing. Track the per-row spend so the Run Config total
+reconciles against a post-run `apollo_usage_stats_credit_usage_stats` delta.
+Waterfall and phone reveal are off (`run_waterfall_email/phone=false`,
+`reveal_phone_number=false`) — do not enable them unless the user explicitly
+opts in and waterfall capability is confirmed first.
 
 ## Running the classifier afterwards
 
