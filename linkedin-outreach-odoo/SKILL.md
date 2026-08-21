@@ -30,7 +30,7 @@ description: Use when the user wants to perform LinkedIn outreach (send connecti
 # LinkedIn Outreach from Odoo
 
 Send personalized LinkedIn connection requests to cold leads that `/find-cold-leads`
-produced and the user imported into Odoo `mailing.contact`. This is the **LinkedIn**
+produced and imported into Odoo `mailing.contact`. This is the **LinkedIn**
 outreach channel — distinct from the email drip (`cp_mailing_drip` /
 `build_segment_mailings.py`). The lead's person LinkedIn URL comes from Apollo
 enrichment (`linkedin_url` → stored as `x_linkedin_url` on the contact).
@@ -92,7 +92,7 @@ a **two-step confirmation** built into the MCP — see step 7.
    "contacted" fields are needed — `x_lead_status` does that job. Run discovery
    (step 2) on first use to confirm the schema hasn't drifted.
 5. **Leads imported**: the user ran `/find-cold-leads`, reviewed the workbook,
-   marked `odoo_ready=yes`, and imported the Leads sheet into `mailing.contact`
+   marked `odoo_ready=yes`, and `/find-cold-leads` imported the Leads sheet into `mailing.contact`
    with `linkedin_reference_url` → `x_linkedin_url` (see `references/odoo-fields.md`
    for the full column map).
 6. **Lead pitch text sanitized at import? — sets the drafting mode, once per data source.**

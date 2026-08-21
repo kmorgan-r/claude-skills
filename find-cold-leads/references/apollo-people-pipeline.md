@@ -155,7 +155,9 @@ create. Re-query `mail.blacklist` + `mailing.contact` (and `res.partner` /
 `crm.lead` if relevant) **immediately before** each create. If the row is now
 suppressed or duplicate, skip it — do not create.
 
-Upload only after the user reviews and marks `odoo_ready=yes`.
+Upload only after the user reviews and marks `odoo_ready=yes` — see **Odoo upload
+(after user review)** below for the list-choice gate, the create steps, and the
+field map.
 
 ## Export — Excel workbook
 
@@ -187,6 +189,81 @@ Sheets:
 
 Style: header fill `1F4E78`, white bold font, `freeze_panes = "A2"`.
 
+## Odoo upload (after user review)
+
+This skill owns the import of reviewed leads into Odoo `mailing.contact`. It runs
+**only after** the user reviews the workbook and marks `odoo_ready=yes` on the rows
+to import. Upload is a CRM write to a GDPR-sensitive model — the guardrails below
+are non-negotiable.
+
+**Hard prohibitions:**
+
+- **Never create, schedule, or send an Odoo mass mailing (`mailing.mailing`) from
+  this skill.** `mailing.list.mailing_ids` links a list to mass mailings — never
+  write to it. This skill imports contacts onto a list; it never triggers a send.
+- **Never upload to Odoo before the user chooses a new or existing mailing list.**
+  Stop at the gate below and ask; do not pick a list on the user's behalf.
+- **Never unset `opt_out` on an existing subscription** (see dedup section 2).
+
+**Odoo domains are arrays, not strings.** When calling the climatepoint-odoo MCP
+`search_read` / `read`, pass `domain` as an actual array, not a JSON string:
+use `domain: [["email","=",<normalized>]]`, **not** `domain: "[[\"email\",\"=\",<normalized>]]"`.
+A stringified domain is a no-op filter that silently returns every record (or none),
+which defeats the dedup/suppression check.
+
+### Gate — choose the mailing list first
+
+Before any create, the user must pick the target `mailing.list`:
+
+1. `search_read` existing lists: `model: "mailing.list"`, `domain: [["active","=",true]]`,
+   `fields: ["id","name","contact_count","contact_count_opt_out","contact_count_blacklisted"]`.
+2. Show the user the candidates (name, size, opted-out / blacklisted counts — those
+   counts tell you whether a list is healthy or full of dead contacts).
+3. The user either picks one by name/id **or** asks for a new list. To create a new
+   list: MCP `create` `model: "mailing.list"`, `values: { "name": "<user-chosen>" }`
+   (two-step confirmation — show the code, get it back). Record the chosen `list_id`.
+
+Only after `list_id` is settled do you proceed. Do not import onto a list the user
+did not name.
+
+### Per-row import (only `odoo_ready=yes` + `suppression_status=clear` + `odoo_dupcheck=clear`)
+
+For each row the user marked importable:
+
+1. **Fresh re-check** (dedup section 3) — re-query `mail.blacklist` + `mailing.contact`
+   (+ `res.partner` / `crm.lead`) immediately before the create. If the row is now
+   suppressed or duplicate, **skip it — do not create**. State plainly which rows
+   were dropped at the gate and why.
+2. **Create `mailing.contact`** with the field map below (MCP `create`, two-step
+   confirmation per record). If a `mailing.contact` already exists for the normalized
+   email (the re-check found one), **do not create a duplicate** — reuse the existing
+   `contact_id` and go to step 3.
+3. **Create `mailing.subscription`** linking the contact to the chosen list: MCP
+   `create` `model: "mailing.subscription"`, `values: { "contact_id": <id>,
+   "list_id": <chosen list_id>, "opt_out": false }`. If a subscription to this list
+   already exists with `opt_out=true`, **leave it untouched** — never flip `opt_out`
+   back to false. A subscription that already exists and is not opted out needs no
+   action.
+
+### Field map — Leads sheet → `mailing.contact`
+
+| Leads column | `mailing.contact` field | Notes |
+|---|---|---|
+| `first_name` | `first_name` | |
+| `last_name` | `last_name` | |
+| `business_email` | `email` | Odoo normalizes → `email_normalized` automatically |
+| `job_title` | `x_job_title` | |
+| `company_name` | `company_name` | |
+| `company_country` | `country_id` | many2one — pass the country **name**; Odoo resolves it |
+| `linkedin_reference_url` | `x_linkedin_url` | person LinkedIn URL (Apollo-licensed) |
+| `seniority` | `x_seniority` | |
+| — (set on create) | `x_lead_status` | `"New"` — so downstream outreach skills see the contact as eligible |
+
+Fields not in the table (Apollo IDs, source_provider, compliance fields) have no
+`mailing.contact` column — keep them in the workbook as the audit record; do not
+invent custom columns. The compliance basis (`gdpr_legitimate_interest_basis`,
+`art14_source_notice`, `outreach_allowed_review`) stays in the workbook, not Odoo.
+
 ## Compliance lock (non-negotiable)
 
 - **Business email only** — `reveal_personal_emails=false`.
@@ -207,6 +284,11 @@ Style: header fill `1F4E78`, white bold font, `freeze_panes = "A2"`.
   `odoo_dupcheck=clear` row that is `suppression_status=suppressed` is **never**
   importable.
 - **`odoo_ready=yes` only after user review.**
+- **Odoo upload guardrails** — never create/schedule/send an Odoo mass mailing
+  (`mailing.mailing`) from this skill; never write `mailing.list.mailing_ids`; never
+  upload before the user chooses a new or existing `mailing.list`; never unset
+  `opt_out` on an existing subscription; re-check suppression/dup immediately before
+  each create. Pass Odoo domains as arrays (`domain: [[…]]`), not JSON strings.
 - Region posture (Germany strict, EU/UK, US, unknown) — see
   `source-compliance.md`. Tag `region` at search time, not from enrich `country`.
 - **Honesty rule** — state plainly in every run summary: EU/DE rows are

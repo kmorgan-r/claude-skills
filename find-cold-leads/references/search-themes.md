@@ -8,11 +8,37 @@ before running the pipeline.
 
 ## Generic B2B
 
-A neutral starting point when you haven't defined a niche yet. Use this to experiment, then refine into a custom theme based on what you find.
+A neutral starting point when you haven't defined a niche yet. Use this to experiment, then refine into a custom theme based on what you find. **This is also the fallback of record** — when any other theme omits an optional field, the agent uses the corresponding value here (see the note at the end of this file).
 
 - Sectors: any B2B company
 - Keywords: none (relies on sector + location)
 - Subthemes: Custom discovery
+
+```json
+{
+  "id": "generic-b2b",
+  "label": "Generic B2B",
+  "sectors": ["any B2B company"],
+  "keywords": [],
+  "contact_search_titles": [
+    "Chief Executive Officer",
+    "Chief Operating Officer",
+    "Vice President",
+    "Director",
+    "Head of Operations",
+    "General Manager",
+    "Procurement Manager",
+    "Supply Chain Manager"
+  ],
+  "buyer_title_terms": [
+    "chief", "vp", "vice president", "director", "head",
+    "manager", "procurement", "supply chain", "operations"
+  ],
+  "lead_signals": [],
+  "high_priority_title_terms": ["chief", "vp", "director", "head"],
+  "medium_priority_title_terms": ["manager", "procurement", "supply chain", "operations"]
+}
+```
 
 ## DPP Rollout Sectors
 
@@ -23,6 +49,46 @@ Best when looking for manufacturers and brands likely to need Digital Product Pa
 - Mattresses
 - Toys
 - Keywords: `Digital Product Passport`, `PEFCR`, `product carbon footprint`, `sustainability report`, `manufacturer`, `supplier`
+
+```json
+{
+  "id": "dpp-rollout-sectors",
+  "label": "DPP Rollout Sectors",
+  "sectors": [
+    "textiles manufacturer", "apparel manufacturer", "footwear manufacturer",
+    "furniture manufacturer", "mattress manufacturer", "toys manufacturer"
+  ],
+  "keywords": [
+    "Digital Product Passport", "PEFCR", "product carbon footprint",
+    "sustainability report", "manufacturer", "supplier"
+  ],
+  "contact_search_titles": [
+    "Head of Sustainability",
+    "Sustainability Director",
+    "Sustainability Manager",
+    "ESG Manager",
+    "Head of Procurement",
+    "Procurement Manager",
+    "Head of Product",
+    "Product Director",
+    "Compliance Manager",
+    "Supply Chain Manager",
+    "Director of Operations"
+  ],
+  "buyer_title_terms": [
+    "sustainability", "esg", "procurement", "product", "compliance",
+    "supply chain", "operations", "chief", "vp", "director", "head"
+  ],
+  "lead_signals": [
+    "Digital Product Passport", "PEFCR", "product carbon footprint",
+    "ISO 14067", "sustainability report", "supplier footprint", "scope 3"
+  ],
+  "high_priority_title_terms": ["sustainability", "esg", "procurement", "compliance"],
+  "medium_priority_title_terms": ["product", "supply chain", "operations"]
+}
+```
+
+> This is the theme the DPP pilot used (164 domains → 77 people → 25 enriched → 25/25 verified emails). The `contact_search_titles` list above is the title set that pilot searched; keep it as the source of truth for `person_titles` so the run is reproducible.
 
 ## EU Taxonomy LCA Requirements
 
@@ -37,12 +103,90 @@ Derived from the EU Taxonomy climate-delegated-act annexes (product LCA, energy 
 - Adaptation Annex LCA-style requirement: adaptation activities cross-referencing mitigation life-cycle criteria
 - Keywords: `life-cycle GHG`, `ISO 14067`, `ISO 14064-1`, `Commission Recommendation 2013/179/EU`, `third-party verification`
 
+```json
+{
+  "id": "eu-taxonomy-lca",
+  "label": "EU Taxonomy LCA Requirements",
+  "sectors": [
+    "low-carbon technology manufacturer", "hydrogen producer",
+    "chemicals manufacturer", "plastics in primary form",
+    "hydropower operator", "geothermal operator", "renewable fuels producer",
+    "digital ICT solution provider", "R&D organization"
+  ],
+  "keywords": [
+    "life-cycle GHG", "ISO 14067", "ISO 14064-1",
+    "Commission Recommendation 2013/179/EU", "third-party verification", "LCA"
+  ],
+  "contact_search_titles": [
+    "Head of Sustainability",
+    "Sustainability Director",
+    "ESG Manager",
+    "Head of R&D",
+    "R&D Director",
+    "Head of Engineering",
+    "Environmental Manager",
+    "LCA Manager",
+    "Head of Product",
+    "Chief Sustainability Officer",
+    "VP Sustainability"
+  ],
+  "buyer_title_terms": [
+    "sustainability", "esg", "r&d", "research", "engineering",
+    "environmental", "lca", "product", "chief", "vp", "director", "head"
+  ],
+  "lead_signals": [
+    "life-cycle GHG", "ISO 14067", "ISO 14064-1",
+    "Commission Recommendation 2013/179/EU", "third-party verification",
+    "life cycle assessment", "carbon footprint", "taxonomy"
+  ],
+  "high_priority_title_terms": ["sustainability", "esg", "environmental", "lca"],
+  "medium_priority_title_terms": ["r&d", "research", "engineering", "product"]
+}
+```
+
 ## Standards-Triggered Prospects
 
 Best when searching for companies already using language that maps directly to your offer.
 
 - Keywords: `ISO 14067`, `ISO 14064-1`, `PEFCR`, `product environmental footprint`, `product carbon footprint`, `third-party verified`
 - Useful source types: sustainability pages, PCF pages, annual reports, EPD pages, supplier pages, press releases
+
+```json
+{
+  "id": "standards-triggered-prospects",
+  "label": "Standards-Triggered Prospects",
+  "sectors": ["any B2B manufacturer exposed to product environmental standards"],
+  "keywords": [
+    "ISO 14067", "ISO 14064-1", "PEFCR",
+    "product environmental footprint", "product carbon footprint",
+    "third-party verified"
+  ],
+  "contact_search_titles": [
+    "Head of Sustainability",
+    "Sustainability Director",
+    "Sustainability Manager",
+    "Quality Manager",
+    "Head of Quality",
+    "Compliance Manager",
+    "Environmental Manager",
+    "Head of Product",
+    "Procurement Manager",
+    "Chief Sustainability Officer",
+    "VP ESG"
+  ],
+  "buyer_title_terms": [
+    "sustainability", "esg", "quality", "compliance", "environmental",
+    "product", "procurement", "chief", "vp", "director", "head"
+  ],
+  "lead_signals": [
+    "ISO 14067", "ISO 14064-1", "PEFCR",
+    "product environmental footprint", "product carbon footprint",
+    "third-party verified", "environmental product declaration", "EPD"
+  ],
+  "high_priority_title_terms": ["sustainability", "esg", "compliance", "environmental"],
+  "medium_priority_title_terms": ["quality", "product", "procurement"]
+}
+```
 
 ## LinkedIn-Assisted Cross-Reference
 
@@ -100,4 +244,4 @@ Then translate into a custom theme JSON with the extended schema:
 | `high_priority_title_terms` | Terms that boost title-match confidence | No |
 | `medium_priority_title_terms` | Terms that boost title-match confidence | No |
 
-Missing optional fields fall back to generic B2B defaults, so old themes without the new fields still work.
+Missing optional fields fall back to the **`generic-b2b` values above**. This is an **agent convention you apply at run time**, not an automatic code path: the pipeline has no script behind it, so there is no silent fallback — you must substitute the `generic-b2b` value yourself when a prebuilt or custom theme omits a field. If a theme omits `contact_search_titles`, use the `generic-b2b` list; **never invent buyer titles ad hoc**, or the run is not reproducible.

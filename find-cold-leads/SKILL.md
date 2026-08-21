@@ -204,6 +204,25 @@ Before handing leads to cold email or Odoo work:
    lead).
 7. Mark `odoo_ready=yes` only after user review.
 
+## Odoo Upload (after review)
+
+This skill owns the import of reviewed leads into Odoo `mailing.contact`. Full
+procedure (list-choice gate, create steps, field map, domain-array gotcha) is in
+`references/apollo-people-pipeline.md` → **Odoo upload (after user review)**. Hard
+rules:
+
+- **Never create, schedule, or send an Odoo mass mailing (`mailing.mailing`) from
+  this skill**, and never write `mailing.list.mailing_ids`. This skill imports
+  contacts onto a list; it never triggers a send.
+- **Never upload to Odoo before the user chooses a new or existing mailing list.**
+  Stop and ask; do not pick a list on the user's behalf.
+- Import only rows that are `odoo_ready=yes` **and** `suppression_status=clear`
+  **and** `odoo_dupcheck=clear`. Re-run the suppression/dup check immediately
+  before each create; skip rows that changed.
+- **Never unset `opt_out` on an existing subscription.**
+- Pass Odoo domains as arrays (`domain: [[…]]`), not JSON strings
+  (`domain: "[[…]]"`).
+
 ## Custom Theme JSON
 
 Use a custom theme file when the prebuilt themes are too broad. The JSON feeds
@@ -302,6 +321,11 @@ matching.
   (`mail.blacklist` + `mailing.contact` + `res.partner` + `crm.lead`) before
   upload. A blacklisted / opted-out contact is never re-targeted —
   `suppression_status=suppressed` overrides a clear `odoo_dupcheck`.
+- **Odoo upload is gated** — never create/schedule/send a mass mailing
+  (`mailing.mailing`) from this skill; never upload before the user chooses a new
+  or existing `mailing.list`; never unset `opt_out` on an existing subscription;
+  re-check suppression/dup immediately before each create. Pass Odoo domains as
+  arrays, not JSON strings.
 - Keep source evidence and the Stage Q tier in the workbook.
 - Do not claim outreach compliance; prepare leads for human review.
   `outreach_allowed_review` stays `needs review`; `odoo_ready=yes` only after the
