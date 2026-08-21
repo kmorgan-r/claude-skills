@@ -32,7 +32,7 @@ conservative EU posture.
 | **US** | `n/a (opt-out)` | `ok with working unsubscribe + sender ID` | CAN-SPAM: named-email outreach defensible with unsubscribe + accurate identity. |
 | **Unknown** | `unknown` | `needs review` | Conservative EU default. |
 
-`compliance_fields()` in the legacy crawler script applied this; the Apollo
+`compliance_fields()` in the removed crawler script applied this; the Apollo
 pipeline applies the same posture when it builds the Leads sheet.
 
 ## GDPR specifics for EU rows

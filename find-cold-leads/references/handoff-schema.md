@@ -6,9 +6,10 @@ maps them to the `climatepoint-contact-intelligence` classifier's columns.
 
 - **Primary (Apollo MCP):** the agent runs the pipeline via MCP tools and maps
   the enriched result to the classifier's columns (below).
-- **Legacy (open web):** `scripts/lead_crawler.py` is no longer the skill's path
-  and is left dormant on disk. Its `LEAD_COLUMNS` schema is preserved here for
-  reference only, in case old workbooks are fed to the classifier.
+- **Legacy (open web):** `scripts/lead_crawler.py` was removed when the skill
+  moved to the Apollo pipeline; there is no crawler on disk to fall back to or
+  inspect. Its `LEAD_COLUMNS` schema is preserved here for reference only, in
+  case old workbooks produced before the switch are fed to the classifier.
 
 ## Legacy Mode O workbook (`LEAD_COLUMNS`) — reference only
 
@@ -29,8 +30,8 @@ To feed the classifier, save the Leads sheet to CSV and map columns
 
 ## Apollo `apollo_people_bulk_match` → classifier column map
 
-The agent applies this mapping (Apollo enrichment is MCP/agent-driven; there is
-no helper in the script):
+The agent applies this mapping (Apollo enrichment is MCP/agent-driven; there
+is no helper script — the mapping is done inline by the agent):
 
 | Classifier column | Apollo field |
 |---|---|
