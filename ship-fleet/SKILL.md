@@ -298,7 +298,7 @@ worktree while another tree has the branch checked out). In order:
      "pr": null,
      "phase": "<plan-review|spec-review>",
      "status": "in-progress",
-     "focus_next": "<one sentence for the seeded phase, e.g. 'P3: reviewing-plans auto double-pass on the plan.'>",
+     "focus_next": "<one sentence for the seeded phase, e.g. 'P3: reviewing-plans auto on the plan, then the severity-gated --diff pass.'>",
      "phase_log": [ { "phase": "init", "result": "fleet-seeded worktree from origin/<DEFAULT_BRANCH>" } ],
      "blockers": [],
      "test_paths": [],
