@@ -20,7 +20,7 @@ any `/clear` or auto-compact via a state file.
 > Preserved during auto-compaction. After ANY compaction, immediately:
 > 1. Read `.claude-ship-state.json` (repo root).
 > 2. Resume at `phase` using `focus_next`.
-> 3. Preserve: `topic`, `branch`, `phase`, `status`, `pr`, `plan`, `blockers`, `db_gate`.
+> 3. Preserve: `topic`, `branch`, `phase`, `status`, `pr`, `plan`, `blockers`, `db_gate`, `review_passes`.
 > If `phase == "fix-pr-reviews"`, the loop internals belong to fix-pr-reviews
 > (`.claude-pr-fix-state.json`) — defer to it; re-enter with `--loop --continue`.
 > If `status == "awaiting-db-gates"`, the P6.5 DB gate was deferred — surface
@@ -93,13 +93,21 @@ Repo-root JSON, gitignored (P0 adds the `.gitignore` entry), single active pipel
   "phase_log": [ { "phase": "init", "result": "branch created" } ],
   "blockers": [],
   "test_paths": [],
-  "db_gate": null
+  "db_gate": null,
+  "review_passes": { "spec-review": 0, "plan-review": 0 }
 }
 ```
 
 `test_paths` is the explicit list of test files the P4 gate runs (see P4). It is
 populated during P4 and persists so a post-compaction resume never has to
 re-infer it (and therefore never falls back to the full, always-failing suite).
+
+`review_passes` counts **applying** review passes per review phase, so the two-pass
+ceiling (P1/P3) survives `/clear` and auto-compaction. It increments **at dispatch,
+not at commit** — a `--diff` pass that applies nothing has still consumed its slot;
+incrementing on commit would leave the counter at 1 after an empty pass 2, weakening
+the recursion guard exactly where the guards make an empty pass most likely. A
+read-only verification dispatch that neither edits nor commits does NOT increment it.
 
 `db_gate` records the P6.5 decision + outcome (`null` until P6.5 runs; then
 `{ "decision": "apply-now|defer|abort", "status": "applied|deferred|acked",
@@ -180,21 +188,89 @@ Advance to P1.
 
 ### P1 spec-review
 
-Invoke `reviewing-plans` via the Skill tool **with the `auto` argument**, pointed
-at the design doc (`spec`) — invoke reviewing-plans auto mode via args
-`auto <spec-path>`. Auto mode applies ALL findings without pausing and returns a
-summary (see the reviewing-plans auto contract). After it returns, run it once
-more in `auto` mode (re-review). If any **unresolved CRITICAL** finding remains
-after auto-apply → set `status:"blocked"`, append it to `blockers`, stop.
-Also block on reviewer-coverage failure, read from the `REVIEWERS: X/N succeeded
-(failed: …)` line reviewing-plans emits in its auto summary:
-- **Total failure** (`REVIEW FAILED` / `0/N`) — a zero-findings result from total
-  failure is NOT a clean review.
-- **Partial failure that guts coverage** — block if fewer than 2 reviewers
-  succeeded, OR fewer than half of those dispatched succeeded, OR either always-on
-  reviewer (General Quality / Test Quality) is in the failed list. A hands-off
-  conductor cannot judge which silently-failed domain mattered, so an
-  under-covered review is treated as no review, not a clean one.
+**Before any dispatch, read the ceiling.** If `review_passes["spec-review"] >= 2` →
+`status:"blocked"`, blocker `P1 review ceiling reached (2 applying passes); resolve manually`,
+stop. This guards EVERY applying dispatch, not just the second one — a conductor resumed
+after compaction re-enters this phase at the top, and without the check here it would
+dispatch a third pass unconditionally, which is the exact scenario `review_passes` exists
+for. A state file written by a pre-change `/ship` has no `review_passes` key; read an absent
+key as `0`.
+
+Then invoke `reviewing-plans` via the Skill tool with args `auto --max-reviewers 3 <spec-path>`,
+and increment `review_passes["spec-review"]` at dispatch. Auto mode applies findings without
+pausing — **subject to reviewing-plans' guards, so "all findings" is not the same as "all
+findings written"** — and returns a summary opening with two machine-readable lines
+(`REVIEWERS:` then `FINDINGS:`). P1 uses a 3-reviewer panel; P3 uses the default 5.
+
+Then follow the **pass sequence** below. It is authoritative, and it is what a
+conductor resumed from the state file executes, not only a fresh one.
+
+1. **Coverage gate FIRST**, read from `REVIEWERS: X/N succeeded (failed: …) [models]`:
+   - **Total failure** (`REVIEW FAILED` / `0/N`) — a zero-findings result from total
+     failure is NOT a clean review. **This branch applies to every pass, including
+     `--diff`.**
+   - **Quorum failure** — block if fewer than 2 reviewers succeeded, OR fewer than
+     half of those dispatched succeeded, OR either always-on reviewer (General
+     Quality / Test Quality) is in the failed list.
+   - **N=3 rule (P1 only)** — block when the succeeding set is exactly the two
+     always-on reviewers *and* a conditional reviewer was dispatched and failed. At
+     N=5 the "half of dispatched" rule already guarantees a surviving conditional
+     reviewer; at N=3 it does not, and without this rule a P1 review with zero domain
+     coverage would pass a gate that today blocks.
+   Any of these → `status:"blocked"`, `rereview:"blocked-before-decision"`, **append the
+   verbatim `REVIEWERS:` and `FINDINGS:` lines plus which branch fired to `blockers`**,
+   stop. **Do NOT run `--diff`** — running the cheap branch after an under-covered pass 1
+   would let a clean `1/1` launder a `1/5` fan-out into a pass.
+2. **Unresolved CRITICAL** — `unresolved_critical = reported_C − applied_C −
+   downgraded_critical` (from the `FINDINGS:` line). `> 0` → `status:"blocked"`,
+   `rereview:"blocked-before-decision"`, **append the verbatim text of every unresolved
+   CRITICAL finding to `blockers`**, stop. This runs BEFORE the skip-or-diff
+   decision, so a blocking CRITICAL is never reached by the cheap branch.
+   **Precedence:** if `FINDINGS:` is malformed AND leaves CRITICALs unaccounted for,
+   this step wins over the fail-safe in step 3a — block, do not re-review.
+3. **Decide the second pass.** First matching row wins:
+
+   | # | Condition | Decision | `rereview` |
+   |---|-----------|----------|------------|
+   | a | `FINDINGS:` absent, unparseable, or violating a conservation identity (no unaccounted CRITICAL) | run `--diff` | `diff-on-parse-failure` |
+   | b | `downgraded_critical > 0` | run `--diff`, and copy the downgraded findings verbatim into `phase_log` | `diff-on-guard-counter` |
+   | c | `dropped_unevidenced > reported_total / 3` AND `applied_total > 0` | run `--diff`, log `WARNING: guard (a) dropped <n>/<total> findings` | `diff-on-guard-counter` |
+   | d | `dropped_unevidenced > reported_total / 3` AND `applied_total == 0` | `status:"blocked"`, append the dropped-finding count and both lines to `blockers`, stop | `blocked-before-decision` |
+   | e | `applied_total > 0` | run `--diff` | `diff` |
+   | f | otherwise | skip | `skipped` |
+
+   Row a never skips on an unreadable signal — mirroring P6's "unrecognized output →
+   block" rule. Row d blocks rather than forcing a pass because at zero applied edits
+   there is no apply-commit, no diff and no applied-findings list, so `--diff` would
+   review nothing and return a clean `1/1`, defeating the very mitigation it is.
+   Row e includes MINOR findings deliberately: an Opus MINOR is still auto-applied
+   and still mutates the file, so gating on C/I only would let a plan change with no
+   re-review.
+4. **Ceiling check before dispatch.** If a row a/b/c/e decision would dispatch while
+   `review_passes["spec-review"] >= 2` → `status:"blocked"`, append the decision row
+   and both lines to `blockers`, stop. A force that cannot run is an unreadable
+   signal, and the conductor must not take the cheap branch on one.
+5. If `--diff` ran (`auto --diff <spec-path>`; increment `review_passes` again):
+   apply the coverage gate's **total-failure branch only** — a `1/1` result is
+   correct for this mode and must not trip the quorum thresholds — then re-check
+   unresolved CRITICAL. Either → `status:"blocked"` + `blockers`, stop. Else advance.
+   If pass 1's applied-findings list and diff were lost to compaction, re-derive both
+   from the `docs: apply review findings to <file>` commit pass 1 produced
+   (`git show`) rather than dispatching `--diff` with empty inputs.
+
+Append to `phase_log` for this phase: the verbatim `REVIEWERS:` and `FINDINGS:`
+lines, `panel_size`, `claude_md_sections` (the named CLAUDE.md sections
+reviewing-plans reported extracting; omit if that skill has not yet been updated),
+and `rereview` (one of `skipped`, `diff`, `diff-on-parse-failure`,
+`diff-on-guard-counter`, `blocked-before-decision`).
+
+`panel_size` is **the number of reviewers actually dispatched** — the count of entries
+in the `REVIEWERS:` line's model bracket, not the cap that was passed. A run matching
+no conditional domain signal legitimately dispatches 2 under `--max-reviewers 3`.
+
+Record `rereview` **positively** — inferring a skip from a missing line is
+indistinguishable from an interrupted state write.
+
 Otherwise update state (`phase:"writing-plans"`) and advance.
 
 ### P2 writing-plans
@@ -207,12 +283,29 @@ via the Skill tool; ignore any auto-chain into execution. Record the plan path i
 
 ### P3 plan-review
 
-Invoke `reviewing-plans` via the Skill tool in auto mode via `auto <plan-path>` arguments.
-Re-review once in auto mode. Unresolved CRITICAL after auto-apply →
-`status:"blocked"` + stop. Apply the **same reviewer-coverage gate as P1** (read
-`REVIEWERS: X/N succeeded`): block on total failure, on fewer than 2 succeeding,
-on fewer than half of those dispatched succeeding, or on either always-on reviewer
-failing. Otherwise advance to P4.
+**Before any dispatch, read the ceiling.** If `review_passes["plan-review"] >= 2` →
+`status:"blocked"`, blocker `P3 review ceiling reached (2 applying passes); resolve manually`,
+stop. This is P1's preamble restated, NOT cross-referenced — it sits outside P1's numbered
+pass sequence, so the "same pass sequence as P1 (steps 1–5)" reference below does not carry
+it, and step 4's ceiling check guards only the `--diff` dispatch, never this first
+full-panel one. A conductor resumed after compaction re-enters this phase at the top, and
+without the check here it would dispatch a third pass unconditionally. A state file written
+by a pre-change `/ship` has no `review_passes` key; read an absent key as `0`.
+
+Then invoke `reviewing-plans` via the Skill tool with args `auto <plan-path>` — the
+default 5-reviewer panel, NOT P1's `--max-reviewers 3` — and increment
+`review_passes["plan-review"]` at dispatch. Plans are far larger than
+specs and P3 is the pipeline's last full-panel look before implementation.
+
+Then run the **same pass sequence as P1** (steps 1–5 there), against
+`review_passes["plan-review"]`, with one difference: the **N=3 rule does not apply**
+at P3, because P3 dispatches 5 and the "half of dispatched" threshold already
+guarantees a surviving conditional reviewer. Everything else — the total-failure
+branch applying to every pass including `--diff`, the unresolved-CRITICAL check
+before the decision, the decision table, the ceiling check, and the `phase_log`
+fields — is identical.
+
+Otherwise advance to P4.
 
 ### P4 implementation
 
