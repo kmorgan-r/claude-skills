@@ -16,7 +16,7 @@ This skill reviews an implementation plan before execution. It dispatches 2-5 do
 ## Non-Interactive `auto` Mode
 
 If invoked with an `auto` (or `--auto-apply`) argument, run NON-INTERACTIVELY:
-- **Step 4:** Do NOT wait for user input. Treat the selection as **"all"** — consider every finding (Critical, Important, AND Minor) for application. "All" means no human triage; it does NOT mean every finding is written. Once the Step 4a guards exist, some findings are withheld or dropped. What was actually written is reported on the `FINDINGS:` line, never inferred.
+- **Step 4:** Do NOT wait for user input. Treat the selection as **"all"** — consider every finding (Critical, Important, AND Minor) for application. "All" means no human triage; it does NOT mean every finding is written. The Step 4a guards withhold or drop some of them. What was actually written is reported on the `FINDINGS:` line, never inferred.
 - **Step 6:** Do NOT offer an execution hand-off or ask a question. After committing the fixes, return a one-paragraph summary and stop. The summary MUST open with TWO structured lines, in this exact order — `REVIEWERS:` then `FINDINGS:` (both defined in Step 4) — so a conductor can gate on review *coverage* AND on what was actually applied. A partial reviewer failure or a guard-suppressed finding must be machine-detectable, not absorbed silently into the findings.
 - All other steps (reviewer selection, pre-read, dispatch, consolidate, apply, commit) run as normal.
 This mode exists so a conductor skill (e.g. /ship) can run reviewing-plans hands-off. When the argument is absent, behavior is unchanged.
@@ -258,9 +258,11 @@ After all reviewers return:
      | `dropped_unevidenced` | findings dropped for lacking an `Evidence:` citation |
      | `downgraded_critical` | unevidenced CRITICALs downgraded to IMPORTANT rather than dropped |
 
-   **Until the Step 4a guards exist, the last three fields are always `0`.** Emit
-   them anyway — the contract must be in place before anything can make a finding
-   vanish, or the summary would silently overstate what landed.
+   **Emit all five fields on every run, including when the last three are `0`.** The
+   Step 4a guards populate them; a run in which nothing was withheld, dropped, or
+   downgraded still prints explicit zeros. A summary that omitted the very fields
+   recording what vanished would silently overstate what landed, and a conductor
+   reads a missing field as a malformed line.
 
    **Conservation — two identities and one constraint.** A line violating any of
    them is malformed, and a conductor treats it as unparseable:
