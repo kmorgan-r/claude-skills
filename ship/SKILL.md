@@ -283,8 +283,18 @@ via the Skill tool; ignore any auto-chain into execution. Record the plan path i
 
 ### P3 plan-review
 
-Invoke `reviewing-plans` via the Skill tool with args `auto <plan-path>` — the
-default 5-reviewer panel, NOT P1's `--max-reviewers 3`. Plans are far larger than
+**Before any dispatch, read the ceiling.** If `review_passes["plan-review"] >= 2` →
+`status:"blocked"`, blocker `P3 review ceiling reached (2 applying passes); resolve manually`,
+stop. This is P1's preamble restated, NOT cross-referenced — it sits outside P1's numbered
+pass sequence, so the "same pass sequence as P1 (steps 1–5)" reference below does not carry
+it, and step 4's ceiling check guards only the `--diff` dispatch, never this first
+full-panel one. A conductor resumed after compaction re-enters this phase at the top, and
+without the check here it would dispatch a third pass unconditionally. A state file written
+by a pre-change `/ship` has no `review_passes` key; read an absent key as `0`.
+
+Then invoke `reviewing-plans` via the Skill tool with args `auto <plan-path>` — the
+default 5-reviewer panel, NOT P1's `--max-reviewers 3` — and increment
+`review_passes["plan-review"]` at dispatch. Plans are far larger than
 specs and P3 is the pipeline's last full-panel look before implementation.
 
 Then run the **same pass sequence as P1** (steps 1–5 there), against

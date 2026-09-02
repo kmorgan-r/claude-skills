@@ -295,7 +295,8 @@ After all reviewers return:
    conductor that receives no `FINDINGS:` line must assume the worst and re-review,
    so omitting it on the clean path would make the cheapest case behave like the
    most expensive one.
-2a. **Apply the guards (Step 4a).** Run these after dedup and before sorting. They
+3. **Deduplicate**: If two reviewers flag the same issue (same task + same root cause), keep the one with higher severity and more specific fix.
+3a. **Apply the guards (Step 4a).** Run these after dedup and before sorting. They
    are what make `reported` and `applied` differ, and their counts go on the
    `FINDINGS:` line.
 
@@ -318,7 +319,6 @@ After all reviewers return:
 
    Both guards leave `reported` untouched — it is the pre-guard count by definition.
 
-3. **Deduplicate**: If two reviewers flag the same issue (same task + same root cause), keep the one with higher severity and more specific fix.
 4. **Sort**: CRITICAL first, then IMPORTANT, then MINOR.
 5. **Present** the summary to the user:
 
