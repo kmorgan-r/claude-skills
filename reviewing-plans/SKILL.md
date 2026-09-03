@@ -225,11 +225,25 @@ After all reviewers return:
    `(failed: <reviewer names>)`. This is the machine-readable signal a conductor
    (e.g. /ship) gates on — **partial failure must not be silently absorbed into the
    findings.** Then:
-   - *Some but not all* reviewers failed → note it, list the failed names on the
-     `REVIEWERS:` line, and proceed with the available findings. The summary still
-     reports findings, but the `X/N` line tells the caller coverage was degraded —
+   - *Some but not all* reviewers failed → **re-dispatch the failed reviewers once,
+     before emitting the `REVIEWERS:` line.** Re-dispatch only the reviewers named in
+     the failed list, with their original prompts and models; merge any findings they
+     return into the existing set and re-evaluate coverage. This is a retry, not a
+     repair: nothing is edited, and the same operation runs again because the first
+     failure was transient — a rate limit, a timeout. Retry at most once; a second
+     failure of the same reviewer is not transient.
+
+     If coverage is still short after the retry: note it, list the still-failed names
+     on the `REVIEWERS:` line, and proceed with the available findings. The summary
+     still reports findings, but the `X/N` line tells the caller coverage was degraded —
      4 of 5 domain reviewers timing out is NOT the same as a clean review, and a
      hands-off conductor needs that distinction to block.
+
+     The `REVIEWERS:` line reports the **post-retry** counts, and its bracket still
+     lists every reviewer originally dispatched. A retried-and-succeeded reviewer is
+     counted once, not twice — a double count would inflate `X` and could satisfy a
+     conductor's coverage gate on a panel that is still short, turning a retry meant
+     to improve coverage into one that launders it.
    - *ALL* reviewers failed (zero usable responses) → **do NOT proceed.** A 0/0/0
      findings summary here means "review did not run," not "plan is clean." In
      interactive mode, report the total failure and stop. In `auto` mode, return a
