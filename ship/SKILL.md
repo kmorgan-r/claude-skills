@@ -39,19 +39,46 @@ Read `.claude-ship-state.json`:
   <topic>" and stop.
 - **Present and `status == "blocked"`** → surface the blocker(s) verbatim and ask
   the user to clear them. Do NOT silently re-run or skip the failed phase.
-  If the human explicitly confirms the blocker is cleared, **set `repair` back to
-  `null`** — which the schema defines as `attempt: 0`, `budget_used: 0`, `history: []` —
-  log the reset to `phase_log`, **clear `blockers`** (the reconciliation exits above append
-  paths there, and this branch surfaces them verbatim, so a stale entry would resurface
-  beside the next unrelated block), and return `status` to `in-progress`. Human intervention
-  earns fresh retries. Reset the whole block, not just `budget_used` and `history`: a cap
-  block leaves `attempt` at 2 and `phase` unchanged, so a partial reset would find the
-  same phase on re-entry, perform no `attempt` reset, and block again having dispatched
-  nothing. The reset must hang on
+  On explicit human confirmation that the blocker is cleared, **clear `blockers`** (the
+  reconciliation exits above append paths there, and this branch surfaces them verbatim,
+  so a stale entry would resurface beside the next unrelated block), log the clear to
+  `phase_log`, and return `status` to `in-progress`.
+  **Set `repair` back to `null` only when `repair.blocked_by_repair` is true** — the
+  marker the repair machinery writes when IT is what blocked (see Repair).
+  Human intervention earns fresh retries, and `null` is what buys them: the schema
+  defines it as `attempt: 0`, `budget_used: 0`, `history: []`. Reset the whole block, not
+  just `budget_used` and `history`: a cap block leaves `attempt` at 2 and `phase`
+  unchanged, so a partial reset would find the same phase on re-entry, perform no
+  `attempt` reset, and block again having dispatched nothing.
+  **Most blocks are not repair's, and those leave `repair` exactly as they found it.** A
+  P0 precondition failure, a branch mismatch, a P1/P3 ceiling or coverage block, the P4
+  zero-verification guard, a P6 `Max Iterations Reached`, a P6.5 DB-gate halt — clearing
+  any of them says nothing about the failure a repair already proved it could not fix.
+  Resetting there would hand the global budget a fresh 5 on every unrelated human-clear
+  cycle and wipe the same-signature ratchet's memory, so the next dispatch re-runs the
+  identical repair against the identical failure. Both limits would then be bounded only
+  by how many unrelated blocks a pipeline happens to hit, which is no bound at all.
+  Route on the marker, never on the blocker text: at P1/P3 `blockers` carries the
+  verbatim text of a CRITICAL finding, and in a repo whose subject is repair that text
+  contains the word freely. Route on it positively, too — `blocked_by_repair` absent
+  reads as `false` and resets nothing, which errs toward keeping `budget_used` charged
+  and is a no-op wherever `repair` is already `null`. If a repair-originated halt ever
+  reaches this branch unmarked the symptom is visible rather than silent: the clear
+  resets nothing, the same halt re-presents, and the block it raises this time carries
+  the marker, so the following clear does reset. A cap block that re-blocks having
+  dispatched nothing means a block site is missing its marker write.
+  The clear must hang on
   that explicit confirmation and nothing else: this branch is a dead end and there is
   no `/ship resume` verb, so on a later re-invoke ship sees an ordinary `in-progress`
-  state and cannot detect the blocked→cleared transition at all. After the reset,
-  continue at the handler for `phase` in this same invoke — do not reset and stop.
+  state and cannot detect the blocked→cleared transition at all. Then
+  continue at the handler for `phase` in this same invoke — do not clear and stop — but
+  route in as a fresh invoke would: if `repair.in_flight` is true, run the
+  interrupted-repair reconciliation below FIRST. That routing is load-bearing only now
+  that the reset is scoped: the reconciliation exits deliberately do NOT set the marker,
+  so a cleared stray-commit or residue block keeps the `in_flight`, `base_sha` and
+  `touched_paths` a re-entered reconciliation reads — and without this clause the
+  pipeline would resume the phase with `in_flight` still true and fire that
+  reconciliation on a later invoke against a tree the phase has since moved on from.
 - **Present and `status == "awaiting-db-gates"`** → the P6.5 DB gate was deferred
   LOUDLY, not silently. This ack authorizes a PRODUCTION DB write/deploy, so FIRST
   run `git branch --show-current`; if it ≠ state `branch` → warn about the mismatch,
@@ -212,6 +239,7 @@ A `null` block reads as `attempt: 0`, `budget_used: 0`, `history: []`. Shape:
       "budget_used": 1,
       "in_flight": true,
       "base_sha": "9f47c3c1b2...",
+      "blocked_by_repair": false,
       "touched_paths": ["src/foo.ts"],
       "created_paths": [],
       "on_resolved": "step3",
@@ -222,7 +250,9 @@ A `null` block reads as `attempt: 0`, `budget_used: 0`, `history: []`. Shape:
 `attempt` counts attempts at the CURRENT halt point and resets on a change of
 `repair.phase` and on nothing else — a signature-based reset makes the cap of 2
 unreachable and deadlocks it against the ratchet. `budget_used` counts agent
-dispatches across the whole pipeline and never resets on its own. `touched_paths`
+dispatches across the whole pipeline and never resets on its own — the one exception is
+First action's blocked branch, and only for a block the repair machinery itself raised
+(`blocked_by_repair`); an unrelated halt cleared by a human leaves it charged. `touched_paths`
 and `created_paths` are written by `ship-repair` BEFORE the agent is dispatched,
 because an interrupted repair writes nothing afterwards and the resume path needs
 them to reconcile the tree. `in_flight` is cleared on every terminal verdict.
@@ -232,6 +262,13 @@ gate-weakening scan's inputs, so the scan would return no hits on a diff it neve
 read — and the reconciliation below reads it to tell a landed repair from a stray
 agent commit. It is written in the same state write as `in_flight`, so the two are
 never present without each other.
+`blocked_by_repair` is the marker First action's blocked branch routes on. `true` means
+this pipeline's `status:"blocked"` was raised by the repair machinery itself, and only then
+does a human clear reset `repair` to `null`; absent reads as `false`. The five sites that
+set it are named in Repair. First action's reconciliation exits are deliberately NOT among
+them: their blocks are repair-caused, but a clear must not wipe the `in_flight`, `base_sha`
+and `touched_paths` a re-entered reconciliation reads, and reconciliation does its own
+bookkeeping — the attempt decrement — rather than a wholesale reset.
 `on_resolved` is written at dispatch by the P1/P3 hooks — `"step3"` by the first,
 `"advance"` by the second — and records what a later `RESOLVED: yes` is supposed to
 mean. P4 leaves it unset. EVERY site that appends a `history` entry copies it onto that
@@ -899,6 +936,18 @@ dispatch, never a retry of the check. A `null` `repair` block reads as
    failure and compare against every entry in `repair.history`. A match means the
    previous repair changed nothing that mattered → block immediately, no attempt,
    no budget spend.
+
+**Every block raised by the repair machinery sets `repair.blocked_by_repair: true` in the
+same state write that sets `status:"blocked"`** — the cap, budget and ratchet blocks above,
+and the `refused` and unparseable-verdict blocks in Verdict handling below. Those five are
+the whole list. The marker is the only thing that authorizes First action's blocked branch
+to reset `repair` on a human clear, so a site that blocks without it silently carries a
+spent budget and a full ratchet across the clear, while a site that sets it outside this
+list hands the budget a free refill. Each of the five can only fire with a non-`null`
+`repair` block to write into — cap, budget and ratchet all read values a `null` block does
+not have, and the two verdict blocks follow a dispatch that wrote one. First action's
+reconciliation exits raise repair-caused blocks and deliberately do NOT set it; the schema
+says why.
 
 **On dispatch, ship writes ALL of the following before invoking `ship-repair`:**
 `repair.phase` = this halt's phase; `repair.attempt` = previous + 1; the computed
