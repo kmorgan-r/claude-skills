@@ -955,6 +955,13 @@ Signature normalization:
 | P4 exit gate: `lint`, `check:types`, or scoped `vitest run <test_paths>` fails | `sonnet` | 2 |
 | P1/P3 unresolved CRITICAL after auto-apply | `fable` | 2 |
 
+The split runs opposite to cost: the mechanical P4 case takes the smaller model, and the
+judgment-laden P1/P3 case takes a frontier one (`fable` = `claude-fable-5`, the tier this
+environment uses for whole-branch final reviews). A weak model at P1/P3 rubber-stamps by
+rewording a document until the CRITICAL's objection stops matching, and `ship-repair`'s
+scan cannot catch that — its rule 5 fires on a deleted section, not a weakened one. See
+`ship-repair` §4's model table for the full rationale.
+
 ### Tier 3 — human, permanently
 
 P6.5 DB gate; P7 merge; the P4 zero-verification guard (both cases); P6 `Max

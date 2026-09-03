@@ -132,7 +132,7 @@ on the phase, not on attempt number:
 | Phase | Model | Why |
 |---|---|---|
 | `implementation` (P4) | `sonnet` | Mechanical work against a concrete error string — a failing lint rule, type error, or test assertion. |
-| `spec-review` / `plan-review` (P1/P3) | `fable` | The agent is editing a document against a reviewer's judgment, not against a compiler. A weak model here tends to rubber-stamp by rewording the plan or spec until the CRITICAL finding's objection no longer textually matches, which is worse than blocking. |
+| `spec-review` / `plan-review` (P1/P3) | `fable` | The agent is editing a document against a reviewer's judgment, not against a compiler. A weak model here tends to rubber-stamp by rewording the plan or spec until the CRITICAL finding's objection no longer textually matches, which is worse than blocking. **That danger is the argument FOR this row's model, not against it:** `fable` is a Claude 5 frontier model (`claude-fable-5`) — the tier this environment dispatches for whole-branch final reviews — so the split runs opposite to cost, with the *cheaper* mechanical case taking the smaller model. §5 cannot cover for a weaker choice: rule 5 fires on a **deleted** task or section, and nothing fires on a requirement watered down until the objection stops matching. |
 
 Before dispatching, compute the agent's **authorization scope** — the files
 it may create or modify. This must stay narrow, since it is the boundary
