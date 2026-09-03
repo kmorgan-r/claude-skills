@@ -84,14 +84,16 @@ real change, **err wide**:
 - **implementation (P4):** the union of (a) every path under the top-level
   `test_paths` key, (b) the failing file(s) named in `repair.signature` /
   `repair.failure`, if any could be parsed, and (c) — whenever (b) is empty
-  and §4's fallback authorization therefore fires — the same branch-diff
-  fallback set §4 computes (`git diff --name-only <default_branch>...HEAD`
-  filtered to exclude `*.test.*` / `*.spec.*`). Compute the fallback set (c)
-  once, before writing `touched_paths`, and reuse that exact result as both
-  this manifest's third component and §4's authorization scope — never
-  derive it twice, since a second derivation could disagree with the first
-  if the branch changed in between. `created_paths`: empty unless a new file
-  is already anticipated.
+  and §4's fallback authorization therefore fires — the branch-diff set §4
+  computes (`git diff --name-only <default_branch>...HEAD`), taken here
+  **unfiltered**. Compute that set once, before writing `touched_paths`, and
+  derive both widths from that single result — this manifest takes it whole,
+  §4's authorization scope takes only its code-shaped subset — never derive
+  it twice, since a second derivation could disagree with the first if the
+  branch changed in between. Taking the whole set here is what makes the
+  superset invariant below hold by construction rather than by inspection:
+  the narrow list is a subset of the wide one because it is computed from
+  it. `created_paths`: empty unless a new file is already anticipated.
 - **spec-review / plan-review (P1/P3):** the single spec or plan file this
   repair was dispatched against. `created_paths`: empty.
 
@@ -136,14 +138,21 @@ rule 6 (§5) and the human reviewing a `refused` verdict both depend on:
 
 - **implementation (P4):** the failing file(s) named in `repair.failure` (the
   `<file>:<line>` the check reports). If no file can be parsed out of the
-  failure text, fall back to the set of source files changed on this branch —
-  `git diff --name-only <default_branch>...HEAD` filtered to exclude
-  `*.test.*` / `*.spec.*` paths — computed once and reused as §3's
-  reconciliation-manifest component (c), per the invariant there. **Never**
-  fall back to `test_paths`: authorizing the agent to edit only test files
-  hands it exactly the fix the scan exists to catch — an unparseable lint or
-  type failure "fixed" by changing the tests instead of the source under
-  test. If the filtered branch diff is also empty, do not guess:
+  failure text, fall back to the files changed on this branch —
+  `git diff --name-only <default_branch>...HEAD`, computed once per §3's
+  invariant and used at two widths: §3's reconciliation-manifest component
+  (c) takes the whole set, while this authorization scope takes only its
+  **code-shaped** paths — excluding `*.test.*` / `*.spec.*` and everything
+  document-shaped. **Never** fall back to `test_paths`: authorizing the agent
+  to edit only test files hands it exactly the fix the scan exists to catch —
+  an unparseable lint or type failure "fixed" by changing the tests instead
+  of the source under test. Excluding document-shaped paths is that same
+  argument one artifact over: a code gate is never legitimately repaired by
+  rewriting the plan that motivated the code, and without the exclusion rule
+  6 would authorize exactly that on any branch that also changed docs. The
+  exclusion binds the fallback only — a failure that names a document path
+  authorizes it, because there the check itself identified the file. If the
+  filtered branch diff is empty, do not guess:
   `REPAIR: refused — cannot determine repair scope`.
 - **spec-review / plan-review (P1/P3):** the single spec or plan file
   dispatched against — the same file as the reconciliation manifest, since
@@ -276,11 +285,16 @@ satisfying the gate by disabling it.
    requirement or table row may be removed. Either way, removing the task
    or requirement a reviewer objected to is the plan-side equivalent of
    deleting a failing test.
-6. **Out-of-scope path touched by a document repair** — a P1/P3 repair's diff
-   may touch only the spec or plan file it was dispatched against. Any other
-   path means refuse. A repair asked to resolve a reviewer's objection to a
-   plan has no business editing source, and this rule is what makes rule 5's
-   narrow scope safe rather than merely narrow.
+6. **Out-of-scope path touched, at either phase** — the diff may touch only
+   the paths in the **authorization scope** §4 computed for this repair: at
+   P1/P3 the single spec or plan file dispatched against; at P4 the failing
+   file(s) parsed from `repair.failure`, or the code-shaped branch-diff
+   fallback when none could be parsed. Any other path means refuse. This is
+   the rule that makes the narrow authorization scope a boundary rather than
+   a request — §3 and §4 both call it one, and nothing else here checks it.
+   At P1/P3 it is also what makes rule 5's narrow scope safe rather than
+   merely narrow: a repair asked to resolve a reviewer's objection to a plan
+   has no business editing source.
 
 **Classifying a path as code-shaped or document-shaped.** A path is
 **document-shaped** if it is the spec or plan file this repair was dispatched
@@ -292,17 +306,24 @@ false-positive on it.
 
 **Scope every rule by the paths the diff actually touches, not by the
 repairing phase.** Rules 1–4 run against any code-shaped path in the diff;
-rule 5 runs against any document-shaped path; rule 6 runs against any P1/P3
-document repair's diff. In the ordinary case that means rules 1–4 fire at
-`implementation` and rule 5 at `spec-review` / `plan-review`, but the phases
-and the rule groups do not always line up, and one gap follows directly from
-that: **an `implementation` repair that strays into editing a spec or plan
-file is not currently guarded by any rule here.** Rule 6 is scoped
-specifically to a P1/P3 document repair, and rules 1–4 only look at
-code-shaped paths, so a P4 repair that touches `docs/` or a plan file passes
-this scan today. This is a known, open gap — not one this scan closes — and
-it is stated here rather than papered over so a reader checking coverage
-finds the truth.
+rule 5 runs against any document-shaped path; rule 6 runs against every
+repair's diff, at both phases, because every repair has an authorization
+scope. In the ordinary case that means rules 1–4 fire at `implementation`
+and rule 5 at `spec-review` / `plan-review`, but the phases and the rule
+groups do not always line up, which is exactly why rule 6 is phase-agnostic:
+an `implementation` repair that strays into a spec or plan file and a
+document repair that strays into `src/` are the same failure, and rules 1–4
+look only at code-shaped paths, so nothing else here would catch the first
+one. Scoping rule 6 to documents would leave the narrow P4 authorization
+scope that §3 and §4 both call a boundary enforced by the agent's prompt
+alone — the containment this scan exists to make mechanical.
+
+**An out-of-scope refusal is not always an attempt to weaken a gate.** A P4
+agent may have made a correct fix in an unauthorized place: the type error
+reported at `src/foo.ts:14` whose real cause sits in `src/bar.ts`. Rule 6
+refuses it regardless, and §6 leaves a `refused` diff uncommitted precisely
+so the human can see the candidate fix and adopt it in one look. As with
+rule 3, the asymmetry favors a human look over an unaudited edit.
 
 ## 6. Working-tree discipline
 
