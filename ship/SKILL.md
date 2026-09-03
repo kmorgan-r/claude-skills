@@ -92,9 +92,19 @@ Read `.claude-ship-state.json`:
      `in_flight`. Check `git log -1 --format=%s` against
      `fix: repair <repair.phase> gate failure (attempt <repair.attempt>)`. Match —
      the attempt ran and landed: clear `repair.in_flight`, append its `history` entry
-     with verdict `applied`, log `repair <phase> attempt N → applied (reconciled)`
+     with verdict `applied` **and a copy of `repair.on_resolved`** — this append is the
+     one the P1/P3 hooks never reached, so dropping the copy strands the resume branch
+     below with nothing to route on — log
+     `repair <phase> attempt N → applied (reconciled)`
      to `phase_log`, do NOT decrement, then **skip steps 2 and 3** and continue below;
-     the phase handler's gate re-run judges the result. Falling through to step 3
+     the phase handler judges the result: at P4 the whole-gate re-run, at P1/P3 the
+     pending-verification branch in their preambles, which runs the read-only
+     `RESOLVED:` verifier this repair never reached. Jumping to the handler top is
+     therefore right at every phase — but only because those preambles exist. Without
+     them P1/P3 would dispatch a fresh applying panel instead, burning a
+     `review_passes` slot against the two-pass ceiling and never asking whether the
+     repair resolved the CRITICAL it was dispatched for.
+     Falling through to step 3
      would decrement a landed attempt and re-open the over-cap path this branch
      exists to close.
      No match — nothing landed; skip to 3. Non-empty →
@@ -185,7 +195,9 @@ A `null` block reads as `attempt: 0`, `budget_used: 0`, `history: []`. Shape:
       "in_flight": true,
       "touched_paths": ["src/foo.ts"],
       "created_paths": [],
-      "history": [ {"phase": "plan-review", "attempt": 1, "signature": "...", "verdict": "applied"} ]
+      "on_resolved": "step3",
+      "history": [ {"phase": "plan-review", "attempt": 1, "signature": "...", "verdict": "applied",
+                    "on_resolved": "step3", "resolved": "yes"} ]
     }
 
 `attempt` counts attempts at the CURRENT halt point and resets on a change of
@@ -195,6 +207,13 @@ dispatches across the whole pipeline and never resets on its own. `touched_paths
 and `created_paths` are written by `ship-repair` BEFORE the agent is dispatched,
 because an interrupted repair writes nothing afterwards and the resume path needs
 them to reconcile the tree. `in_flight` is cleared on every terminal verdict.
+`on_resolved` is written at dispatch by the P1/P3 hooks — `"step3"` by the first,
+`"advance"` by the second — and records what a later `RESOLVED: yes` is supposed to
+mean. P4 leaves it unset. EVERY site that appends a `history` entry copies it onto that
+entry, First action's reconciliation included, and the P1/P3 preambles' pending-
+verification branch reads it back from there to route a repair whose verification was
+interrupted. `resolved` is written onto the same entry when the verifier answers. Both
+keys are inert to the ratchet, which compares `signature` only.
 
 `repair_enabled` is the `--no-repair` kill switch (default `true`). It lives in
 state rather than only in the invocation, because an argument does not survive an
@@ -284,6 +303,43 @@ Advance to P1.
 
 ### P1 spec-review
 
+**Before anything else — before the ceiling check — settle a landed repair that was
+never verified.** If the most recent `repair.history` entry whose `phase` is
+`spec-review` carries `verdict: "applied"`, a repair for this phase landed and the
+read-only `RESOLVED:` verifier that judges it may never have run. Do not dispatch a
+panel until this is settled:
+
+- **No `resolved` key** → the verifier never returned. Run it now, exactly as step 2
+  below specifies it: ONE report-only Opus reviewer via the Agent tool, given
+  `repair.failure` and the repair commit's diff (`git show` the
+  `fix: repair spec-review gate failure (attempt N)` commit — after a compaction that
+  diff exists nowhere else). It is READ-ONLY and does NOT increment `review_passes`.
+  Write its answer to `resolved` on that entry before acting on it.
+- **`resolved: "no"`** → return to the repair-dispatch decision, exactly as steps 2
+  and 5 do.
+- **`resolved: "yes"`** → do what that entry's `on_resolved` says, written at dispatch
+  by whichever hook dispatched: `"step3"` → re-enter the pass sequence at step 3,
+  forcing **at least** row e, reading pass 1's `REVIEWERS:` and `FINDINGS:` lines back
+  from `phase_log`, where step 2 persisted them for exactly this. `"advance"` →
+  advance the phase. `on_resolved` ABSENT → `status:"blocked"`; do not guess which hook
+  ran, and do not fall through to a panel dispatch.
+
+Route on `on_resolved`, never on `review_passes`: the count moves between recording
+`resolved` and acting on it, because a `"step3"` resume dispatches `--diff` and
+increments it — so a counter-based rule reads a finished first-hook repair as a
+second-hook one and would advance the phase on a `--diff` result nobody read. If that
+`--diff` is itself lost to a second compaction, this branch re-enters step 3, row e
+forces a dispatch, and step 4's ceiling check blocks at `review_passes >= 2`. That
+block is correct rather than a regression: two applying passes were dispatched and the
+second's outcome is unreadable, and ship never advances on a signal it cannot read.
+
+This branch sits ABOVE the ceiling check deliberately. A repair dispatched from step 5
+lands with `review_passes` already at 2, so reading the ceiling first would block the
+only route that reaches its verification — spending the repair, the budget unit and the
+interruption, then discarding the answer they bought. Firing this branch when it was not
+strictly needed costs one read-only dispatch and changes no state; skipping it costs a
+`review_passes` slot burned on an unrelated full panel and a CRITICAL nobody re-read.
+
 **Before any dispatch, read the ceiling.** If `review_passes["spec-review"] >= 2` →
 `status:"blocked"`, blocker `P1 review ceiling reached (2 applying passes); resolve manually`,
 stop. This guards EVERY applying dispatch, not just the second one — a conductor resumed
@@ -325,6 +381,14 @@ conductor resumed from the state file executes, not only a fresh one.
    ratchet reads; it is the single source and this hook does not restate it — with
    `repair.phase` set to `spec-review` at P1 or
    `plan-review` at P3, and `repair.failure` to the verbatim unresolved-CRITICAL text.
+   Two writes belong to THIS hook rather than to that generic list: `repair.on_resolved`
+   = `"step3"`, and pass 1's verbatim `REVIEWERS:` and `FINDINGS:` lines appended to
+   `phase_log` NOW rather than at the end of the phase. Both serve the resume path.
+   `on_resolved` is what the preamble's pending-verification branch routes on, and it
+   has to exist before the dispatch, because an interrupted repair is reconciled by
+   First action, which cannot know which hook dispatched it. The two lines are step 3's
+   only inputs: without them a resumed decision reads an absent `FINDINGS:`, takes
+   row a, and silently deletes row d — a Tier 3 human halt — from the resumed path.
    Then invoke `ship-repair spec-review` (P1) or `ship-repair plan-review` (P3) via the
    Skill tool. On `REPAIR: applied`, verify with ONE report-only Opus reviewer,
    dispatched via the Agent tool with model `opus` and NOT `reviewing-plans` (whose
@@ -333,7 +397,10 @@ conductor resumed from the state file executes, not only a fresh one.
    answer one question. Its first line is machine-readable:
    `RESOLVED: yes — <why>` or `RESOLVED: no — <what still stands>`; an absent or
    unparseable line blocks, exactly as an unparseable `REPAIR:` line does. This
-   verification dispatch is READ-ONLY and does NOT increment `review_passes`.
+   verification dispatch is READ-ONLY and does NOT increment `review_passes`. Write the
+   answer as `resolved: "yes"|"no"` onto that repair's `history` entry BEFORE acting on
+   it — a compaction in the gap otherwise discards the one thing the dispatch bought,
+   and the preamble branch re-runs the verifier to recover it.
    On `RESOLVED: yes`, **resume this pass sequence at step 3** and force **at least**
    decision row e — the repair edited the artifact, so pass 1's `FINDINGS:` counts no
    longer describe the file on disk. Rows a–d still take precedence and are still
@@ -378,7 +445,11 @@ conductor resumed from the state file executes, not only a fresh one.
    stop. On unresolved CRITICAL, this is the SECOND repair hook point:
    run the repair-dispatch decision and, if it allows, write the same state fields as
    step 2 — including, on the returned verdict, its "On every returned verdict"
-   `history` append, which the ratchet reads — and invoke `ship-repair` for this
+   `history` append, which the ratchet reads, and the same `resolved` record — with two
+   differences: `repair.on_resolved` is `"advance"` here, and step 2's `phase_log`
+   persistence of pass 1's `REVIEWERS:`/`FINDINGS:` lines is left out, because this
+   hook's resume never re-enters step 3 and so has no consumer for them — and invoke
+   `ship-repair` for this
    phase, verifying with the same read-only `RESOLVED:` reviewer. It resumes
    DIFFERENTLY from step 2's: on `RESOLVED: yes` it
    **advances the phase**, and must NOT resume at step 3. By this point
@@ -419,6 +490,30 @@ via the Skill tool; ignore any auto-chain into execution. Record the plan path i
 `plan`. Advance to P3.
 
 ### P3 plan-review
+
+**Before anything else — before the ceiling check — settle a landed repair that was
+never verified.** If the most recent `repair.history` entry whose `phase` is
+`plan-review` carries `verdict: "applied"`, a repair for this phase landed and the
+read-only `RESOLVED:` verifier that judges it may never have run. Do not dispatch a
+panel until this is settled:
+
+- **No `resolved` key** → run the verifier now, exactly as P1's step 2 specifies it:
+  ONE report-only Opus reviewer via the Agent tool, given `repair.failure` and the
+  repair commit's diff (`git show` the
+  `fix: repair plan-review gate failure (attempt N)` commit). READ-ONLY; it does NOT
+  increment `review_passes`. Write its answer to `resolved` on that entry first.
+- **`resolved: "no"`** → return to the repair-dispatch decision.
+- **`resolved: "yes"`** → do what that entry's `on_resolved` says: `"step3"` → re-enter
+  the pass sequence at step 3, forcing **at least** row e, reading pass 1's `REVIEWERS:`
+  and `FINDINGS:` lines back from `phase_log`; `"advance"` → advance the phase.
+  `on_resolved` ABSENT → `status:"blocked"`; do not guess, and do not fall through to a
+  panel dispatch.
+
+Route on `on_resolved`, never on `review_passes` — the count moves between recording
+`resolved` and acting on it. This branch is stated here in full for the same reason the
+ceiling check below is: a conductor resumed into P3 executes P3, and the pass-sequence
+reference further down carries neither. Its full rationale is P1's; the normative
+content above is complete without it.
 
 **Before any dispatch, read the ceiling.** If `review_passes["plan-review"] >= 2` →
 `status:"blocked"`, blocker `P3 review ceiling reached (2 applying passes); resolve manually`,
@@ -850,7 +945,12 @@ Independent of `repair_enabled` — this is not a repair, spends no repair budge
 
 A delegated skill can ask ship a clarifying question mid-phase. Ship then sits idle —
 not blocked, just waiting — with no blocker for anyone to surface. Ship answers these
-itself, using ship-watch's hard rules rather than a second policy of its own:
+itself, under the rules below. They are stated here in full and depend on nothing
+outside this file. They are deliberately the same rules the `ship-watch` supervisor
+applies to the same questions from outside — one policy with two enforcers, not two
+policies — and they are maintained to stay identical: a divergence between them is a
+bug to report, not a state to accept. `ship-watch` is a separate skill, distributed
+separately; ship never reads it at runtime and does not require it to be installed.
 
 - **Routine question** → answer it ONLY when the answer is derivable from something
   you can cite: repo convention, the spec or plan being executed, the state file, an
@@ -863,18 +963,23 @@ itself, using ship-watch's hard rules rather than a second policy of its own:
   commits but **never pushes**, and a pipeline that blocks before P7 never writes it at
   all — so this is an audit trail for the working tree, not something a PR reviewer
   sees.
-- **Escalate to `blocked`** when the question touches a product decision (ship-watch
-  rule 4), a permission boundary (rule 3), a DB gate or any live-database write
-  (rule 2), a merge (rule 1), anything with an effect outside the working tree,
-  anything destructive or hard to reverse, credentials — **or when it asks you to
+- **Escalate to `blocked`** when the question touches a product decision — "should
+  this also do X" is the human's call even when a plausible answer exists; a permission
+  boundary — a caller asking because its own permission mode blocked something, where
+  answering launders the human's permission decision through a peer; a DB gate or any
+  live-database write; a merge; anything with an effect outside the working tree
+  (deploy, publish, push to a shared branch, send mail, spend money); anything
+  destructive or hard to reverse (delete, force-push, overwrite, drop, revoke);
+  credentials or secrets — **or when it asks you to
   choose between options with real tradeoffs that the plan does not decide.** That last
-  one is ship-watch's own bullet, and it is the shape a `subagent-driven-development`
+  one is the least obvious of them, and it is the shape a `subagent-driven-development`
   question usually takes: not a product decision, no effect outside the tree, nothing
   destructive — and still not ship's call.
-- **Answer once** (rule 7). Before answering, scan `phase_log` for an existing
-  `assumed:` entry naming this question; a match means the answer was wrong or the
-  caller is wedged → `blocked`. Rule 7 without that read-back is unenforceable, since
-  ship's memory of having answered does not survive a compaction but `phase_log` does.
+- **Answer at most once per question.** Before answering,
+  scan `phase_log` for an existing `assumed:` entry naming this question; a match
+  means the answer was wrong or the caller is wedged → `blocked`. The rule without
+  that read-back is unenforceable, since ship's memory of having answered does not
+  survive a compaction but `phase_log` does.
 
 ## Failure handling
 
