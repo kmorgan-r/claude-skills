@@ -245,11 +245,21 @@ satisfying the gate by disabling it.
 1. **Deleted or renamed test file** — any path matching `*.test.*` or
    `*.spec.*` removed by the diff.
 2. **Suppression added** — a new occurrence of `.skip`, `.todo`, `.only`,
-   `xit(`, `xdescribe(`, `@ts-ignore`, `@ts-expect-error`, or any
-   `eslint-disable` form.
-3. **Gate config touched** — `.eslintrc*`, `eslint.config.*`, `tsconfig*.json`,
+   `xit(`, `xdescribe(`, `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`, or any
+   `eslint-disable` form. `@ts-nocheck` is the strongest of these and the one
+   most worth naming: a single line at the top of a file silences **every** type
+   error in it, which makes it the cheapest possible "fix" for exactly the P4
+   `check:types` failure this scan exists to police — and nothing else here would
+   see it. It deletes no test (rule 1), touches no gate config (rule 3), shrinks
+   no `test_paths` (rule 4), does not apply at P1/P3 (rule 5), and sits inside an
+   authorized path (rule 6), which checks *which* files were touched, never what
+   was written into them.
+3. **Gate config touched** — `.eslintrc*`, `.eslintignore`, `eslint.config.*`,
+   `tsconfig*.json`,
    `vitest.config.*`, `.prettierrc*`, or `package.json` keys `scripts.lint`,
-   `scripts.check:types`, `scripts.test`. **Match these on the BASENAME, at any
+   `scripts.check:types`, `scripts.test`. `.eslintignore` is listed separately
+   because the `.eslintrc*` glob does not match it, and one line there drops the
+   failing file out of lint entirely. **Match these on the BASENAME, at any
    depth** — a monorepo keeps `packages/x/tsconfig.json` and
    `services/y/package.json`, and a start-anchored glob misses every one of them,
    making this rule unfireable in exactly the repo shape that needs it most.
