@@ -320,7 +320,7 @@ conductor resumed from the state file executes, not only a fresh one.
    `plan-review` at P3, and `repair.failure` to the verbatim unresolved-CRITICAL text.
    Then invoke `ship-repair spec-review` (P1) or `ship-repair plan-review` (P3) via the
    Skill tool. On `REPAIR: applied`, verify with ONE report-only Opus reviewer,
-   dispatched via the Task tool with model `opus` and NOT `reviewing-plans` (whose
+   dispatched via the Agent tool with model `opus` and NOT `reviewing-plans` (whose
    `auto --diff` is also one Opus reviewer but APPLIES and commits), given the repair
    diff and the CRITICAL it was meant to resolve, instructed to edit nothing and
    answer one question. Its first line is machine-readable:
