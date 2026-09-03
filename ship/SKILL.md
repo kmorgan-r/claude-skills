@@ -87,6 +87,24 @@ Read `.claude-ship-state.json`:
   about the mismatch, ask the user to reconcile, and stop. Otherwise, if
   `repair.in_flight` is true, a repair was interrupted — reconcile BEFORE jumping
   to the phase handler, in this order:
+  0. **Has history moved for a reason this pipeline can account for?** Read
+     `git rev-parse HEAD` and `git log -1 --format=%s`. If HEAD ≠ `repair.base_sha`
+     **and** that subject is NOT
+     `fix: repair <repair.phase> gate failure (attempt <repair.attempt>)`, a commit
+     exists that no repair of this pipeline made and no scan ever read — the repair
+     agent committed and `ship-repair` died before its own §4a could refuse. Append
+     `git log <repair.base_sha>..HEAD --oneline` to `blockers`, set
+     `status:"blocked"`, and stop: do **not** decrement, do **not** run the checkout
+     in step 1, and do not unwind the commit — rewriting history is the human's.
+     Step 0 is what makes step 1's "No match — nothing landed" true. Without it that
+     sentence is false in exactly this case: a clean tree plus an unrecognized commit
+     reads as "nothing ran", the attempt is handed back, and the next dispatch meets a
+     tree whose weakening is already committed and therefore invisible to §2's
+     dirty-tree precondition. On the dirty branch it is worse — step 1's
+     `git checkout HEAD -- <touched_paths>` would *restore* the agent's committed
+     content, because HEAD now contains it. If `base_sha` is ABSENT from state, do not
+     guess: `blockers`, `status:"blocked"`, stop. HEAD moved WITH the matching subject
+     is the ordinary landed-repair case and falls through to step 1.
   1. `git status --porcelain`. Empty → the tree is clean, which does NOT by itself
      mean nothing ran: `ship-repair` commits an `applied` repair BEFORE clearing
      `in_flight`. Check `git log -1 --format=%s` against
@@ -193,6 +211,7 @@ A `null` block reads as `attempt: 0`, `budget_used: 0`, `history: []`. Shape:
       "failure": "<verbatim failing output, truncated to 8KB>",
       "budget_used": 1,
       "in_flight": true,
+      "base_sha": "9f47c3c1b2...",
       "touched_paths": ["src/foo.ts"],
       "created_paths": [],
       "on_resolved": "step3",
@@ -207,6 +226,12 @@ dispatches across the whole pipeline and never resets on its own. `touched_paths
 and `created_paths` are written by `ship-repair` BEFORE the agent is dispatched,
 because an interrupted repair writes nothing afterwards and the resume path needs
 them to reconcile the tree. `in_flight` is cleared on every terminal verdict.
+`base_sha` is `git rev-parse HEAD` as it stood at dispatch. `ship-repair` reads it
+to refuse when the agent committed (its §4a) — a commit empties both of the
+gate-weakening scan's inputs, so the scan would return no hits on a diff it never
+read — and the reconciliation below reads it to tell a landed repair from a stray
+agent commit. It is written in the same state write as `in_flight`, so the two are
+never present without each other.
 `on_resolved` is written at dispatch by the P1/P3 hooks — `"step3"` by the first,
 `"advance"` by the second — and records what a later `RESOLVED: yes` is supposed to
 mean. P4 leaves it unset. EVERY site that appends a `history` entry copies it onto that
@@ -878,8 +903,13 @@ dispatch, never a retry of the check. A `null` `repair` block reads as
 **On dispatch, ship writes ALL of the following before invoking `ship-repair`:**
 `repair.phase` = this halt's phase; `repair.attempt` = previous + 1; the computed
 `repair.signature`; `repair.failure` = the verbatim failing output truncated to
-8KB; `repair.in_flight` = `true`; and `budget_used` incremented. **`in_flight` is
-set here and nowhere else** — `ship-repair` only ever clears it. Without this write
+8KB; `repair.in_flight` = `true`; `repair.base_sha` = `git rev-parse HEAD`; and
+`budget_used` incremented. **`in_flight` and `base_sha` are
+set here and nowhere else** — `ship-repair` only ever clears the first and only ever
+reads the second. `base_sha` must be written in this same state write rather than a
+later one: `ship-repair` refuses without it, and the reconciliation below cannot
+distinguish a landed repair from a stray agent commit without it, so a window where
+`in_flight` is true and `base_sha` is absent is a window neither can survive. Without this write
 the resume reconciliation in First action can never fire, and an interrupted repair
 strands its own working tree. **On every returned verdict**, ship appends
 `{phase, attempt, signature, verdict}` to `repair.history` — **plus a copy of
@@ -942,7 +972,7 @@ omission safe rather than silent.
 |---|---|
 | `applied` | Re-run the phase gate. Pass → resume where the phase halted (per hook). Fail → next attempt if the decision allows, else `blocked`. |
 | `failed` | Next attempt if the decision allows — but the revert makes the failure re-present identically, so the ratchet normally makes `failed` terminal at that halt point. |
-| `refused` | `blocked` immediately, no further attempt. Surface the triggering rule verbatim. The dispatch that returned `refused` HAS already spent a budget unit, charged at dispatch; only a pre-dispatch ratchet or cap block is free. |
+| `refused` | `blocked` immediately, no further attempt. Surface the triggering rule **or precondition** verbatim — §2's dirty tree and §4a's moved HEAD are refusals no scan rule produced. The dispatch that returned `refused` HAS already spent a budget unit, charged at dispatch; only a pre-dispatch ratchet or cap block is free. |
 | unparseable or absent `REPAIR:` line | `blocked`. Ship never advances on a signal it cannot read — same rule as P6. |
 
 ## Class-B stops: questions from a delegated skill

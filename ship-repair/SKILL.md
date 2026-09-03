@@ -199,7 +199,9 @@ The prompt carries:
   scan below passes (§6) — never the agent. A commit made by the agent is
   invisible to the scan (§5 reads `git diff HEAD` plus untracked files, both
   of which go empty across a commit) and would let an unscanned diff be
-  reported `applied`.
+  reported `applied`. This instruction is **necessary and not sufficient**, the
+  same standing every prompt prohibition has here, so it is backed by the
+  mechanical check in §4a below rather than trusted.
 - The gate-weakening scan rules that can fire on **this repair's own diff**
   (§5 below), verbatim, framed as: *these make the repair fail — solve the
   underlying problem instead.* Hand over rules 1–4 and 6 for an `implementation`
@@ -209,6 +211,41 @@ The prompt carries:
   regardless of phase, or a document repair that merely quotes rule 2's
   substrings (`.skip`, `@ts-ignore`, and the rest) would be refused for
   quoting the rule.
+
+### 4a. Post-return precondition: HEAD must not have moved
+
+**When the agent returns, before deciding any verdict**, read `git rev-parse
+HEAD` and compare it to `repair.base_sha`, which ship wrote at dispatch. This is
+the mirror of §2's pre-dispatch precondition, and it exists for the same reason:
+§2 refuses when the tree is dirty because the scan's inputs would not be
+attributable to this repair, and 4a refuses when HEAD has moved because the
+scan's inputs would be **empty**. A commit collapses `git diff HEAD` and the
+untracked list to nothing, so the scan below would find no hits on a diff it
+never read and return `applied` on it. Every other bypass in §5 defeats one
+rule; this one defeats the whole scan, so it cannot rest on the prompt.
+
+- **`base_sha` absent from state** — do not guess and do not scan:
+  `REPAIR: refused — repair.base_sha missing; cannot verify HEAD is unmoved`.
+  Fail closed, as everywhere else here.
+- **HEAD ≠ `base_sha`** — `REPAIR: refused — agent committed during the repair;
+  HEAD moved from <base_sha> to <head>`, and include `git log <base_sha>..HEAD
+  --oneline` in the output so the human sees exactly what landed.
+- **HEAD = `base_sha`** — the scan's inputs mean what §5 says they mean. Proceed.
+
+**Refuse without scanning, and do not unwind anything.** Running the scan against
+a substitute range would add a second scan mode whose inputs differ from the
+documented ones — a place for the next divergence — and the six rules are about
+what a diff CONTAINS, not about whether the inputs are trustworthy; that is a
+precondition's job, at both ends. Nor does ship-repair `git reset` the stray
+commit away: rewriting branch history to salvage work from an agent that just
+broke its one hard instruction is exactly the destructive, hard-to-reverse act
+this pipeline routes to a human. A loud block beats a silent rewrite, and this
+verdict is `refused`, so the pipeline stops immediately with everything intact.
+
+Because 4a runs before the verdict is chosen, no `failed` or `applied` verdict
+can coexist with a stray commit — which is what keeps §6's revert
+(`git checkout HEAD -- <touched_paths>`) correct. Without 4a that revert would
+restore the agent's *committed* content, since HEAD would already contain it.
 
 ## 5. The gate-weakening scan
 
@@ -234,7 +271,9 @@ what rule 3 needs: a repair that *creates* `eslint.config.js` or
 rule 3 without the untracked enumeration. This is also why §4 requires the
 agent not to commit — if it committed, `git diff HEAD` goes empty too, and
 the scan would see nothing at all, returning `applied` on a diff it never
-actually read.
+actually read. That requirement is enforced by §4a, which refuses before this
+scan runs whenever HEAD has moved; the rules below assume inputs §4a has already
+established are meaningful, and none of them can detect their own absence.
 
 Any hit is an immediate `REPAIR: refused`, naming the triggering rule and the
 paths involved. This scan runs mechanically regardless of what the prompt
@@ -408,7 +447,11 @@ rule 3, the asymmetry favors a human look over an unaudited edit.
 - **`refused`** — do not revert. Leave the changes exactly as the agent left
   them, uncommitted, so a human can see precisely what it tried to weaken.
   This is safe only because `refused` blocks the pipeline immediately with no
-  further attempt — there is no attempt 2 to contaminate.
+  further attempt — there is no attempt 2 to contaminate. One class of refusal
+  leaves more than a dirty tree: §4a's, where the agent committed. Leave that
+  commit in place too — unwinding history is the human's call, and the blocker
+  names the range. "Uncommitted" describes the ordinary case, not a guarantee
+  this verdict makes.
 - **Clearing `repair.in_flight`** — ship-repair clears it itself, immediately
   before returning its verdict, for **all three** verdicts, `applied`
   included, and for the dirty-tree `refused` in §2 as well. This is not
@@ -442,10 +485,11 @@ under other output.
 `ship-repair` never reads or writes `budget_used` or `history`, never writes
 `attempt` (it reads `attempt`, per §1, only to know the current attempt
 number — for the commit message in §6 and to size its own effort — but never
-changes it), and never decides whether to dispatch. It sets `touched_paths`
+changes it), and never decides whether to dispatch. It reads `base_sha` (§4a)
+and never writes it. It sets `touched_paths`
 and `created_paths` (the reconciliation manifest, §3) and clears `in_flight`
-on every terminal verdict (§6); ship sets `in_flight` at dispatch and owns
-`budget_used`, `attempt`, and `history` entirely. Deciding whether a repair
+on every terminal verdict (§6); ship sets `in_flight` and `base_sha` at dispatch
+and owns `budget_used`, `attempt`, and `history` entirely. Deciding whether a repair
 happens, whether a second attempt is worth it, where the pipeline resumes
 after `applied`, and whether the global budget or the same-signature ratchet
 has been exhausted are all ship's decisions, made by reading the verdict
