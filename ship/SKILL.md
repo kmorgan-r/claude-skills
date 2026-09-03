@@ -882,8 +882,15 @@ dispatch, never a retry of the check. A `null` `repair` block reads as
 set here and nowhere else** — `ship-repair` only ever clears it. Without this write
 the resume reconciliation in First action can never fire, and an interrupted repair
 strands its own working tree. **On every returned verdict**, ship appends
-`{phase, attempt, signature, verdict}` to `repair.history` and logs
-`repair <phase> attempt N → <verdict>` to `phase_log`. Without the `attempt`,
+`{phase, attempt, signature, verdict}` to `repair.history` — **plus a copy of
+`repair.on_resolved` whenever it is set**, which is every P1/P3 dispatch and no P4 one —
+and logs
+`repair <phase> attempt N → <verdict>` to `phase_log`. That copy is not optional
+bookkeeping: the P1/P3 preambles' pending-verification branch routes on it, and this is
+the append that runs on the finding's own path — `ship-repair` clears `in_flight` itself
+on a terminal verdict, so a compaction after the append never reaches First action's
+reconciliation, and an entry written without the marker sends the resumed repair to
+`blocked` instead of to the verifier it was interrupted before. Without the `attempt`,
 `signature` and `history` writes the cap is unreachable and the ratchet has
 nothing to compare — both limits read fine in prose and never fire.
 
