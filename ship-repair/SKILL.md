@@ -139,8 +139,8 @@ it may create or modify. This must stay narrow, since it is the boundary
 rule 6 (§5) and the human reviewing a `refused` verdict both depend on:
 
 - **implementation (P4):** the failing file(s) named in `repair.failure` (the
-  `<file>:<line>` the check reports), **filtered to code-shaped paths that are
-  not `*.test.*` / `*.spec.*`.** Filter the parsed set rather than gating on
+  `<file>:<line>` the check reports), **with every `*.test.*` / `*.spec.*`
+  path dropped.** Filter the parsed set rather than gating on
   it: a failure naming both `src/foo.ts:10` and `src/foo.test.ts:5` authorizes
   `src/foo.ts` alone. **A test path is dropped even though the check named
   it.** For a failing assertion the `<file>:<line>` a runner reports is where
@@ -316,7 +316,7 @@ satisfying the gate by disabling it.
 6. **Out-of-scope path touched, at either phase** — the diff may touch only
    the paths in the **authorization scope** §4 computed for this repair: at
    P1/P3 the single spec or plan file dispatched against; at P4 the failing
-   file(s) parsed from `repair.failure` after §4's exclusions — never a
+   file(s) parsed from `repair.failure` after §4's test exclusion — never a
    `*.test.*` / `*.spec.*` path, whether parsed or not — or the code-shaped
    branch-diff fallback when that filter leaves nothing. Any other path means
    refuse. This is the rule that makes the narrow authorization scope a
