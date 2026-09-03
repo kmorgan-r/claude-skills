@@ -337,7 +337,11 @@ rule 3, the asymmetry favors a human look over an unaudited edit.
 
   ```
   git checkout HEAD -- <repair.touched_paths>
-  git clean -f -- <repair.created_paths>
+  # GUARD: run the clean ONLY when created_paths is NON-EMPTY. An empty list
+  # leaves the literal `git clean -f --`, which is a bare `git clean -f`.
+  if [ -n "<the created_paths list>" ]; then
+    git clean -f -- <repair.created_paths>
+  fi
   ```
 
   Use exactly `git checkout HEAD -- <paths>` for this. Do not use the
@@ -348,8 +352,19 @@ rule 3, the asymmetry favors a human look over an unaudited edit.
   precondition would then fail on this attempt's leftover debris. Restoring
   modified files is also not sufficient on its own, since it leaves behind
   anything the agent created; that is why created paths are tracked
-  separately and removed with a scoped `git clean -f --`, never a bare
-  `git clean`.
+  separately and removed with a `git clean -f` scoped to exactly those paths,
+  never a bare `git clean` — and **never run at all when there are none.** That
+  guard is not defensive tidiness. Substituting an empty list leaves the literal
+  `git clean -f --`, and a `--` carrying zero pathspecs does not mean "match
+  nothing": git reads it as no path restriction, so with an empty list the
+  scoped form *is* the bare form this step was written to avoid. `created_paths`
+  is routinely `[]` — a repair that edits existing files creates nothing — so
+  the unguarded command is the ordinary case, not an edge case, and what it
+  removes is untracked files across the repository that no repair ever touched.
+  The guard opens no hole. A file the agent created while `created_paths` said
+  `[]` is caught loudly instead: by §2's dirty-tree precondition on the next
+  dispatch, and by ship's own residue check, which blocks naming the paths. A
+  loud block beats a silent deletion.
 - **`refused`** — do not revert. Leave the changes exactly as the agent left
   them, uncommitted, so a human can see precisely what it tried to weaken.
   This is safe only because `refused` blocks the pipeline immediately with no

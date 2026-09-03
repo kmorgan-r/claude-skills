@@ -98,10 +98,17 @@ Read `.claude-ship-state.json`:
      would decrement a landed attempt and re-open the over-cap path this branch
      exists to close.
      No match — nothing landed; skip to 3. Non-empty →
-     `git checkout HEAD -- <repair.touched_paths>` and
-     `git clean -f -- <repair.created_paths>`. If either key is ABSENT from state
-     (an empty list is not absent; `created_paths` is routinely `[]`), do NOT
-     guess → append the dirty paths to `blockers`, `status:"blocked"`, stop.
+     `git checkout HEAD -- <repair.touched_paths>`, then — **only when
+     `created_paths` is NON-EMPTY** — `git clean -f -- <repair.created_paths>`.
+     With an empty list that second command becomes the literal `git clean -f --`,
+     and a `--` carrying zero pathspecs is not "match nothing": git reads it as
+     no path restriction, so it runs as a bare `git clean -f` and removes
+     untracked files across the repository that no repair ever touched.
+     `created_paths` is routinely `[]`, so the guard fires on the ordinary path,
+     not an edge case — and it hides nothing, because step 2 below still catches
+     whatever the agent created outside its manifest. If either key is ABSENT
+     from state (an empty list is not absent), do NOT guess → append the dirty
+     paths to `blockers`, `status:"blocked"`, stop.
   2. `git status --porcelain` again. Still non-empty → the agent wrote outside its
      manifest; append the residual paths to `blockers`, `status:"blocked"`, stop.
      Catching it here names the paths; leaving it to `ship-repair`'s dirty-tree
