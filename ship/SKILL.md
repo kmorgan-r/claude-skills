@@ -152,15 +152,22 @@ Read `.claude-ship-state.json`:
      Falling through to step 3
      would decrement a landed attempt and re-open the over-cap path this branch
      exists to close.
-     No match — nothing landed; skip to 3. Non-empty →
-     `git checkout HEAD -- <repair.touched_paths>`, then — **only when
+     No match — nothing landed; skip to 3. Non-empty → **only when
+     `touched_paths` is NON-EMPTY** — `git checkout HEAD -- <repair.touched_paths>`,
+     then — **only when
      `created_paths` is NON-EMPTY** — `git clean -f -- <repair.created_paths>`.
-     With an empty list that second command becomes the literal `git clean -f --`,
+     Same guard twice, for the same reason: with an empty list the command becomes the
+     literal `git checkout HEAD --` or `git clean -f --`,
      and a `--` carrying zero pathspecs is not "match nothing": git reads it as
-     no path restriction, so it runs as a bare `git clean -f` and removes
-     untracked files across the repository that no repair ever touched.
-     `created_paths` is routinely `[]`, so the guard fires on the ordinary path,
-     not an edge case — and it hides nothing, because step 2 below still catches
+     no path restriction, so the clean runs as a bare `git clean -f` and removes
+     untracked files across the repository that no repair ever touched. The checkout is
+     the milder half — most git versions reject it outright with
+     `you must specify path(s) to restore` — but a reconciliation that dies on an
+     unhandled error is a reconciliation that did not run, and the shape is identical, so
+     it is guarded rather than left to a version's mercy.
+     `created_paths` is routinely `[]` and `touched_paths` is empty whenever the
+     interrupted agent only created files, so both guards fire on ordinary paths,
+     not edge cases — and they hide nothing, because step 2 below still catches
      whatever the agent created outside its manifest. If either key is ABSENT
      from state (an empty list is not absent), do NOT guess → append the dirty
      paths to `blockers`, `status:"blocked"`, stop.

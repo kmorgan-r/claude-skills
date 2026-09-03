@@ -415,14 +415,24 @@ rule 3, the asymmetry favors a human look over an unaudited edit.
   the next attempt starts from the same clean tree this one saw:
 
   ```
-  git checkout HEAD -- <repair.touched_paths>
-  # GUARD: run the clean ONLY when created_paths is NON-EMPTY. An empty list
-  # leaves the literal `git clean -f --`, which is a bare `git clean -f`.
+  # GUARD: run each command ONLY when its own list is NON-EMPTY. An empty list
+  # leaves the literal `git checkout HEAD --` / `git clean -f --`, and a `--`
+  # carrying zero pathspecs is no path restriction, not "match nothing".
+  if [ -n "<the touched_paths list>" ]; then
+    git checkout HEAD -- <repair.touched_paths>
+  fi
   if [ -n "<the created_paths list>" ]; then
     git clean -f -- <repair.created_paths>
   fi
   ```
 
+  Both commands carry that guard for the same reason, though not for the same
+  consequence: a bare `git clean -f` wipes untracked files repo-wide, while
+  `git checkout HEAD --` is usually rejected outright with `you must specify path(s) to
+  restore`. A revert that dies on an unhandled error is still a revert that did not run,
+  and the next attempt then meets the debris its clean-tree precondition rejects — so the
+  checkout is guarded rather than left to a git version's mercy. `touched_paths` is empty
+  whenever the repair only created files.
   Use exactly `git checkout HEAD -- <paths>` for this. Do not use the
   two-dash form without `HEAD` as the revert — that bare form restores from
   the index, which this step never resets, so a repair agent that ran `git add`
