@@ -83,9 +83,11 @@ real change, **err wide**:
 
 - **implementation (P4):** the union of (a) every path under the top-level
   `test_paths` key, (b) the failing file(s) named in `repair.signature` /
-  `repair.failure`, if any could be parsed, and (c) — whenever (b) is empty
-  and §4's fallback authorization therefore fires — the branch-diff set §4
-  computes (`git diff --name-only <default_branch>...HEAD`), taken here
+  `repair.failure`, if any could be parsed, and (c) — whenever §4's fallback
+  authorization fires, which is whenever its *filtered* view of (b) is empty:
+  (b) parsed nothing, or everything it parsed was test-shaped and §4's
+  exclusion dropped it — the branch-diff set §4 computes
+  (`git diff --name-only <default_branch>...HEAD`), taken here
   **unfiltered**. Compute that set once, before writing `touched_paths`, and
   derive both widths from that single result — this manifest takes it whole,
   §4's authorization scope takes only its code-shaped subset — never derive
@@ -137,8 +139,29 @@ it may create or modify. This must stay narrow, since it is the boundary
 rule 6 (§5) and the human reviewing a `refused` verdict both depend on:
 
 - **implementation (P4):** the failing file(s) named in `repair.failure` (the
-  `<file>:<line>` the check reports). If no file can be parsed out of the
-  failure text, fall back to the files changed on this branch —
+  `<file>:<line>` the check reports), **filtered to code-shaped paths that are
+  not `*.test.*` / `*.spec.*`.** Filter the parsed set rather than gating on
+  it: a failure naming both `src/foo.ts:10` and `src/foo.test.ts:5` authorizes
+  `src/foo.ts` alone. **A test path is dropped even though the check named
+  it.** For a failing assertion the `<file>:<line>` a runner reports is where
+  the assertion ran, not where the defect lives — the source under test is the
+  one file such a failure never names. Authorizing the file the runner pointed
+  at hands the agent the cheapest possible "fix": rewrite the expected value to
+  match the buggy output. That test still exists, still runs and still passes,
+  so nothing in §5 fires — rule 1 wants a deletion, rule 2 a suppression token,
+  rule 3 a config file, rule 4 a shrunken `test_paths`, and rule 6 was
+  satisfied by construction — ship's re-run goes green, and the regression
+  ships masked with nobody reading the diff. A type or lint error genuinely
+  located in a test file is dropped too, and that case is refused rather than
+  repaired: the same deliberate over-breadth rule 3 takes, for the same reason
+  — nothing here can mechanically tell "the test encodes the wrong
+  expectation" from "the code is wrong", and the asymmetry favors a human look.
+  Do not try to derive the source file under test from the test file's name;
+  co-located tests, `__tests__/` directories and a test that exercises several
+  modules make it a guess, and a confidently wrong narrow scope is worse than a
+  correct wide one.
+  If the filter empties the parsed set — nothing parsed, or everything parsed
+  was test-shaped — fall back to the files changed on this branch —
   `git diff --name-only <default_branch>...HEAD`, computed once per §3's
   invariant and used at two widths: §3's reconciliation-manifest component
   (c) takes the whole set, while this authorization scope takes only its
@@ -149,9 +172,14 @@ rule 6 (§5) and the human reviewing a `refused` verdict both depend on:
   of the source under test. Excluding document-shaped paths is that same
   argument one artifact over: a code gate is never legitimately repaired by
   rewriting the plan that motivated the code, and without the exclusion rule
-  6 would authorize exactly that on any branch that also changed docs. The
-  exclusion binds the fallback only — a failure that names a document path
-  authorizes it, because there the check itself identified the file. If the
+  6 would authorize exactly that on any branch that also changed docs. **The
+  document exclusion binds the fallback only** — a failure that names a
+  document path authorizes it, because there the check itself identified the
+  file. **The test exclusion binds always**, the parsed path included, for the
+  reason above: there, the check naming the file is exactly what proves
+  nothing. Because no P4 scope can therefore contain a test path, **rule 6
+  already refuses any P4 repair that edits one** — the enforcement a seventh
+  scan rule would add, obtained from the boundary that already exists. If the
   filtered branch diff is empty, do not guess:
   `REPAIR: refused — cannot determine repair scope`.
 - **spec-review / plan-review (P1/P3):** the single spec or plan file
@@ -288,10 +316,12 @@ satisfying the gate by disabling it.
 6. **Out-of-scope path touched, at either phase** — the diff may touch only
    the paths in the **authorization scope** §4 computed for this repair: at
    P1/P3 the single spec or plan file dispatched against; at P4 the failing
-   file(s) parsed from `repair.failure`, or the code-shaped branch-diff
-   fallback when none could be parsed. Any other path means refuse. This is
-   the rule that makes the narrow authorization scope a boundary rather than
-   a request — §3 and §4 both call it one, and nothing else here checks it.
+   file(s) parsed from `repair.failure` after §4's exclusions — never a
+   `*.test.*` / `*.spec.*` path, whether parsed or not — or the code-shaped
+   branch-diff fallback when that filter leaves nothing. Any other path means
+   refuse. This is the rule that makes the narrow authorization scope a
+   boundary rather than a request — §3 and §4 both call it one, and nothing
+   else here checks it.
    At P1/P3 it is also what makes rule 5's narrow scope safe rather than
    merely narrow: a repair asked to resolve a reviewer's objection to a plan
    has no business editing source.
