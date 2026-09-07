@@ -188,9 +188,10 @@ cp -r find-cold-leads ~/.claude/skills/
   linked git worktree (`git rev-parse --git-dir` differing from `--git-common-dir`) and
   fails closed on a primary checkout, a plain directory, or a path whose only repo is an
   ancestor's. The two values that reach that child's command line from outside the script
-  (`-Model`, whether passed or read from state, and `-Resume`) are allowlisted to
-  `[A-Za-z0-9._:/-]` with no leading dash, and the line itself is built by the CRT's own
-  quoting rules, so neither can close an argument early and append flags of its own.
+  (`-Model`, whether passed or read from state, and `-Resume`) are allowlisted - a model
+  tag to `[A-Za-z0-9._:/-]`, a session id to `[A-Za-z0-9._-]`, neither with a leading
+  dash - and the line itself is built by the CRT's own quoting rules, so neither can
+  close an argument early and append flags of its own.
 - Every run appends one line to `~/.claude/ollama-workers.log.jsonl` (model, num_turns,
   duration_ms, escalate, reason). Calibrate `maxTurns` and the routing rubric from that
   log rather than from published benchmarks.
