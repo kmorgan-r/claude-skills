@@ -75,6 +75,27 @@ if (-not $Model)               { $Model = if ($state.model) { $state.model } els
 if (-not $PSBoundParameters.ContainsKey('MaxTurns')) {
     $MaxTurns = if ($state.maxTurns) { [int]$state.maxTurns } else { 25 }
 }
+
+# $Model and $Resume are the only values that reach the child's command line
+# from outside this script - $Cwd and $BriefFile travel as -WorkingDirectory and
+# -RedirectStandardInput, and $overlay derives from $HOME. Both are checked
+# against an allowlist here rather than only escaped below, because escaping is
+# one layer and a mistake in it is silent, whereas a rejected tag is loud. This
+# is after the state read on purpose: a poisoned `model` key must fail too, not
+# just a poisoned -Model.
+#
+# The requirement is not the exact ollama grammar - it is "no whitespace, no
+# quote, no backslash, no cmd metacharacter, and not a leading dash". Real cloud
+# tags (glm-5.3-flash:cloud, hf.co/user/model:tag) fit. A session id is looser
+# than ^uuid$ deliberately: the CLI emits canonical UUIDs today (verified
+# 5e08f631-daaf-40ab-8bfa-d5c3f40ace37), and a charset check blocks every
+# injection character without breaking if that format ever changes.
+if ($Model -notmatch '^[A-Za-z0-9][A-Za-z0-9._:/-]*$') {
+    Fail "model tag has characters that are not allowed on a command line: $Model"
+}
+if ($Resume -and $Resume -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    Fail "resume id has characters that are not allowed on a command line: $Resume"
+}
 # Required, but not [Parameter(Mandatory)]: a mandatory parameter prompts, and
 # this script is only ever run headless, where a prompt hangs until timeout.
 if (-not $Cwd) { Fail '-Cwd is required (a linked git worktree)' }
@@ -134,8 +155,35 @@ $claudeArgs = @('--settings', $overlay, '-p', '--output-format', 'json', '--dang
 if ($Resume) { $claudeArgs += @('--resume', $Resume) }
 $argList = @('launch', 'claude', '--model', $Model, '--') + $claudeArgs
 
-# Start-Process space-joins -ArgumentList without quoting, so quote here.
-$quoted = $argList | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
+# Start-Process space-joins -ArgumentList without quoting - verified: an
+# argument containing a space arrives at the child split in two - so the line
+# has to be built here, by the rules the CRT uses to take it apart again.
+# Backslashes are literal except immediately before a quote, where they double;
+# an embedded quote becomes \"; trailing backslashes double before the closing
+# quote; an empty argument becomes "". The naive `wrap anything with a space in
+# one quote pair` this replaces let a quote inside $Model or $Resume close the
+# argument early, and the remainder became extra flags on a child launched with
+# --dangerously-skip-permissions - after `--`, that is extra flags to claude
+# itself. The allowlist above is what makes that unreachable; this function is
+# the second layer, and the one that keeps a path with a space intact.
+function QuoteArg([string]$a) {
+    if ($a -and $a -notmatch '[\s"]') { return $a }
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.Append('"')
+    for ($i = 0; $i -lt $a.Length; $i++) {
+        $bs = 0
+        while ($i -lt $a.Length -and $a[$i] -eq '\') { $bs++; $i++ }
+        if ($i -ge $a.Length)   { [void]$sb.Append('\', $bs * 2); break }
+        elseif ($a[$i] -eq '"') { [void]$sb.Append('\', $bs * 2 + 1); [void]$sb.Append('"') }
+        else                    { [void]$sb.Append('\', $bs); [void]$sb.Append($a[$i]) }
+    }
+    [void]$sb.Append('"')
+    return $sb.ToString()
+}
+# A List, not the pipeline: piping a one-element array yields a bare string and
+# Start-Process would then see one argument's characters, not one argument.
+$quoted = [System.Collections.Generic.List[string]]::new()
+foreach ($a in $argList) { $quoted.Add((QuoteArg $a)) }
 
 if ($DryRun) {
     [ordered]@{

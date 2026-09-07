@@ -28,7 +28,9 @@ ollama list
 
 Accept the tag if `ollama list` shows it, or if it ends in `:cloud` (cloud tags
 pull on first use and need not appear yet). Reject anything else and say why -
-a typo becomes a 20-second failure per task otherwise.
+a typo becomes a 20-second failure per task otherwise. The wrapper re-checks the
+tag against `^[A-Za-z0-9][A-Za-z0-9._:/-]*$` at dispatch and refuses to launch
+on a mismatch, so a tag written into the state file by hand fails there too.
 
 **`off`** - set `enabled: false`. Leave `model` alone so the next `on` remembers it.
 
