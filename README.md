@@ -162,7 +162,11 @@ cp -r find-cold-leads ~/.claude/skills/
   rewrite is compared against that backup key by key and rolled back if anything moved.
 - **Off by default, and invisible when off.** State lives in
   `~/.claude/ollama-workers.json`; the SessionStart hook prints the routing rule only
-  when enabled, so a disabled install costs no context.
+  when enabled, so a disabled install costs no context. `enabled` is enforced by the
+  wrapper, not just by the hook and the skill's prose: it exits 1 before launching
+  anything unless the state file says `enabled: true`, so a dispatch on stale context
+  cannot reach a third-party endpoint while the feature is off. A missing state file
+  counts as off.
 - **Implementers only.** Task reviewers, scoped re-reviews, the plan-document reviewer,
   the final code review, and fix-round escalation stay on Anthropic — use opus for the
   reviews. On Artificial Analysis, `glm-5.3-flash` scores 72 coding / 52 agentic against

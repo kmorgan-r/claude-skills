@@ -10,6 +10,9 @@ separate headless Claude Code process. The orchestrator stays on Anthropic, and
 so does every reviewer.
 
 State: `~/.claude/ollama-workers.json` - `{ "enabled", "model", "maxTurns" }`.
+The wrapper enforces `enabled` itself and exits 1 without launching anything
+unless it is `true`, so a dispatch on stale context fails loudly instead of
+running. A missing or unreadable state file counts as off.
 
 ## Commands
 

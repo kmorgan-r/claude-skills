@@ -53,6 +53,24 @@ if (Test-Path -LiteralPath $statePath) {
     catch { Fail "state file is not valid JSON: $statePath" }
 }
 
+# The off switch is enforced here, not only in the status hook and the skill's
+# prose. An orchestrator can dispatch this agent on stale context after a
+# /compact, from a careless caller, or from its own bug; every other constraint
+# in this script is checked rather than trusted for exactly that reason. Running
+# while off sends repository content to a third-party endpoint under
+# --dangerously-skip-permissions, which is the one outcome `off` exists to
+# prevent, so the gate is the mechanism's job and not the system prompt's.
+#
+# -ne $true with the state value on the left: PowerShell coerces the right side
+# to the left's type, so a missing file, a missing key, null, false, "false", ""
+# and 0 all fail closed, while true, "true" and 1 pass. Note a fresh install
+# seeds enabled: false, so a new install fails here until `/ollama-workers on`.
+# Exit 1, not 2: a dispatch while disabled is a caller bug the orchestrator
+# should see, not an escalation the model earned, and not a calibration row.
+if ($state.enabled -ne $true) {
+    Fail "ollama workers are disabled in $statePath`n  Enable with: /ollama-workers on"
+}
+
 if (-not $Model)               { $Model = if ($state.model) { $state.model } else { 'glm-5.3-flash:cloud' } }
 if (-not $PSBoundParameters.ContainsKey('MaxTurns')) {
     $MaxTurns = if ($state.maxTurns) { [int]$state.maxTurns } else { 25 }
