@@ -16,6 +16,9 @@ worker transcripts where the caller's next `claude --continue` would resume
 them - a session produced by a non-Anthropic backend fails to resume against
 the Anthropic API.
 
+The worker runs with --dangerously-skip-permissions, so -Cwd is required and
+must be a linked git worktree - see the guard below.
+
 Exit codes: 0 done, 2 escalate to an Anthropic implementer, 1 wrapper error.
 #>
 [CmdletBinding()]
@@ -54,9 +57,42 @@ if (-not $Model)               { $Model = if ($state.model) { $state.model } els
 if (-not $PSBoundParameters.ContainsKey('MaxTurns')) {
     $MaxTurns = if ($state.maxTurns) { [int]$state.maxTurns } else { 25 }
 }
-if (-not $Cwd) { $Cwd = (Get-Location).Path }
+# Required, but not [Parameter(Mandatory)]: a mandatory parameter prompts, and
+# this script is only ever run headless, where a prompt hangs until timeout.
+if (-not $Cwd) { Fail '-Cwd is required (a linked git worktree)' }
 if (-not (Test-Path -LiteralPath $Cwd)) { Fail "cwd not found: $Cwd" }
 if (-not (Test-Path -LiteralPath $overlay)) { Fail "settings overlay not found: $overlay" }
+
+# The run below passes --dangerously-skip-permissions, so nothing will stop the
+# worker from editing or deleting anything under $Cwd. $Cwd therefore has to be
+# disposable, and that has to be checked mechanically: an orchestrator picks it
+# programmatically for every dispatch, so a doc convention only holds until the
+# first slip in brief-generation.
+#
+# git's own bookkeeping is the test. In a linked worktree --git-dir is
+# <primary>/.git/worktrees/<name> while --git-common-dir is <primary>/.git; in a
+# primary checkout the two are identical. Note this rejects plain directories
+# too, which matters more than it looks: if any ancestor is a repo (a home
+# directory under version control, say) a scratch path silently resolves to
+# *that* repo, and the worker would be editing inside it.
+#
+# --path-format=absolute needs git >= 2.31. Older git errors out, and a
+# non-zero exit or a throw both land in the same fail-closed branch.
+$gitDirs = @()
+$gitExit = 1
+try {
+    $gitDirs = @(& git -C $Cwd rev-parse --path-format=absolute --git-dir --git-common-dir 2>$null)
+    $gitExit = $LASTEXITCODE
+}
+catch { $gitExit = 1 }
+
+$worktreeHelp = "  Create one with: git worktree add <path> <branch>"
+if ($gitExit -ne 0 -or $gitDirs.Count -lt 2) {
+    Fail "-Cwd is not a git worktree: $Cwd`n  The worker runs with --dangerously-skip-permissions and only accepts one.`n$worktreeHelp"
+}
+if ([string]::Equals($gitDirs[0], $gitDirs[1], [StringComparison]::OrdinalIgnoreCase)) {
+    Fail "-Cwd is a primary checkout, not a linked worktree: $Cwd`n  The worker runs with --dangerously-skip-permissions and refuses to edit a`n  primary checkout.`n$worktreeHelp"
+}
 
 $ollama = (Get-Command ollama -ErrorAction SilentlyContinue).Source
 if (-not $ollama) { $ollama = Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe' }

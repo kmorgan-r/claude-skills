@@ -157,8 +157,9 @@ cp -r find-cold-leads ~/.claude/skills/
 - **Needs** Windows with PowerShell 7 (`pwsh`), [Ollama](https://ollama.com) on PATH,
   and `ollama signin` for `:cloud` tags. Run `./ollama-workers/install.ps1` (`-DryRun`
   first) — a plain `cp -r` installs the skill but not the forwarder agent, the wrapper
-  script, or the SessionStart hook. Existing state files and `settings.json` hooks are
-  left alone; the one edit is made after a timestamped backup.
+  script, or the SessionStart hook. Existing state files are left alone; `settings.json`
+  is re-serialized to add one SessionStart entry after a timestamped backup, and the
+  rewrite is compared against that backup key by key and rolled back if anything moved.
 - **Off by default, and invisible when off.** State lives in
   `~/.claude/ollama-workers.json`; the SessionStart hook prints the routing rule only
   when enabled, so a disabled install costs no context.
@@ -177,9 +178,12 @@ cp -r find-cold-leads ~/.claude/skills/
   sharing the caller's config dir would leave worker transcripts where the caller's next
   `claude --continue` would resume them — and a session produced by a non-Anthropic
   backend fails to resume against the Anthropic API.
-- **The worker runs `--dangerously-skip-permissions`** in whatever `-Cwd` it is given; it
-  has to edit files and run tests with nobody there to answer a prompt. Point it at a
-  worktree, not a main checkout.
+- **The worker runs `--dangerously-skip-permissions`** — it has to edit files and run
+  tests with nobody there to answer a prompt. Because an orchestrator picks `-Cwd` for
+  every dispatch, that is enforced rather than documented: the wrapper accepts only a
+  linked git worktree (`git rev-parse --git-dir` differing from `--git-common-dir`) and
+  fails closed on a primary checkout, a plain directory, or a path whose only repo is an
+  ancestor's.
 - Every run appends one line to `~/.claude/ollama-workers.log.jsonl` (model, num_turns,
   duration_ms, escalate, reason). Calibrate `maxTurns` and the routing rubric from that
   log rather than from published benchmarks.

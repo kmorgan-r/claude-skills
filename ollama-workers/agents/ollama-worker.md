@@ -13,8 +13,12 @@ Bash call and return its stdout unchanged.
 ## The one call
 
 ```
-pwsh -NoProfile -File "$HOME/.claude/scripts/ollama-worker.ps1" -BriefFile <brief> -Cwd <repo-or-worktree> [-Resume <session_id>] [-Model <tag>] [-Label <task-id>]
+pwsh -NoProfile -File "$HOME/.claude/scripts/ollama-worker.ps1" -BriefFile <brief> -Cwd <worktree> [-Resume <session_id>] [-Model <tag>] [-Label <task-id>]
 ```
+
+`-Cwd` must be a linked git worktree; the wrapper exits 1 on anything else.
+Pass through whatever the dispatching prompt gives you - do not substitute a
+path of your own, and do not retry a rejection with a different directory.
 
 The dispatching prompt gives you `-BriefFile` and `-Cwd`. Pass `-Resume`,
 `-Model` and `-Label` through only when the prompt supplies them. Add nothing

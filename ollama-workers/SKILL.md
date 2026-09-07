@@ -115,6 +115,10 @@ benchmarks.
   against the Anthropic API.
 - The worker runs with `--dangerously-skip-permissions`, matching how
   `ship-fleet` spawns headless instances. It has to edit files and run tests
-  with nobody there to answer a prompt.
+  with nobody there to answer a prompt. So `-Cwd` is checked, not trusted: the
+  wrapper accepts only a linked git worktree (git reports a different
+  `--git-dir` and `--git-common-dir`) and exits 1 on a primary checkout or a
+  plain directory. Dispatch into a worktree; `git worktree add` first if the
+  plan has not made one.
 - This CLI has no `--max-turns`, so `maxTurns` is checked after the fact from
   the result JSON. It is an escalation signal, not a hard stop.
