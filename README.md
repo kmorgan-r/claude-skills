@@ -15,6 +15,7 @@ follows at runtime) plus any bundled scripts, references, and evals.
 | [`ship-fleet`](./ship-fleet) | Runs up to 10 `/ship` pipelines in parallel: one headless Claude Code instance per GitHub issue, each in its own git worktree, coordinated by a fleet manifest and a polling monitor with crash recovery. Human gates (merge, DB acks) stay human. **Windows-only** (PowerShell). |
 | [`reviewing-plans`](./reviewing-plans) | Reviews a written implementation plan before execution: dispatches 2–5 domain-specific reviewer agents in parallel, consolidates findings, and applies approved fixes to the plan file. |
 | [`esg-longitudinal`](./esg-longitudinal) | Tracks a company's ESG / CSR / sustainability commitments over time using **free** public data: finds sustainability/annual report PDFs, extracts targets and metrics into a tidy time-series with source + period + verbatim quote per value, saves a timestamped snapshot, and diffs against earlier snapshots to surface what changed. Re-runnable next year; scales from one company toward tens of thousands. |
+| [`ollama-workers`](./ollama-workers) | Lets an Anthropic-model orchestrator hand short-turn implementer tasks to an Ollama cloud model (GLM, Kimi) running in a separate headless Claude Code process. `/ollama-workers on\|off\|status` is the whole interface; reviewers stay on Anthropic. **Windows-only** (PowerShell). |
 
 ## Install
 
@@ -145,3 +146,40 @@ cp -r find-cold-leads ~/.claude/skills/
   load-bearing.
 - Invoke by asking to track a company's ESG/CSR/sustainability targets over time
   (e.g. "pull Philips' circular-economy targets over the last 10 years, with sources").
+### ollama-workers
+- **Why a child process, not a subagent.** A Claude Code process serves exactly one
+  provider: `ollama launch claude` exports `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`
+  and all three `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` vars, and the CLI warns
+  that any such auth source takes precedence over the claude.ai login. The Agent tool's
+  `model` is an enum, and subagents run in-process, so no subagent can be pointed
+  somewhere else. Keeping the orchestrator on a subscription therefore means spawning a
+  worker, which also rules out routing the whole session through a proxy.
+- **Needs** Windows with PowerShell 7 (`pwsh`), [Ollama](https://ollama.com) on PATH,
+  and `ollama signin` for `:cloud` tags. Run `./ollama-workers/install.ps1` (`-DryRun`
+  first) — a plain `cp -r` installs the skill but not the forwarder agent, the wrapper
+  script, or the SessionStart hook. Existing state files and `settings.json` hooks are
+  left alone; the one edit is made after a timestamped backup.
+- **Off by default, and invisible when off.** State lives in
+  `~/.claude/ollama-workers.json`; the SessionStart hook prints the routing rule only
+  when enabled, so a disabled install costs no context.
+- **Implementers only.** Task reviewers, scoped re-reviews, the plan-document reviewer,
+  the final code review, and fix-round escalation stay on Anthropic — use opus for the
+  reviews. On Artificial Analysis, `glm-5.3-flash` scores 72 coding / 52 agentic against
+  Claude Sonnet 5's 72 / 45, so a sonnet gate would not sit above the worker it grades.
+- **The endpoint has no prompt caching**, so ~34K of system prompt is re-sent every turn
+  and TTFT is ~20s. Turn count, not the benchmark index, decides fit: short-turn
+  mechanical tasks with a complete brief go to the worker, multi-file and integration
+  work stays in-process. Escalation is evidence-based (`is_error`, nonzero exit, or
+  `num_turns > maxTurns`) and has two rungs — ollama model, then Anthropic. Never
+  ollama-to-ollama.
+- **Isolated config dir.** The worker runs under `CLAUDE_CONFIG_DIR=~/.claude-ollama-worker`
+  with `plugins` junctioned in. Sessions live at `<config-dir>/projects/<cwd>/`, so
+  sharing the caller's config dir would leave worker transcripts where the caller's next
+  `claude --continue` would resume them — and a session produced by a non-Anthropic
+  backend fails to resume against the Anthropic API.
+- **The worker runs `--dangerously-skip-permissions`** in whatever `-Cwd` it is given; it
+  has to edit files and run tests with nobody there to answer a prompt. Point it at a
+  worktree, not a main checkout.
+- Every run appends one line to `~/.claude/ollama-workers.log.jsonl` (model, num_turns,
+  duration_ms, escalate, reason). Calibrate `maxTurns` and the routing rubric from that
+  log rather than from published benchmarks.

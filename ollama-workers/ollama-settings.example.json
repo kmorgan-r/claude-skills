@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "_comment": "Settings overlay passed to the worker process via --settings. An Ollama model id is not a recognized Claude model, so Claude Code's context-window resolver falls through to its 200000 default and clamps ollama's CLAUDE_CODE_AUTO_COMPACT_WINDOW down to it. CLAUDE_CODE_MAX_CONTEXT_TOKENS overrides the model window itself and is honored for any model id not starting with 'claude-'. Do not set ANTHROPIC_* or CLAUDE_CODE_AUTO_COMPACT_WINDOW here - ollama launch exports those.",
+  "env": {
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
+  }
+}
