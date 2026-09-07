@@ -91,8 +91,9 @@ Keep on Anthropic in-process (cached, native tools):
 ## Escalation
 
 Escalate on evidence, never predict. The wrapper exits 2 and sets `escalate`
-when `is_error`, a nonzero child exit, or `num_turns > maxTurns`. The caller
-escalates on that, or when review rejects the same task twice.
+when `is_error`, a nonzero child exit, `num_turns > maxTurns`, or the child's
+stdout carries no usable result envelope. The caller escalates on that, or when
+review rejects the same task twice.
 
 The ladder has two rungs: **ollama model -> Anthropic**. Never re-dispatch a
 failed task to a larger Ollama model - it re-sends full context to a slower
