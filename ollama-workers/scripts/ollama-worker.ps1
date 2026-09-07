@@ -158,21 +158,42 @@ $resultLine = Get-Content -LiteralPath $stdoutFile -ErrorAction SilentlyContinue
     Where-Object { $_.TrimStart().StartsWith('{') } | Select-Object -Last 1
 Remove-Item -LiteralPath $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
 
+# The child's stdout is the one input the escalation design reads, so a bad line
+# has to become a verdict, not a crash. $ErrorActionPreference is 'Stop' and
+# ConvertFrom-Json throws on truncated JSON, so a child killed mid-write would
+# otherwise take the wrapper down before it printed a verdict or logged the run,
+# and the caller would see a bare non-zero exit instead of escalate: true. The
+# type check covers the other shape failure: if the envelope is ever
+# pretty-printed, the last line starting with '{' is a fragment, not the result.
+$r = $null
+if ($resultLine) {
+    try { $r = $resultLine | ConvertFrom-Json }
+    catch { $r = $null }
+    if ($r.type -ne 'result') { $r = $null }
+}
+
 $escalate = $false
 $reason   = ''
 $verdict  = [ordered]@{}
 
-if (-not $resultLine) {
+if ($null -eq $r) {
     $escalate = $true
-    $reason   = "no_result_json_exit_$exitCode"
+    $reason   = if ($resultLine) { "invalid_result_json_exit_$exitCode" }
+                else             { "no_result_json_exit_$exitCode" }
     $verdict  = [ordered]@{
         ok = $false; escalate = $true; reason = $reason; model = $Model
         session_id = $null; num_turns = 0; duration_ms = 0; result = $null
     }
 }
 else {
-    $r = $resultLine | ConvertFrom-Json
-    $turns = if ($null -ne $r.num_turns) { [int]$r.num_turns } else { 0 }
+    # -as, not [int]: casting a field that is not numeric throws a terminating
+    # error $ErrorActionPreference cannot soften - the same crash the parse
+    # guard above exists to prevent, two lines further down.
+    $turns = $r.num_turns -as [int]
+    if ($null -eq $turns) { $turns = 0 }
+    $ms = $r.duration_ms -as [int]
+    if ($null -eq $ms) { $ms = 0 }
+
     if ($r.is_error)         { $escalate = $true; $reason = 'is_error' }
     elseif ($exitCode -ne 0) { $escalate = $true; $reason = "exit_$exitCode" }
     elseif ($turns -gt $MaxTurns) { $escalate = $true; $reason = "turns_${turns}_over_${MaxTurns}" }
@@ -184,7 +205,7 @@ else {
         model       = $Model
         session_id  = $r.session_id
         num_turns   = $turns
-        duration_ms = if ($null -ne $r.duration_ms) { [int]$r.duration_ms } else { 0 }
+        duration_ms = $ms
         result      = $r.result
     }
 }
