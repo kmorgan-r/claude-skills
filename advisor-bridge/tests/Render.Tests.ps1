@@ -173,7 +173,7 @@ Describe 'budget enforcement' {
     # clean assertion failure (see Mutation A in the task report). Copies the
     # 'non-empty check' Describe's pattern instead, which exits the child
     # process directly and asserts on raw text.
-    It 'exits 1 naming the budget and the floor size when charBudget is too small to render anything' {
+    It 'exits 1 with the too-small remedy when charBudget cannot fit the render floor' {
         $h = Join-Path ([System.IO.Path]::GetTempPath()) ("ab-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $h -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $h 'advisor-bridge.json') -Value '{"enabled": true, "charBudget": 100}'
