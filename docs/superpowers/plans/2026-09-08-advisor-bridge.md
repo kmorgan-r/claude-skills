@@ -89,14 +89,20 @@ Nothing else can be written test-first until Pester 5 runs and the fixtures exis
 - [ ] **Step 1: Install Pester 5**
 
 The machine has Pester 3.4.0, which cannot run the syntax this plan uses.
+`-MaximumVersion` is load-bearing: PSGallery now serves Pester 6.x, so
+`-MinimumVersion 5.5.0` alone resolves to 6.x, which this plan has not been
+written or reviewed against.
 
 ```powershell
-Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
-Import-Module Pester -MinimumVersion 5.0
+Install-Module Pester -MinimumVersion 5.5.0 -MaximumVersion 5.99.99 -Scope CurrentUser -Force -SkipPublisherCheck
+Import-Module Pester -MinimumVersion 5.0 -MaximumVersion 5.99.99
 Get-Module Pester | Select-Object Name, Version
 ```
 
 Expected: `Pester 5.x.x`. If `Install-Module` fails for lack of network or policy, STOP and report — every later task's test step depends on this.
+
+Already done on this machine (5.9.1, user scope, `pwsh -NoProfile` resolves
+`Invoke-Pester` to 5.9.1). Re-running is idempotent; confirm the version and move on.
 
 - [ ] **Step 2: Write the harness smoke test**
 
