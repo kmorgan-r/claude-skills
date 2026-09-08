@@ -69,8 +69,13 @@ mirroring the layout `ollama-workers/` already uses.
 ### Session locator
 
 Resolve the caller's transcript by **globbing**
-`~/.claude/projects/*/$env:CLAUDE_CODE_SESSION_ID.jsonl`, not by computing the
-project directory name from the working directory.
+`<base>/projects/*/$env:CLAUDE_CODE_SESSION_ID.jsonl`, not by computing the
+project directory name from the working directory. `<base>` is the caller's
+`CLAUDE_CONFIG_DIR` when set, otherwise `~/.claude`. Ollama sessions do not set
+it today, but honouring it costs one line and its absence would be a
+wrong-file failure rather than an error. Note the asymmetry: the *child* is
+launched against the default `~/.claude` regardless, because that is where the
+Anthropic credential lives.
 
 Claude Code sanitizes the cwd into that directory name (`C:\Users\<user>\...`
 becomes `C--Users-<user>-...`). The rule is undocumented. Reimplementing it buys
@@ -102,6 +107,11 @@ Per content block:
 | `thinking` | capped at 600 chars |
 | `tool_use` | tool name, then input capped at 800 chars |
 | `tool_result` | capped at `maxToolResultChars` (default 2000) |
+
+**A turn is one surviving JSONL record** — one `user` record or one `assistant`
+record. A `tool_use` and the `tool_result` answering it are therefore two turns,
+not one. Stated because "last 12 turns" and "drop middle turns" below are
+otherwise implementable three different ways.
 
 Budget enforcement, applied in this order until under `charBudget`:
 
@@ -165,6 +175,28 @@ zero `hook_success` records; the same call without it produced 290 KB with five.
 Without the flag, this project's own SessionStart nudge would fire inside the
 advisor it launched.
 
+### Persona
+
+The highest-leverage artifact here, and the cheapest to iterate on — it is a
+file, not code. A bad persona returns expensive, generic encouragement. It must
+instruct the advisor to:
+
+1. Open by classifying where the caller actually is — orienting, committing to
+   an approach, stuck, or declaring done — because the useful advice differs
+   completely between those.
+2. Diagnose from what the caller *actually tried*, quoting the transcript, not
+   from what the task sounds like it needs.
+3. Give the discriminating check rather than the verdict: the command, file, or
+   test that would separate two hypotheses.
+4. State explicitly whether any remaining concern blocks progress or is worth
+   noting and moving past — an advisor that flags everything at equal weight
+   makes the caller's next decision harder, not easier.
+5. Be terse and specific. The caller is a model with a budget, not a reader.
+
+Acceptance for this file is behavioural: run it against a captured transcript of
+a genuinely stuck session and check the reply names a next action, not a
+summary.
+
 ### Guards
 
 Two, both mandatory, both fail-closed:
@@ -192,7 +224,12 @@ tokens, cost, duration, verdict.
 |---|---|
 | 0 | Advice returned |
 | 1 | Wrapper error — no session id, no transcript, missing credentials, bad config, disabled |
-| 2 | Advisor call failed (`is_error`, nonzero child exit, empty envelope) or the model guard tripped |
+| 2 | Advisor call failed (`is_error`, nonzero child exit, empty envelope, script-side timeout) or the model guard tripped |
+
+The script kills the child at 240 s and exits 2. Without its own timeout the
+only limit is the caller's Bash-tool timeout, which kills the wrapper too — no
+exit code, no log row, and no way to tell a hung call from a slow one when
+reading the log later.
 
 ### Skill
 
@@ -241,10 +278,24 @@ tokens and cost **$0.029** — a 26× reduction in fixed overhead. The real pers
 is longer than the one-line prompt used in that measurement, so budget a few
 hundred tokens more.
 
-At `charBudget: 80000` (~20 K tokens) a first call costs roughly **$0.40**,
-dropping to about **$0.05** on cache reads within the hour. Raising the budget
-to 120 K is a supported change; the log's cost column is the evidence for
-whether it is worth it.
+**The transcript does not amortize.** Prompt caching matches an exact prefix,
+and the rendered transcript is one user message that differs on every call — new
+turns, different truncation. Only the persona in the system prompt is reused.
+The spike shows the split directly: `cache_creation 1414, input 2` — the system
+prompt cached, the user message did not.
+
+So every call pays close to full price for its transcript. At `charBudget:
+80000` (~20 K tokens) that is roughly **$0.20–0.40 per call**, every call, with
+only the ~1.4 K persona amortized. Raising the budget to 120 K raises every call
+proportionally; the log's cost column is the evidence for whether it is worth
+it.
+
+The only real lever on this is resuming one advisor session across calls
+(`--resume`), so each call sends the delta rather than the whole transcript.
+That is deliberately out of scope for the first version — it trades a
+stateless, one-shot design for session lifecycle management — but it is the
+lever, and it is named here so the cost is a known trade rather than a
+discovery.
 
 ## Testing
 
@@ -260,6 +311,22 @@ whether it is worth it.
   assert no fallback to a nearby transcript.
 - **Disabled gate.** `enabled: false` exits 1 without launching a child.
 - **End-to-end.** One real call from a live `ollama launch claude` session.
+
+The golden fixture is synthesized, not a captured probe session. Real
+transcripts carry absolute paths, the user's email, and machine details, and
+this repo is public.
+
+Two things for the implementer to verify rather than assume:
+
+- Whether SessionStart fires with `source: "compact"`. The native advisor
+  survives a compact because it lives in the system prompt; this bridge's
+  protocol arrives as `additionalContext` and may not. If it does fire, the
+  hook's matcher must not exclude it, or the protocol silently disappears
+  mid-session.
+- `ollama-workers/install.ps1` is the model for this install script but is not
+  on `main` — read it from the `cs-wt/ollama-workers` worktree
+  (`feat/ollama-workers`). Both branches install into `~/.claude`, so whichever
+  merges second inherits the job of keeping the two install scripts consistent.
 
 ## Out of scope
 
