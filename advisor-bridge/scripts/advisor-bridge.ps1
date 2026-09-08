@@ -70,7 +70,17 @@ if (Test-Path -LiteralPath $configPath) {
 # on stale context after a compact; every other constraint here is checked
 # rather than trusted for the same reason. A missing or unreadable file counts
 # as disabled, so a broken config fails closed rather than spending money.
-if ($null -eq $cfgRaw -or $cfgRaw.enabled -ne $true) {
+#
+# -isnot [bool], not -ne $true: when $cfgRaw.enabled is an array, `-ne`
+# array-filters instead of comparing, returning a (possibly empty) collection
+# that `if` then coerces to false - so `{"enabled": []}` or
+# `{"enabled": [true,false]}` would fail OPEN and spend money. `-isnot [bool]`
+# does not array-filter: `@() -isnot [bool]` is `$true`, so the gate fires.
+# This also closes `"enabled": "true"` and `"enabled": 1`, which is a
+# deliberate tightening, not a regression - every real config path
+# (advisor-bridge.example.json, and the `on` command writing through
+# ConvertTo-Json) produces a genuine JSON boolean.
+if ($null -eq $cfgRaw -or $cfgRaw.enabled -isnot [bool] -or -not $cfgRaw.enabled) {
     Fail "disabled or unreadable config: $configPath`n  Enable with: /advisor-bridge on"
 }
 

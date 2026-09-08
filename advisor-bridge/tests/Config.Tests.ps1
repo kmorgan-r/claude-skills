@@ -64,6 +64,29 @@ Describe 'enabled gate' {
         Invoke-Bridge -BridgeHome $h | Out-Null
         Join-Path $h 'advisor-bridge.log.jsonl' | Should -Not -Exist
     }
+    # `-ne $true` array-filters instead of comparing when the left operand is
+    # an array, so `{"enabled": []}` and `{"enabled": [true,false]}` would
+    # fail OPEN under the plan's original expression - the empty/collection
+    # result coerces to false in `if`, and the gate never fires. These four
+    # pin the fix (`-isnot [bool] -or -not $cfgRaw.enabled`) against every
+    # non-boolean shape the reviewer found, including the deliberate
+    # tightening that also closes string/numeric truthy values.
+    It 'exits 1 when enabled is an empty array' {
+        $h = New-Home '{"enabled": []}'
+        (Invoke-Bridge -BridgeHome $h).Code | Should -Be 1
+    }
+    It 'exits 1 when enabled is a non-empty array' {
+        $h = New-Home '{"enabled": [true, false]}'
+        (Invoke-Bridge -BridgeHome $h).Code | Should -Be 1
+    }
+    It 'exits 1 when enabled is the string "true"' {
+        $h = New-Home '{"enabled": "true"}'
+        (Invoke-Bridge -BridgeHome $h).Code | Should -Be 1
+    }
+    It 'exits 1 when enabled is the number 1' {
+        $h = New-Home '{"enabled": 1}'
+        (Invoke-Bridge -BridgeHome $h).Code | Should -Be 1
+    }
 }
 
 Describe 'numeric coercion' {
