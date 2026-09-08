@@ -59,12 +59,22 @@ Describe 'block caps' {
     It 'caps thinking at 600 chars' {
         $r = Render-Fixture 'caps.jsonl'
         $r.render | Should -Match '\[thinking\]'
-        ([regex]::Matches($r.render, '\[thinking\] (.{0,700}?)(\r?\n|$)') |
-            ForEach-Object { $_.Groups[1].Value.Length } |
-            Measure-Object -Maximum).Maximum | Should -BeLessOrEqual 620
-        # 620, not 600: Limit-Text appends ' [truncated]' (12 chars) AFTER the
-        # 600-char cut, so a capped line is 612 long. Asserting 600 fails on
-        # correct output.
+        # Same shape as the tool_use/tool_result siblings below, and not the
+        # bounded-quantifier regex this test shipped with originally: a
+        # bounded `.{0,700}?` terminated by a newline cannot match a line
+        # LONGER than ~700 chars at all, so an uncapped 911-char thinking
+        # line produces zero regex matches, Measure-Object -Maximum returns
+        # $null, and `$null | Should -BeLessOrEqual 620` PASSES - the test
+        # could not fail if the cap were removed. Splitting on newline and
+        # measuring line length has no such upper bound, so it fails
+        # correctly on uncapped output. Verified by mutation - see the task
+        # report's fix-round section.
+        ($r.render -split "`n" | Where-Object { $_ -match '\[thinking\]' } |
+            ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum |
+            Should -BeLessOrEqual 640
+        # 640, not 600: the line is "[thinking] " (11 chars) + up to 600 chars
+        # of content + ' [truncated]' (12 chars) = 623 when correctly capped;
+        # an uncapped line would be 11 + 900 = 911, comfortably over 640.
     }
     It 'caps tool_use input at 800 chars' {
         $r = Render-Fixture 'caps.jsonl'

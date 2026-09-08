@@ -149,8 +149,12 @@ function Read-Turns([string]$path) {
             try { $rec = $line | ConvertFrom-Json } catch { $skipped++; continue }
 
             if ($rec.type -notin 'user', 'assistant') { continue }
-            # -ne $true, NOT -eq $false: a record omitting the field entirely is
-            # a main-agent record and must be kept.
+            # -eq $true, not -ne $false: a record that omits the field
+            # entirely is a main-agent record and must be kept. (-ne $true
+            # would also array-filter instead of comparing if isSidechain
+            # were ever array-valued - the same hazard that made the enabled
+            # gate in Task 2 fail OPEN on `{"enabled": []}` - so do not
+            # "simplify" this back to -ne.)
             if ($rec.isSidechain -eq $true) { continue }
 
             $turns.Add($rec)
