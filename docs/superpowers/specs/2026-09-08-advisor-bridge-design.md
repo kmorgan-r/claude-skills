@@ -38,7 +38,7 @@ A child process, for the same reason `ollama-worker.ps1` uses one — one proces
 serves one endpoint — but inverted. Where the worker script spawns a child
 *away* from Anthropic, this spawns a child *back to* Anthropic: strip the Ollama
 environment, render the caller's own session transcript to text, and pass it to
-a `claude -p` run pinned to `claude-fable-5-1`.
+a `claude -p` run pinned to an Anthropic model.
 
 Surface is a skill plus a script, not an MCP server. Ollama sessions run with no
 `CLAUDE_CONFIG_DIR` override, so they read the global `~/.claude.json`; an MCP
@@ -53,18 +53,77 @@ system-prompt problem, not a transport problem. It is solved by the SessionStart
 hook below, which works identically under either surface and is therefore not a
 reason to prefer MCP.
 
+## Naming
+
+One stem, `advisor-bridge`, across every artifact: repo directory, script,
+skill directory, persona, hook, config and log. This mirrors how
+`ollama-workers/` keeps a single stem across `ollama-worker.ps1`,
+`ollama-worker.md`, `ollama-workers-status.py`, `ollama-workers.example.json`
+and `ollama-workers.log.jsonl`.
+
+Two names are deliberately **not** used:
+
+- **`advisor`** as the installed skill directory. Claude Code already has a
+  built-in tool by that exact name — the one this package exists to work around
+  — and `~/.claude/skills/advisor/` would read as that tool's own skill. The
+  sibling's convention is skill-dir-name == package name, so `advisor-bridge`
+  it is.
+- **`fable-advisor`** for the script, config and log. The model is a config key
+  with a default, not a fixed property of the bridge; naming files after one
+  model would make a model change a rename.
+
 ## Components
 
 Repo directory `advisor-bridge/`, installed into `~/.claude` by `install.ps1`,
-mirroring the layout `ollama-workers/` already uses.
+mirroring the layout `ollama-workers/` already uses. Note the repo keeps
+`SKILL.md` at the package root — the `skills/<name>/` nesting exists only at
+the install destination, and is built by `install.ps1`, exactly as
+`ollama-workers/install.ps1` does it.
 
 | Path in repo | Installed to | Job |
 |---|---|---|
-| `scripts/fable-advisor.ps1` | `~/.claude/scripts/` | Engine: locate, render, spawn, guard, log |
-| `skills/advisor/SKILL.md` | `~/.claude/skills/advisor/` | When to call, how to weigh the answer |
-| `advisor-persona.md` | `~/.claude/advisor-persona.md` | The child's system prompt |
-| `hooks/advisor-bridge-status.py` | `~/.claude/hooks/` | SessionStart nudge, Ollama sessions only |
-| `fable-advisor.example.json` | `~/.claude/fable-advisor.json` | Config, seeded on first install only |
+| `SKILL.md` | `~/.claude/skills/advisor-bridge/SKILL.md` | When to call, how to weigh the answer, on/off/status |
+| `scripts/advisor-bridge.ps1` | `~/.claude/scripts/advisor-bridge.ps1` | Engine: locate, render, spawn, guard, log |
+| `advisor-bridge-persona.md` | `~/.claude/advisor-bridge-persona.md` | The child's system prompt |
+| `hooks/advisor-bridge-status.py` | `~/.claude/hooks/advisor-bridge-status.py` | SessionStart nudge, Ollama sessions only |
+| `advisor-bridge.example.json` | `~/.claude/advisor-bridge.json` | Config, seeded on first install only |
+| `install.ps1` | *(not copied — run from the repo)* | Places the files, seeds the config, registers the hook |
+| `tests/*.Tests.ps1` | *(not copied)* | Pester suite, see Testing |
+
+The log file `~/.claude/advisor-bridge.log.jsonl` is created by the script on
+first run; the installer does not place it.
+
+### Order of operations
+
+The engine runs these in exactly this order. The order is normative: several of
+the steps below are cheap checks that exist only because they must happen
+*before* something expensive or irreversible, and an implementation that
+reorders them loses the property.
+
+1. Read config. Unreadable or absent → treated as disabled (step 2).
+2. **Enabled gate.** Not `true` → exit 1, nothing else runs.
+3. Resolve the `claude` executable to an absolute path → exit 1 if absent.
+4. Read the persona file → exit 1 if absent, unreadable, or over the size
+   preflight.
+5. Locate the caller's transcript → exit 1 on unset session id, no match, or
+   multiple matches.
+6. Render the transcript.
+7. **Non-empty check.** Zero surviving turns → exit 1, naming the transcript
+   path. A full-price call over an empty render returns confident advice about
+   nothing.
+8. Build the child environment from empty.
+9. **Pre-spawn guard** on that environment → exit 2 if it trips.
+10. Create `~/.claude/advisor-scratch` if absent.
+11. Spawn, with the timeout armed.
+12. **Post-run model guard** on the envelope → exit 2 if it trips.
+13. Write the log row.
+14. Print `result` to stdout, exit 0.
+
+The gate at step 2 sits above everything that costs money or touches the
+filesystem, for the reason `ollama-worker.ps1:314` gives for its own: an
+orchestrator can dispatch on stale context after a compact, so the mechanism
+owns the gate, not the system prompt. The log row at step 13 is written on every
+terminating path from step 11 onward, including the timeout and both guards.
 
 ### Session locator
 
@@ -82,14 +141,43 @@ becomes `C--Users-<user>-...`). The rule is undocumented. Reimplementing it buys
 nothing a glob does not already give, and its failure mode is a wrong-or-missing
 file rather than an error.
 
-`CLAUDE_CODE_SESSION_ID` unset, no match, or more than one match are all exit-1
-errors naming the remedy. The script never falls back to "newest transcript
-nearby": advising on the wrong session is worse than not advising.
+Three exit-1 cases, each with its own message. The script never falls back to
+"newest transcript nearby": advising on the wrong session is worse than not
+advising.
+
+| Case | Message |
+|---|---|
+| `CLAUDE_CODE_SESSION_ID` unset | `advisor-bridge: CLAUDE_CODE_SESSION_ID is not set — this script must run inside a Claude Code session, not from a bare shell.` |
+| No match | `advisor-bridge: no transcript for session <id> under <base>/projects/*/. The session may not have been written yet; send one message and retry.` |
+| More than one match | `advisor-bridge: session id <id> matches N transcripts:` then one path per line, then `Rendering the wrong one would advise on someone else's session. Delete or move the stale copy, or set CLAUDE_CONFIG_DIR to disambiguate.` |
+
+The multi-match message lists the paths because that is the only actionable
+thing here — there is no correct automatic tiebreak, and "newest" is exactly the
+heuristic this section refuses. A resumed session copied between config dirs is
+the realistic way to reach this case, so the locator test covers it.
 
 ### Renderer
 
-Keep records where `type` is `user` or `assistant` **and** `isSidechain` is
-`false`. Drop everything else.
+Parse the transcript **line by line, each line in its own try/catch**, skipping
+any line that does not parse. Open the file share-read.
+
+Both halves are load-bearing. The caller's own Claude Code process is appending
+to this file while the wrapper reads it, so the last line is routinely a partial
+record, and `$ErrorActionPreference = 'Stop'` makes an unguarded
+`ConvertFrom-Json` on it a terminating error — the wrapper would die before any
+log row and with an exit code outside the published table. This is the same
+hazard `ollama-worker.ps1:412-424` documents for the child's own envelope, and
+the same remedy.
+
+Count skipped lines and report the count in the header, beside the elided-turn
+count. A silently skipped record is indistinguishable from a record that was
+never there.
+
+Keep records where `type` is `user` or `assistant` **and** `isSidechain` is not
+`true`. Drop everything else.
+
+`-ne $true`, not `-eq $false`: a record that omits the field entirely is a main-
+agent record and must be kept, and `isSidechain -eq $false` would drop it.
 
 This filter is doing more work than it appears. In a measured two-turn Ollama
 session the file was 261 KB, of which `attachment` records — hook output,
@@ -106,7 +194,11 @@ Per content block:
 | `text` | full |
 | `thinking` | capped at 600 chars |
 | `tool_use` | tool name, then input capped at 800 chars |
-| `tool_result` | capped at `maxToolResultChars` (default 2000) |
+| `tool_result` | capped at `maxToolResultChars` (default 2000), **everywhere** |
+
+The `tool_result` cap applies to every block in the render, including inside the
+tail window. Twelve uncapped file reads alone exceed an 80 K budget, so a cap
+that stops at the tail window is not a cap.
 
 **A turn is one surviving JSONL record** — one `user` record or one `assistant`
 record. A `tool_use` and the `tool_result` answering it are therefore two turns,
@@ -117,19 +209,36 @@ Budget enforcement, applied in this order until under `charBudget`:
 
 1. First user message always rendered in full — it is the task, and losing it
    makes everything after it unreadable.
-2. Last 12 turns rendered in full.
-3. Mid-transcript `tool_result` blocks hard-capped.
-4. Still over: drop middle turns oldest-first, replacing each run with
-   `[N turns elided]` so the advisor can see that it is not reading everything.
+2. Last 12 turns rendered in full, subject to the `tool_result` cap above.
+3. Drop middle turns oldest-first, replacing each run with `[N turns elided]` so
+   the advisor can see that it is not reading everything.
+4. **Still over: truncate the tail window itself**, oldest-first within it, down
+   to the first user message plus the most recent turn, each marked
+   `[truncated]`.
+5. **Still over: truncate the first user message**, marked `[truncated]`.
+
+Steps 1 and 2 are preservation floors, not reductions; only 3, 4 and 5 remove
+text. Without 4 and 5 the sequence has no terminal step — a first message plus
+twelve turns that together exceed the budget would ship over budget at full
+per-call cost, silently. The golden-render test asserts the final rendered
+length is `<= charBudget` for a fixture built to blow it.
 
 A header precedes the render: cwd, git branch, the caller's model, total turn
-count, and how many turns were elided.
+count, turns elided, and lines skipped as unparseable.
 
 ### Child spawn
 
 Build the child environment from **empty** using `ProcessStartInfo` with
-`UseShellExecute = $false`, adding only: `PATH`, `USERPROFILE`, `HOME`, `TEMP`,
+`UseShellExecute = $false`. `ProcessStartInfo.Environment` is pre-populated from
+the current process, so "from empty" requires an explicit `.Clear()` — it is not
+the default, and the pre-spawn guard exists precisely because forgetting it is
+the easy mistake.
+
+Then add only: `PATH`, `PATHEXT`, `COMSPEC`, `USERPROFILE`, `HOME`, `TEMP`,
 `SystemRoot`, `APPDATA`, `LOCALAPPDATA`, and `CLAUDE_EFFORT=xhigh`.
+
+`PATHEXT` and `COMSPEC` are on the list because `claude` on Windows is commonly
+a `.cmd` shim, and a shim launched with `UseShellExecute = $false` needs both.
 
 A whitelist, not a blacklist of `ANTHROPIC_*` vars to unset. A blacklist is one
 Ollama release away from missing a newly-exported variable, and the symptom of
@@ -137,14 +246,39 @@ that miss is GLM answering in the advisor's voice — which reads as success.
 `CLAUDE_EFFORT` is set explicitly rather than inherited so that its value is a
 decision recorded here, not an accident of what the parent happened to export.
 
+**Resolve `claude` to an absolute path before spawning**, the way
+`ollama-worker.ps1:66-71` resolves `ollama`: `Get-Command claude`, falling back
+to the known install location, and exit 1 with a named remedy if neither
+resolves. A missing binary must be a preflight blocker with a message, not a
+raw spawn exception with no exit-table entry.
+
 Command:
 
 ```
-claude -p --model claude-fable-5-1
-        --system-prompt "<contents of ~/.claude/advisor-persona.md>"
+claude -p --model <config model>
+        --system-prompt "<contents of ~/.claude/advisor-bridge-persona.md>"
         --tools "" --strict-mcp-config --setting-sources ""
         --output-format json
 ```
+
+`--model` takes the value from config, not a literal. The same resolved value
+flows into the post-run guard's comparison and into the log row, so the three
+can never disagree — the pattern `ollama-worker.ps1:129` uses for its own model.
+
+**Pass the arguments via `ProcessStartInfo.ArgumentList`, never a hand-built
+`Arguments` string.** `ArgumentList` applies the CRT's quoting rules per element.
+The persona is arbitrary user-editable markdown containing quotes, backslashes
+and newlines, and editing it is the documented iteration loop for this project —
+so this is a hazard the design actively invites the user to trigger.
+`ollama-worker.ps1:344-367` spends 25 lines and a dedicated `QuoteArg` on this
+same problem for two *allowlisted* short strings, and records what the naive
+version did: a quote closed the argument early and the remainder became extra
+flags on the child.
+
+**Persona size preflight.** Windows caps a command line at 32,767 characters,
+and the persona is the only unbounded element on it. Exit 1 if the persona
+exceeds 16,000 characters, with a message naming the limit and the actual size.
+A persona that long is a bug in the persona, not a case to support.
 
 This build has no `--system-prompt-file`; the script reads the persona file and
 passes its contents as `--system-prompt`. The persona therefore stays editable
@@ -153,11 +287,11 @@ without touching code, which is the property that mattered. Do not add
 ignored whenever `--system-prompt` is passed, so it would be a flag that reads
 as load-bearing while doing nothing.
 
-Working directory `~/.claude/advisor-scratch`, created on demand. The advisor
-child needs no repository access — it has no tools — and running it in the
-caller's cwd would file its transcript in the caller's project directory, where
-the next `claude --continue` could resume the advisor instead of the user's own
-session.
+Working directory `~/.claude/advisor-scratch`, created on demand; exit 1 with the
+path if it cannot be created. The advisor child needs no repository access — it
+has no tools — and running it in the caller's cwd would file its transcript in
+the caller's project directory, where the next `claude --continue` could resume
+the advisor instead of the user's own session.
 
 No separate `CLAUDE_CONFIG_DIR`. The reason `ollama-worker.ps1` needs one does
 not apply here: that worker's transcripts are produced by a non-Anthropic
@@ -197,86 +331,201 @@ Acceptance for this file is behavioural: run it against a captured transcript of
 a genuinely stuck session and check the reply names a next action, not a
 summary.
 
+**That captured transcript is a local, uncommitted artifact.** It is not the
+golden fixture and must never become one: real transcripts carry absolute paths,
+the user's email and machine details, and this repo is public. Keep it outside
+the repo (`%TEMP%` is fine); the acceptance run is manual and one-off.
+
 ### Guards
 
-Two, both mandatory, both fail-closed:
+Two, both mandatory, both fail-closed. Both exit 2.
 
-1. **Pre-spawn.** Assert the constructed child environment contains no key
-   matching `ANTHROPIC_*`. Abort before launching if it does.
-2. **Post-run.** Assert the result envelope's `modelUsage` contains exactly
-   `claude-fable-5-1`. Any other model means the call was answered by something
-   other than the intended advisor: discard the reply, exit 2, log it.
+1. **Pre-spawn.** Assert the constructed child environment's **key set equals
+   the whitelist exactly**. Abort before launching on any difference.
+
+   Not "contains no `ANTHROPIC_*`". The Problem section above names
+   `CLAUDE_CODE_SUBAGENT_MODEL` as part of the same leak, and a prefix check
+   passes it untouched; so would any future `CLAUDE_*` or provider variable an
+   Ollama release adds. The whitelist is already enumerated, so equality costs
+   nothing and closes the whole family rather than one prefix of it.
+
+2. **Post-run.** Assert the result envelope's `modelUsage` key set is non-empty
+   and equals exactly `{<config model>}`. Any other model means the call was
+   answered by something other than the intended advisor: discard the reply,
+   exit 2, log it.
+
+   *Set equality, not membership.* Membership would pass a mixed envelope, which
+   is the shape a fallback or a retry against a different model produces — the
+   exact case the guard is for.
 
 The second guard is the one that makes this safe to build. Without it the whole
 failure mode this bridge exists to prevent — GLM advising GLM — returns
 silently, formatted as advice.
+
+**Implementer prerequisite: capture the envelope shape first.** The spike
+recorded token counts (`cache_creation 1414, input 2`) but never recorded the
+`modelUsage` field's actual shape — whether it is an object keyed by model id, a
+list, or nested under another key. Run one `claude -p --output-format json` call,
+record the verbatim shape in this section, and write the guard against that.
+Do not write the guard against an assumed shape: a guard that reads a key that
+does not exist yields `$null`, and `$null -eq $null` passes. A fail-closed guard
+that silently inverts to fail-open is worse than no guard, because the design
+above leans on it.
 
 ### Output, logging, exits
 
 stdout carries the envelope's `result` text and nothing else. The caller is a
 model reading advice, not a JSON parser.
 
-One row per run appended to `~/.claude/fable-advisor.log.jsonl`: timestamp,
-caller session id, chars sent, turns rendered, turns elided, input and output
-tokens, cost, duration, verdict.
+One row per run appended to `~/.claude/advisor-bridge.log.jsonl`: `ts`,
+`session_id` (the caller's), `model`, `chars_sent`, `turns_rendered`,
+`turns_elided`, `lines_skipped`, `input_tokens`, `output_tokens`, `cost_usd`,
+`duration_ms`, `verdict`.
+
+`verdict` is one of `ok`, `timeout`, `model_guard`, `child_error`,
+`no_envelope`. On any path where no envelope came back — `timeout`,
+`no_envelope`, and `child_error` when the child died before writing —
+`input_tokens`, `output_tokens` and `cost_usd` are `null` and `duration_ms` is
+the measured wall time. Writing zeros there would make a killed call
+indistinguishable from a free one in the log the cost calibration reads.
 
 | Exit | Meaning |
 |---|---|
 | 0 | Advice returned |
-| 1 | Wrapper error — no session id, no transcript, missing credentials, bad config, disabled |
-| 2 | Advisor call failed (`is_error`, nonzero child exit, empty envelope, script-side timeout) or the model guard tripped |
+| 1 | Wrapper error — see the table below |
+| 2 | The call failed or a guard tripped — see the table below |
 
-The script kills the child at 240 s and exits 2. Without its own timeout the
-only limit is the caller's Bash-tool timeout, which kills the wrapper too — no
-exit code, no log row, and no way to tell a hung call from a slow one when
-reading the log later.
+**Exit 1 — the wrapper refused before spawning.** Every case is detectable
+locally, costs nothing, and names a remedy:
+
+- Config missing, unreadable, or `enabled` not `true`
+- `claude` executable not resolvable
+- Persona file missing, unreadable, or over the size preflight
+- `CLAUDE_CODE_SESSION_ID` unset
+- Transcript: no match, or more than one match
+- Render produced zero turns
+- `~/.claude/advisor-scratch` could not be created
+
+**Exit 2 — the call was attempted and its result is not trustworthy:**
+
+| Case | `verdict` |
+|---|---|
+| Pre-spawn guard tripped | `model_guard` |
+| Child killed at the timeout | `timeout` |
+| Envelope reports `is_error`, or the child exited nonzero | `child_error` |
+| No parseable result envelope on stdout | `no_envelope` |
+| Post-run model guard tripped | `model_guard` |
+
+Missing or expired Anthropic credentials land in `child_error`, not exit 1:
+they are only discoverable from the child's own failure, and a pre-flight
+credential check would duplicate the CLI's auth logic to no benefit.
+
+The pre-spawn guard is exit 2 and not exit 1 even though nothing spawned. It is
+not a configuration mistake the user can fix by editing a file — it means the
+environment scrub itself is broken, which is the same class of "do not trust
+this result" as the post-run guard.
+
+**Timeout.** The script kills the child at `timeoutSec` (default 240) and exits
+2. The kill must take the **process tree**: `claude` on Windows launches a node
+child, and killing only the parent leaves it holding the pipe. Redirect files
+are removed in a `finally`, matching the create/remove pairing at
+`ollama-worker.ps1:386,410`, so a timeout does not leak temp files.
+
+Without its own timeout the only limit is the caller's Bash-tool timeout, which
+kills the wrapper too — no exit code, no log row, and no way to tell a hung call
+from a slow one when reading the log later.
+
+**240 s is a starting value, not a measurement.** The one timing datum is a
+64 s wall clock for a *trivial* call; this design runs `CLAUDE_EFFORT=xhigh`
+over a ~20 K-token transcript, which is a different workload. It is a config key
+(`timeoutSec`) and a `-TimeoutSec` parameter override so the log's
+`duration_ms` column can retune it, and so a test can drive it to 2 s against a
+deliberately slow stub instead of waiting four minutes.
 
 ### Skill
 
-`~/.claude/skills/advisor/SKILL.md` covers when to call (before substantive
-work, when stuck, when changing approach, before declaring done), and how to
-weigh the answer — primary-source evidence in the caller's own transcript
-outranks the advice, and a genuine conflict warrants one reconciling call rather
-than a silent switch.
+`~/.claude/skills/advisor-bridge/SKILL.md` covers three things.
 
-The invocation line **must** pass `timeout: 300000` to the Bash tool. A trivial
-Fable call measured 64 s wall; a real transcript with extended thinking will
-exceed the 120 s default, and the caller would see a killed call rather than
-advice. This is the failure most likely to spoil first use.
+**When to call and how to weigh the answer.** Before substantive work, when
+stuck, when changing approach, before declaring done. Primary-source evidence in
+the caller's own transcript outranks the advice, and a genuine conflict warrants
+one reconciling call rather than a silent switch.
+
+**The invocation line, which must pass `timeout: 300000` to the Bash tool.** A
+trivial Fable call measured 64 s wall; a real transcript with extended thinking
+will exceed the 120 s default, and the caller would see a killed call rather
+than advice. This is the failure most likely to spoil first use. Note the
+ordering: the script's own 240 s kill fires first and produces an exit code and
+a log row, and the 300 s Bash timeout is the outer backstop — the two must not
+be set the other way round, or the wrapper dies before it can report.
+
+**`on` / `off` / `status`**, mirroring `ollama-workers/SKILL.md`'s command
+section, including its whole-object rewrite recipe:
+
+```powershell
+$p = "$HOME/.claude/advisor-bridge.json"
+$s = Get-Content -Raw $p | ConvertFrom-Json
+$s.enabled = $true          # or $false
+$s | ConvertTo-Json | Set-Content -LiteralPath $p
+```
+
+Without this the enforced gate has no surface: a fresh install seeds
+`enabled: false`, and nothing would document how to turn it on.
 
 ### SessionStart hook
 
-`advisor-bridge-status.py` fires only when `ANTHROPIC_BASE_URL` is set and its
-host is not `api.anthropic.com`. In that case it injects the advisor protocol as
-`additionalContext`. In every other session it exits silently, so sessions that
-already have the native `advisor` tool are untouched.
+`advisor-bridge-status.py` reads `~/.claude/advisor-bridge.json` **first** and
+exits silently when the file is missing, unreadable, or `enabled` is not `true`
+— the pattern at `ollama-workers-status.py:73-83`, documented in
+`ollama-workers/SKILL.md` as "a disabled install costs no context".
+
+Only then does it check `ANTHROPIC_BASE_URL`: set, and its host not
+`api.anthropic.com` → inject the advisor protocol as `additionalContext`.
+Anything else → exit silently, so sessions that already have the native
+`advisor` tool are untouched.
+
+Both gates matter and neither substitutes for the other. Base-URL alone would
+inject the protocol into every Ollama session while the bridge is off, spending
+context on every session and steering the model into calls that exit 1 —
+turning the bridge off would not turn its surface off.
 
 ### Config
 
-`~/.claude/fable-advisor.json`:
+`~/.claude/advisor-bridge.json`, seeded from `advisor-bridge.example.json` on
+first install only:
 
 ```json
 {
-  "enabled": true,
+  "enabled": false,
   "model": "claude-fable-5-1",
   "charBudget": 80000,
-  "maxToolResultChars": 2000
+  "maxToolResultChars": 2000,
+  "timeoutSec": 240
 }
 ```
+
+`enabled` seeds **false**, matching `ollama-workers.example.json:2`. A fresh
+install of a package that spends $0.20–0.40 per call must not be live before the
+user has said so once. `/advisor-bridge on` is the opt-in.
 
 `enabled` is enforced by the script itself, not only by the skill's prose — a
 call on stale context after a compact fails loudly instead of spending money. A
 missing or unreadable file counts as disabled.
 
+Read the three numeric keys with `-as [int]`, not a cast, each with the default
+above as its fallback and a positive-value floor. `ollama-worker.ps1:128-133`
+records why: a non-numeric value cast under `$ErrorActionPreference = 'Stop'` is
+a terminating error that takes the wrapper down before it can report what was
+wrong with the config.
+
 ## Cost
 
-Measured, not estimated. The default Claude Code system prompt is ~38 K tokens;
-at Fable's rate with a 1-hour cache write, a four-token reply cost **$0.77**.
-The same call with a short `--system-prompt`, `--tools ""`,
-`--strict-mcp-config` and `--setting-sources ""` shrank the prompt to 1,414
-tokens and cost **$0.029** — a 26× reduction in fixed overhead. The real persona
-is longer than the one-line prompt used in that measurement, so budget a few
-hundred tokens more.
+Two **measurements**. The default Claude Code system prompt is ~38 K tokens; at
+Fable's rate with a 1-hour cache write, a four-token reply cost **$0.77**. The
+same call with a short `--system-prompt`, `--tools ""`, `--strict-mcp-config`
+and `--setting-sources ""` shrank the prompt to 1,414 tokens and cost **$0.029**
+— a 26× reduction in fixed overhead. The real persona is longer than the
+one-line prompt used in that measurement, so budget a few hundred tokens more.
 
 **The transcript does not amortize.** Prompt caching matches an exact prefix,
 and the rendered transcript is one user message that differs on every call — new
@@ -284,11 +533,13 @@ turns, different truncation. Only the persona in the system prompt is reused.
 The spike shows the split directly: `cache_creation 1414, input 2` — the system
 prompt cached, the user message did not.
 
-So every call pays close to full price for its transcript. At `charBudget:
-80000` (~20 K tokens) that is roughly **$0.20–0.40 per call**, every call, with
-only the ~1.4 K persona amortized. Raising the budget to 120 K raises every call
-proportionally; the log's cost column is the evidence for whether it is worth
-it.
+**A derived estimate, not a measurement.** At `charBudget: 80000` (~20 K tokens)
+every call pays close to full price for its transcript: roughly **$0.20–0.40 per
+call**, every call, with only the ~1.4 K persona amortized. That range is
+arithmetic from the char budget, not an observed figure — no full-transcript
+call has been billed yet. The log's `cost_usd` column replaces it after the
+first runs, and is the evidence for whether raising `charBudget` to 120 K is
+worth the proportional increase.
 
 The only real lever on this is resuming one advisor session across calls
 (`--resume`), so each call sends the delta rather than the whole transcript.
@@ -297,35 +548,187 @@ stateless, one-shot design for session lifecycle management — but it is the
 lever, and it is named here so the cost is a known trade rather than a
 discovery.
 
+## Install
+
+`install.ps1` at the package root, `-DryRun` supported, mirroring
+`ollama-workers/install.ps1`: idempotent file copies, seed-if-absent for the
+JSON config, and one `SessionStart` entry added to `~/.claude/settings.json`
+after a timestamped backup, with the rewrite verified and rolled back if
+anything moved.
+
+**One deliberate divergence, and it is the reason this section exists.** This
+will be the first time two packages in this repo append to the same
+`SessionStart` category. `ollama-workers/install.ps1:128-134` skips comparing
+that category wholesale and then confirms only that *its own* entry landed:
+
+```powershell
+# SessionStart is the one we appended to, so it must differ.
+if ($cat -eq 'SessionStart') { continue }
+...
+$written = @($after.hooks.SessionStart) | ForEach-Object { $_.hooks } |
+    Where-Object { $_.command -like '*ollama-workers-status*' }
+if (-not $written) { $lost.Add('SessionStart entry was not written') }
+```
+
+A mirrored installer that copied this verbatim would check only for
+`*advisor-bridge-status*`, so a rewrite that dropped the ollama-workers entry
+would verify clean and keep the damaged file. The writer at
+`install.ps1:83-85` is correct — it copies existing groups — but the verifier
+cannot detect its own failure here.
+
+So: **collect every `SessionStart` command string before the rewrite, and assert
+each one is still present afterwards**, in addition to asserting the new entry
+landed. Roll back to the backup on any loss.
+
+**Back-fill the same check into `ollama-workers/install.ps1`** in this change.
+The two are symmetric hazards, and whichever installer is run second is the one
+that can destroy the other's entry — fixing only the new one leaves half the
+failure live.
+
+`README.md` gets an index-table row for `advisor-bridge` and a "Notes per skill"
+entry, matching the shape of the `ollama-workers` entries: Windows-only
+(PowerShell 7), the `claude` CLI and an Anthropic login as prerequisites,
+`./advisor-bridge/install.ps1` (`-DryRun` first) as the install command, and
+off-by-default stated explicitly.
+
 ## Testing
 
-- **Golden render.** A captured session JSONL fixture renders to expected text.
-  Covers the attachment filter, the `isSidechain` filter, each block type's cap,
-  and the elision path.
-- **Environment scrub.** Run with `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`
-  and `ANTHROPIC_DEFAULT_OPUS_MODEL` set to Ollama-like values; `-DryRun` prints
-  the constructed child environment; assert no `ANTHROPIC_*` key survives.
-- **Model guard.** Force a non-Fable model and assert exit 2 with the reply
-  discarded, not printed.
-- **Locator.** Unset `CLAUDE_CODE_SESSION_ID` and assert exit 1 with a remedy;
-  assert no fallback to a nearby transcript.
-- **Disabled gate.** `enabled: false` exits 1 without launching a child.
-- **End-to-end.** One real call from a live `ollama launch claude` session.
+**Runner: Pester 5**, suite at `advisor-bridge/tests/`, one file per area:
+`Render.Tests.ps1`, `Locator.Tests.ps1`, `Env.Tests.ps1`, `Guard.Tests.ps1`,
+`Config.Tests.ps1`, `Install.Tests.ps1`. Run with:
 
-The golden fixture is synthesized, not a captured probe session. Real
-transcripts carry absolute paths, the user's email, and machine details, and
-this repo is public.
+```powershell
+Invoke-Pester advisor-bridge/tests -Output Detailed
+```
 
-One thing for the implementer to verify rather than assume: whether
-SessionStart fires with `source: "compact"`. The native advisor survives a
-compact because it lives in the system prompt; this bridge's protocol arrives
-as `additionalContext` and may not. If it does fire, the hook's matcher must
-not exclude it, or the protocol silently disappears mid-session.
+That command goes in `README.md` as this package's `**Tests:**` line, matching
+how `find-cold-leads` documents its pytest command. Every test below is offline,
+deterministic, and spends nothing. Pester is the choice because the repo has no
+PowerShell test framework yet and this is the only PowerShell package that will
+ship one; a plain `.ps1` harness with `exit 1` would work equally and can be
+substituted at plan time, but the suite must have *a* named runner and a
+documented command — not a list of intentions.
+
+Three test seams are **deliverables of the script**, not test-only afterthoughts,
+and are specified here because several of the tests below cannot exist without
+them:
+
+| Seam | What it does |
+|---|---|
+| `-DryRun` | Prints the constructed child environment, the resolved argument list, the cwd and the rendered char count as JSON, then exits 0 **before spawning**. Mirrors `ollama-worker.ps1:42,373-384`. |
+| `-EnvelopeFile <path>` | Reads a canned result envelope from a file instead of spawning `claude`. The only way to drive the post-run guard against a wrong model without a real, non-deterministic API call. |
+| `-TimeoutSec <n>` | Overrides `timeoutSec`, so the timeout path is testable in 2 s against a slow stub. |
+
+### Cases
+
+**Render** — golden fixtures, each asserting exact expected text:
+
+- Attachment filter: `attachment` records dropped, `user`/`assistant` kept.
+- Sidechain filter: `isSidechain: true` dropped; **a record with no
+  `isSidechain` field at all is KEPT** (the `-ne $true` rule).
+- Per-block caps: `thinking` at 600, `tool_use` input at 800, `tool_result` at
+  `maxToolResultChars` — including a `tool_result` **inside the last 12 turns**,
+  which the earlier draft's wording would have left uncapped.
+- Elision: `[N turns elided]` appears with the right N.
+- **First-message independence**: a fixture long enough that the first user
+  message falls *outside* the last-12-turns window, asserting it still renders
+  in full. Without this, an implementation that folds rule 1 into rule 2 passes
+  every other render test.
+- **Termination**: a fixture whose first message plus twelve turns alone exceed
+  `charBudget`, asserting the final render is `<= charBudget` and carries
+  `[truncated]`. This is the case steps 4 and 5 were added for.
+- **Truncated final line**: a fixture whose last line is a half-written JSON
+  record, asserting the render succeeds and the header reports one skipped line.
+- **Hook text inside a surviving record**: a `user` record whose own content
+  carries system-reminder / hook output, asserting it is stripped. The 96.6%
+  saving is otherwise an inferred property rather than a tested one — the
+  `type` filter only proves that *attachment* records go.
+- **Empty render**: a transcript of nothing but attachments, asserting exit 1
+  naming the transcript path, with no child spawned.
+
+Fixtures are **synthesized, not captured**. Real transcripts carry absolute
+paths, the user's email, and machine details, and this repo is public. To make
+that actionable, the plan's first render task must begin by capturing one real
+record of each kind, recording the field shapes (not the content) in a short
+`tests/fixtures/SCHEMA.md`, and synthesizing from that. A fixture invented from
+this document's prose would validate the renderer against a schema that is not
+the one Claude Code writes.
+
+**Locator** — all three exit-1 paths, each asserting the message names its own
+remedy: session id unset; session id with zero matches; session id matching
+transcripts under two different `<base>/projects/*/` directories. Assert in
+every case that no fallback to a nearby transcript occurs.
+
+**Config / disabled gate** — three cases, each asserting exit 1 with no child
+spawned: `enabled: false`; config file absent; config file present but invalid
+JSON. The last two are the cases `### Config` calls out by name. Plus:
+non-numeric and negative `charBudget`, `maxToolResultChars` and `timeoutSec` each
+fall back to their default rather than throwing.
+
+**Environment scrub** — run with `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+`ANTHROPIC_DEFAULT_OPUS_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL` set to
+Ollama-like values; `-DryRun` prints the constructed child environment; assert
+the printed key set **equals the whitelist exactly** — not merely that no
+`ANTHROPIC_*` survived, which would pass while `CLAUDE_CODE_SUBAGENT_MODEL`
+leaked.
+
+**Model guard** — `-EnvelopeFile` with a canned envelope whose `modelUsage`
+names a non-configured model: assert exit 2, `verdict: "model_guard"`, a log row
+written, and **nothing printed to stdout**. Then a canned envelope with *two*
+models including the right one: assert it also trips (set equality, not
+membership). Then a canned envelope with `modelUsage` absent entirely: assert it
+trips rather than passing on a `$null` comparison.
+
+**Timeout** — `-TimeoutSec 2` against a stub that sleeps 10: assert exit 2,
+`verdict: "timeout"`, a log row with `null` token/cost fields and a real
+`duration_ms`, no orphaned child process, and no leftover temp files.
+
+**Log row** — assert the appended JSONL line parses and carries all twelve
+documented fields on both the success and the timeout paths.
+
+**Install** — `-DryRun` against a fixture `settings.json` that already contains
+an `ollama-workers-status` SessionStart entry: assert the plan preserves it.
+Then a real run against a temp `~/.claude`, asserting both entries are present
+afterwards and that a simulated loss triggers the rollback.
+
+**Skill invocation timeout** — grep `SKILL.md` for `timeout: 300000`. Trivial,
+static, and guards the failure the spec itself calls most likely to spoil first
+use.
+
+### Manual, not in the suite
+
+**End-to-end.** One real call from a live `ollama launch claude` session.
+Assertions: exit 0; `result` text printed to stdout; a log row whose `verdict`
+is `ok` and whose `model` is the configured one; and the child's own transcript
+under `~/.claude/projects/*/` carries **zero `hook_success` records**, which is
+the only check that would catch `--setting-sources ""` silently ceasing to
+suppress hooks.
+
+This test spends real money on every run (see `## Cost`) and needs a live Ollama
+session, so it is **excluded from the Pester suite and from any automated test
+glob**. `ship`'s P4 exit gate runs "the change's own test files"; an end-to-end
+file matching `*.Tests.ps1` would bill every pipeline run. Keep it as
+`advisor-bridge/tests/manual/e2e.md` — a documented procedure, not an
+executable test.
+
+**Persona acceptance.** Behavioural, against a local uncommitted transcript, per
+`### Persona`.
+
+### For the implementer to verify
+
+- **The `modelUsage` envelope shape**, before writing the post-run guard. See
+  `### Guards` — this is a prerequisite, not a nice-to-have.
+- **Whether SessionStart fires with `source: "compact"`.** The native advisor
+  survives a compact because it lives in the system prompt; this bridge's
+  protocol arrives as `additionalContext` and may not. If it does fire, the
+  hook's matcher must not exclude it, or the protocol silently disappears
+  mid-session.
 
 `ollama-workers/install.ps1` is the model for this install script and is on
-`main`. Read it there. Both installers write into `~/.claude`, so this one
-must stay consistent with it — same idempotence rules, same seed-on-first-
-install-only treatment of the JSON config, same junction handling.
+`main`. Read it there. Both installers write into `~/.claude`, so this one must
+stay consistent with it on idempotence and on seeding the JSON config only when
+absent — and must diverge from it on the `SessionStart` verification, per
+`## Install`.
 
 ## Out of scope
 
