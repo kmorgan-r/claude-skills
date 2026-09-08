@@ -42,6 +42,17 @@ Describe 'record filters' {
         $r.lines_skipped | Should -Be 1
         $r.turns_rendered | Should -Be 2
     }
+    # message.content can be a bare STRING (an ordinary typed user message),
+    # not only a block array. long.jsonl's first turn is exactly that shape.
+    # Wrapping a string in @() yields a one-element array whose element has no
+    # .type, so a renderer missing the -is [string] branch in Format-Turn
+    # would fall through Format-Block's `default` case and render an empty
+    # body - this asserts the marker survives, which only happens if the
+    # string branch actually ran.
+    It 'renders a bare-string message.content rather than an empty body' {
+        $r = Render-Fixture 'long.jsonl'
+        $r.render | Should -Match 'FIRST-MESSAGE-MARKER-END'
+    }
 }
 
 Describe 'block caps' {
@@ -99,5 +110,10 @@ Describe 'non-empty check' {
             exit `$LASTEXITCODE" 2>&1
         $LASTEXITCODE | Should -Be 1
         ($out -join "`n") | Should -Match 'fix-session.jsonl'
+        # Paired per Rule 1: the filename alone could stay green if a later
+        # fail-closed step (e.g. Task 5's budget check) also names
+        # $transcriptPath in its own message and this check were deleted.
+        # 'no user or assistant turns survived' is unique to this Fail call.
+        ($out -join "`n") | Should -Match 'no user or assistant turns survived'
     }
 }
