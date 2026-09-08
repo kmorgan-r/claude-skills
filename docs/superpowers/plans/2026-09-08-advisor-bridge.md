@@ -28,7 +28,7 @@ These apply to every task. Every task's requirements implicitly include this sec
   The `git commit -m "…"` line shown in each task's commit step is **shorthand for the
   subject only**. Append the trailer to every one of them — e.g. with a second `-m`, or
   a heredoc. A task executed literally as written would otherwise produce a commit that
-  violates this section, in all eleven commit steps.
+  violates this section, in all twelve commit steps.
 
 ## File Structure
 
@@ -256,7 +256,7 @@ The gate sits above everything that costs money, so it is built first and everyt
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `advisor-bridge.ps1` accepting `-ClaudeHome <path>`, `-DryRun`, `-EnvelopeFile <path>`, `-TimeoutSec <int>`; a `Get-PositiveInt($value, [int]$default)` helper; `$cfg` with keys `enabled`, `model`, `charBudget`, `maxToolResultChars`, `timeoutSec`; a `Fail([string]$message, [int]$code = 1)` helper writing `advisor-bridge: <message>` to stderr.
+- Produces: `advisor-bridge.ps1` accepting `-ClaudeHome <path>`, `-DryRun`, `-EnvelopeFile <path>`, `-TimeoutSec <int>`, `-InjectEnvKey <name>`; a `Get-PositiveInt($value, [int]$default)` helper; `$cfg` with keys `enabled`, `model`, `charBudget`, `maxToolResultChars`, `timeoutSec`; a `Fail([string]$message, [int]$code = 1)` helper writing `advisor-bridge: <message>` to stderr.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1073,8 +1073,8 @@ git commit -m "feat(advisor-bridge): budget enforcement that terminates from eit
 - Test: `advisor-bridge/tests/Env.Tests.ps1`
 
 **Interfaces:**
-- Consumes: `$rendered`, `$model`, `$personaPath`, `$scratchDir`, `Fail`.
-- Produces: `$psi` — a fully configured `ProcessStartInfo`; `$ENV_WHITELIST` — the exact key set the guard compares against; `-DryRun` output as a JSON object with keys `env`, `args`, `cwd`, `render`, `chars_sent`, `turns_rendered`, `turns_elided`, `lines_skipped`.
+- Consumes: `$rendered`, `$model`, `$personaPath`, `$scratchDir`, `Fail` — and, for `Write-LogRow`, `$sessionId` (Task 3), `$logPath` (Task 2), `$skipped` (Task 4), `$charsSent`, `$turnsRendered`, `$elided` (Task 5). All six are assigned unconditionally above this point in the append order.
+- Produces: `$psi` — a fully configured `ProcessStartInfo`; `$ENV_WHITELIST` — the exact key set the guard compares against; `Write-LogRow([string]$verdict, $envelope, [int]$durationMs, [string]$source)`, the single log-row writer both this task's guard and Task 7's spawn path call, so the twelve fields cannot drift between them; `-DryRun` output as a JSON object with keys `env`, `args`, `cwd`, `exe`, `model`, `render`, `chars_sent`, `turns_rendered`, `turns_elided`, `lines_skipped`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1431,10 +1431,13 @@ The last of the engine, and the part that spends money.
 **Files:**
 - Modify: `advisor-bridge/scripts/advisor-bridge.ps1` (append)
 - Test: `advisor-bridge/tests/Guard.Tests.ps1`
+- Create: `advisor-bridge/tests/fixtures/envelope-ok.json`
 - Create: `advisor-bridge/tests/fixtures/envelope-wrong-model.json`
 - Create: `advisor-bridge/tests/fixtures/envelope-two-models.json`
 - Create: `advisor-bridge/tests/fixtures/envelope-no-modelusage.json`
-- Create: `advisor-bridge/tests/fixtures/envelope-ok.json`
+- Create: `advisor-bridge/tests/fixtures/envelope-child-error.json`
+- Create: `advisor-bridge/tests/fixtures/envelope-error-and-wrong-model.json`
+- Create: `advisor-bridge/tests/fixtures/envelope-malformed.json`
 
 **Interfaces:**
 - Consumes: everything above.
@@ -1451,7 +1454,12 @@ The last of the engine, and the part that spends money.
     ConvertFrom-Json | Select-Object -ExpandProperty modelUsage | ConvertTo-Json -Depth 6
 ```
 
-Record the verbatim shape in the spec's `### Guards` section (an object keyed by model id? a list? nested?) and commit that spec edit. Then build the four fixtures below from that shape. **If the shape differs from an object keyed by model id, adjust the guard code in Step 4.**
+Record the verbatim shape in the spec's `### Guards` section (an object keyed by model id? a list? nested?) and commit that spec edit. Then build the fixtures below from that shape. **If the shape differs from an object keyed by model id, adjust the guard code in Step 6.**
+
+Two further items belong in the **same** spec commit, since this is the one step in the plan that opens the spec:
+
+- Add `-InjectEnvKey <name>` to the seam table in `### Guards` — a fifth seam beyond the four the spec names, honoured only alongside `-DryRun`, added because the spec asks for the pre-spawn guard to be covered and no external input can otherwise make it trip (Task 6).
+- Strike the *For the implementer to verify* bullet asking whether hook output rides inside `user` records. Task 1 Step 5 settled it: it does not, so the renderer needs no stripping rule.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -1463,6 +1471,13 @@ Record the verbatim shape in the spec's `### Guards` section (an object keyed by
 BeforeAll {
     $script:Script   = Join-Path $PSScriptRoot '..' 'scripts' 'advisor-bridge.ps1'
     $script:Fixtures = Join-Path $PSScriptRoot 'fixtures'
+
+    # One list, asserted on both the success row and the timeout row. A row that
+    # silently lost half its columns when the call failed would be worst exactly
+    # where it is most needed.
+    $script:LogFields = @('ts','session_id','model','chars_sent','turns_rendered',
+                          'turns_elided','lines_skipped','input_tokens','output_tokens',
+                          'cost_usd','duration_ms','verdict')
 
     function Invoke-WithEnvelope {
         param([string]$Envelope, [string[]]$Extra = @())
@@ -1553,16 +1568,7 @@ Describe 'log row' {
 }
 ```
 
-Add the shared field list to the `BeforeAll`, so the timeout test below asserts the
-same twelve fields rather than a hand-picked three:
-
-```powershell
-    $script:LogFields = @('ts','session_id','model','chars_sent','turns_rendered',
-                          'turns_elided','lines_skipped','input_tokens','output_tokens',
-                          'cost_usd','duration_ms','verdict')
-```
-
-- [ ] **Step 3: Build the four envelope fixtures**
+- [ ] **Step 3: Build the seven envelope fixtures**
 
 From the shape recorded in Step 1. Assuming `modelUsage` is an object keyed by model id:
 
@@ -1637,7 +1643,21 @@ if ($EnvelopeFile) {
     $source = 'envelope-file'
     try { $envelope = Get-Content -Raw -LiteralPath $EnvelopeFile | ConvertFrom-Json }
     catch { $envelope = $null }
-    if ($null -eq $envelope) { $verdict = 'no_envelope' }
+    if ($envelope -and $envelope.type -ne 'result') { $envelope = $null }
+
+    # The seam must classify exactly as the spawn path does, or the verdicts it
+    # exists to exercise are unreachable through it. Without the is_error arm, a
+    # canned error envelope parses cleanly, $verdict stays 'ok', the post-run
+    # guard sees one matching model and does not trip - so the script exits 0 and
+    # prints the reply. The child_error test would fail outright, and the
+    # model_guard-beats-child_error test would pass for the wrong reason, leaving
+    # the precedence rule asserted only in prose.
+    #
+    # Classify here rather than hoisting the spawn branch's chain out of its
+    # `else`: that chain also reads $writeFailed and $exitCode, and running it
+    # unconditionally would reclassify both timeout paths.
+    if ($null -eq $envelope)              { $verdict = 'no_envelope' }
+    elseif ($envelope.is_error -eq $true) { $verdict = 'child_error' }
 }
 else {
     $proc = [System.Diagnostics.Process]::Start($psi)
@@ -1766,6 +1786,14 @@ exit 0
 
 Append to `advisor-bridge/tests/Guard.Tests.ps1`:
 
+The spec's timeout case also names "no leftover temp files". That clause is satisfied
+**by construction, not by assertion**: this design streams the render through
+`StandardInput` and drains the child with `ReadToEndAsync`, so unlike
+`ollama-worker.ps1:386,410` — which writes a prompt file and removes it in a paired
+step — there is no temp file on any path to leak. A `*.tmp` glob here would be a check
+that can never fail. If the spawn path ever gains a redirect file, add the assertion
+with it.
+
 ```powershell
 Describe 'timeout' {
     It 'kills a slow child, exits 2, logs null cost and a real duration' {
@@ -1816,9 +1844,6 @@ Describe 'timeout' {
         @(Get-Process -Name 'PING' -ErrorAction SilentlyContinue |
             Where-Object { $_.StartTime -gt $start }).Count | Should -Be 0
 
-        # And no leftover temp files: the wrapper writes none on this path.
-        @(Get-ChildItem -LiteralPath $h -Filter '*.tmp' -ErrorAction SilentlyContinue).Count |
-            Should -Be 0
     }
 }
 ```
@@ -2786,7 +2811,7 @@ After the `### ollama-workers` block:
 
 `advisor-bridge/tests/manual/e2e.md`:
 
-```markdown
+````markdown
 # End-to-end check (manual — spends real money)
 
 **Not a `*.Tests.ps1` file, deliberately.** `ship`'s P4 exit gate runs "the change's
@@ -2843,7 +2868,7 @@ pwsh -NoProfile -File "$HOME/.claude/scripts/advisor-bridge.ps1"
 | Exit 2, `model_guard` | Something other than the intended advisor answered. Check `modelUsage` in a raw `claude -p --output-format json` call — the guard's shape assumption may be wrong |
 | Exit 2, `timeout` | Raise `timeoutSec`; check `duration_ms` in the log row for how close it was |
 | Killed with no exit code at all | The Bash tool's timeout fired before the script's. The invocation must pass `timeout: 300000` |
-```
+````
 
 - [ ] **Step 4: Verify the whole suite one more time**
 
@@ -2863,7 +2888,7 @@ git commit -m "docs(advisor-bridge): README registration and the manual e2e proc
 
 **Spec coverage.** Every spec section maps to a task: Naming → Global Constraints + Task 11's install paths; Components → Task 11; Order of operations → Tasks 2–7 in that order; Session locator → Task 3; Renderer → Tasks 4–5; Child spawn → Task 6; Persona → Task 8; Guards → Tasks 6 (pre-spawn) and 7 (post-run); Output/logging/exits → Task 7; Skill → Task 10; SessionStart hook → Task 9; Config → Task 2; Cost → Task 10 and Task 12 (the log column, not the estimate); Install → Task 11; Testing → every task's test steps plus Task 12's manual procedure. Both *For the implementer to verify* items are steps, not notes: the `modelUsage` shape is Task 7 Step 1, and the hook-text-inside-user-records question is Task 1 Step 5 — **already settled empirically** (0 of 119 `user` records; every hook and reminder payload lives in a separate `attachment` record), so that step is a re-confirmation with a STOP that fires only if a Claude Code upgrade has changed the layout.
 
-**One deliberate addition beyond the spec.** The spec names four test seams; the plan adds a fifth, `-InjectEnvKey`, honoured only alongside `-DryRun`. The spec's own Testing section asks for the pre-spawn guard to be covered, and it cannot be: `$actual` and `$expected` are both derived from `$ENV_WHITELIST` and the same `GetEnvironmentVariable` calls, so no external input makes them diverge — a guard no test can trip is a guard that could be deleted with the suite still green. Under `-DryRun` nothing spawns and nothing is billed, and the seam is refused outright otherwise. This belongs in the spec's `### Guards` and `## Testing` sections the next time it is opened.
+**One deliberate addition beyond the spec.** The spec names four test seams; the plan adds a fifth, `-InjectEnvKey`, honoured only alongside `-DryRun`. The spec's own Testing section asks for the pre-spawn guard to be covered, and it cannot be: `$actual` and `$expected` are both derived from `$ENV_WHITELIST` and the same `GetEnvironmentVariable` calls, so no external input makes them diverge — a guard no test can trip is a guard that could be deleted with the suite still green. Under `-DryRun` nothing spawns and nothing is billed, and the seam is refused outright otherwise. **Task 7 Step 1 already edits the spec** (to record the verbatim `modelUsage` shape in `### Guards`), so the seam is recorded in that same edit rather than deferred — see that step.
 
 **One spec item is deliberately deferred:** whether SessionStart fires with `source: "compact"`. It cannot be settled without an installed hook, so it is not a task gate — it is checked during Task 12's manual run, and if the hook does fire on compact, no code changes (the hook has no matcher to exclude it).
 
