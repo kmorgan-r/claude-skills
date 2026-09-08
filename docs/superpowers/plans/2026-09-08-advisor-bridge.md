@@ -25,6 +25,10 @@ These apply to every task. Every task's requirements implicitly include this sec
   ```
   Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
   ```
+  The `git commit -m "…"` line shown in each task's commit step is **shorthand for the
+  subject only**. Append the trailer to every one of them — e.g. with a second `-m`, or
+  a heredoc. A task executed literally as written would otherwise produce a commit that
+  violates this section, in all eleven commit steps.
 
 ## File Structure
 
@@ -56,7 +60,7 @@ The spec names six test files "one file per area"; this plan adds `Hook.Tests.ps
 
 | File | Change |
 |---|---|
-| `ollama-workers/install.ps1` | Back-fill the strengthened `SessionStart` verifier (Task 11) |
+| `ollama-workers/install.ps1` | Back-fill the strengthened `SessionStart` verifier, guard its null-`hooks` crash, and add a `-ClaudeHome` seam so the change is testable (Task 11) |
 | `README.md` | Index-table row and a "Notes per skill" entry for `advisor-bridge` |
 
 **Single-file engine, deliberately.** `ollama-worker.ps1` is 481 lines in one file and this one will be comparable. Splitting it would mean dot-sourcing across files, which complicates both the install (one more copy target that can go missing) and the tests (which invoke the script as a process). The package follows the sibling's shape.
@@ -188,12 +192,21 @@ Build each from the recorded shape. Content is invented; only structure is copie
 
 ```powershell
 # advisor-bridge/tests/fixtures/build.ps1 — run once, output committed
-function Rec([string]$type, [array]$blocks, [bool]$side = $false) {
-    [ordered]@{
-        type = $type
-        isSidechain = $side
-        message = [ordered]@{ role = $type; content = $blocks }
-    } | ConvertTo-Json -Depth 20 -Compress
+#
+# $side is deliberately UNTYPED and three-state: $true, $false, or $null meaning
+# "omit the key entirely". The omitted-key record is the only thing that proves
+# the renderer's rule is `-ne $true` rather than `-eq $false`, and a [bool]
+# parameter cannot express it - $null would coerce to $false and write the key.
+#
+# $content is likewise untyped so a fixture can carry a bare STRING as
+# message.content, not only a block array. Claude Code writes plain-string
+# content for ordinary typed user messages, and Format-Turn has a dedicated
+# branch for it; an [array] parameter would make that branch untestable.
+function Rec([string]$type, $content, $side = $null) {
+    $rec = [ordered]@{ type = $type }
+    if ($null -ne $side) { $rec['isSidechain'] = [bool]$side }
+    $rec['message'] = [ordered]@{ role = $type; content = $content }
+    return ($rec | ConvertTo-Json -Depth 20 -Compress)
 }
 function Text($s)        { [ordered]@{ type = 'text';        text = $s } }
 function Think($s)       { [ordered]@{ type = 'thinking';    thinking = $s } }
@@ -211,7 +224,7 @@ kept the record would render it.
 | `basic.jsonl` | one `user`, one `assistant`, one `attachment` record. The attachment is shaped like a turn — `message.content` with a `text` block — so that dropping it is proved by the filter, not by the record being unrenderable | `ATTACHMENT-MARKER` in the attachment record's text, and nowhere else |
 | `sidechain.jsonl` | one `user` with `isSidechain: true` (dropped), one **with the key absent entirely** (kept), one with `false` (kept) | `SIDECHAIN-MARKER` in the `isSidechain: true` record's text, and nowhere else |
 | `caps.jsonl` | `thinking` of 900 chars, `tool_use` input of 1200 chars, `tool_result` of 5000 chars — one pair mid-transcript and one inside the last 12 turns | — |
-| `long.jsonl` | 40 turns, the first user message ~500 chars, each later turn ~500 chars — long enough that the first message falls outside the last-12 window | `FIRST-MESSAGE-MARKER-END` as the **last** characters of the first user message's text, so its survival proves the message was kept whole rather than head-truncated |
+| `long.jsonl` | 40 turns, the first user message ~500 chars, each later turn ~500 chars — long enough that the first message falls outside the last-12 window. **The first user record's `message.content` is a bare STRING, not a block array** — that is the shape Claude Code writes for an ordinary typed user message, so the record the budget sequence works hardest to preserve is also the one that exercises `Format-Turn`'s string branch | `FIRST-MESSAGE-MARKER-END` as the **last** characters of the first user message's text, so its survival proves the message was kept whole rather than head-truncated |
 | `oversized-tail.jsonl` | 3 turns, the most recent a single `text` block of 200,000 chars | — |
 | `truncated.jsonl` | two valid records, then a third line cut mid-object (no closing brace) | — |
 | `empty.jsonl` | three `attachment` records and nothing else | — |
@@ -254,12 +267,38 @@ The gate sits above everything that costs money, so it is built first and everyt
 
 BeforeAll {
     $script:Script = Join-Path $PSScriptRoot '..' 'scripts' 'advisor-bridge.ps1'
+
+    # The parameter is -BridgeHome, NOT -Home. `$HOME` is a PowerShell automatic
+    # variable with Options `ReadOnly, AllScope`, and AllScope propagates it into
+    # every child scope - so a parameter named `$Home` cannot be bound. Every
+    # call would throw "Cannot overwrite variable Home because it is read-only
+    # or constant" at parameter binding, before the body ever runs.
     function Invoke-Bridge {
-        param([string]$Home, [string[]]$ExtraArgs = @())
-        $out = & pwsh -NoProfile -File $script:Script -ClaudeHome $Home @ExtraArgs 2>&1
+        param([string]$BridgeHome, [string[]]$ExtraArgs = @())
+        # CLAUDE_CONFIG_DIR and CLAUDE_CODE_SESSION_ID are pinned to throwaway
+        # values, exactly as in every other cross-process helper in this suite.
+        # Leaving them ambient is not merely untidy: from Task 3 onward a run
+        # that reaches the locator inherits the AMBIENT session id, and an agent
+        # implementing this plan runs the suite from inside a live Claude Code
+        # session whose own transcript sits at precisely the path the locator
+        # globs. `-DryRun` would then print the developer's real transcript -
+        # absolute paths, email, machine details - to stdout, in a repo whose
+        # Global Constraints forbid a real transcript ever being captured. It
+        # would also make these assertions depend on that transcript's contents.
+        $extra = $ExtraArgs -join ' '
+        $out = & pwsh -NoProfile -Command "
+            `$env:CLAUDE_CONFIG_DIR = '$BridgeHome'
+            `$env:CLAUDE_CODE_SESSION_ID = 'no-such-session'
+            & '$script:Script' -ClaudeHome '$BridgeHome' $extra
+            exit `$LASTEXITCODE" 2>&1
         [pscustomobject]@{ Code = $LASTEXITCODE; Text = ($out -join "`n") }
     }
-    function New-Home([string]$json) {
+
+    # $json is deliberately UNTYPED. A `[string]` parameter coerces `$null` to
+    # `''`, so `if ($null -ne $json)` would always be true and the "config file
+    # is absent" case below would silently become "config file is empty" - a
+    # different branch of the script, and not the one the spec names.
+    function New-Home($json) {
         $h = Join-Path ([System.IO.Path]::GetTempPath()) ("ab-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $h -Force | Out-Null
         if ($null -ne $json) { Set-Content -LiteralPath (Join-Path $h 'advisor-bridge.json') -Value $json }
@@ -270,21 +309,22 @@ BeforeAll {
 Describe 'enabled gate' {
     It 'exits 1 when enabled is false' {
         $h = New-Home '{"enabled": false}'
-        (Invoke-Bridge -Home $h).Code | Should -Be 1
+        (Invoke-Bridge -BridgeHome $h).Code | Should -Be 1
     }
     It 'exits 1 when the config file is absent' {
         $h = New-Home $null
-        $r = Invoke-Bridge -Home $h
+        (Join-Path $h 'advisor-bridge.json') | Should -Not -Exist   # the case really is "absent"
+        $r = Invoke-Bridge -BridgeHome $h
         $r.Code | Should -Be 1
         $r.Text | Should -Match 'advisor-bridge'
     }
     It 'exits 1 when the config file is not valid JSON' {
         $h = New-Home '{ this is not json'
-        (Invoke-Bridge -Home $h).Code | Should -Be 1
+        (Invoke-Bridge -BridgeHome $h).Code | Should -Be 1
     }
     It 'writes no log row on an exit-1 path' {
         $h = New-Home '{"enabled": false}'
-        Invoke-Bridge -Home $h | Out-Null
+        Invoke-Bridge -BridgeHome $h | Out-Null
         Join-Path $h 'advisor-bridge.log.jsonl' | Should -Not -Exist
     }
 }
@@ -292,7 +332,7 @@ Describe 'enabled gate' {
 Describe 'numeric coercion' {
     It 'falls back to the default on a non-numeric charBudget' {
         $h = New-Home '{"enabled": true, "charBudget": "wide"}'
-        $r = Invoke-Bridge -Home $h -ExtraArgs @('-DryRun')
+        $r = Invoke-Bridge -BridgeHome $h -ExtraArgs @('-DryRun')
         $r.Text | Should -Not -Match 'wide'
         # No exit-code assertion. At this task the script ends after the config
         # read, so it exits 0; asserting non-zero would fail here and start
@@ -303,7 +343,7 @@ Describe 'numeric coercion' {
     }
     It 'falls back to the default on a negative timeoutSec' {
         $h = New-Home '{"enabled": true, "timeoutSec": -5}'
-        $r = Invoke-Bridge -Home $h -ExtraArgs @('-DryRun')
+        $r = Invoke-Bridge -BridgeHome $h -ExtraArgs @('-DryRun')
         $r.Text | Should -Not -Match 'Cannot convert'
     }
 }
@@ -357,7 +397,12 @@ param(
     [string]$ClaudeHome,
     [string]$EnvelopeFile,
     [int]$TimeoutSec,
-    [switch]$DryRun
+    [switch]$DryRun,
+    # Test seam, honoured only alongside -DryRun (see Task 6). The spec names
+    # four seams; this is a fifth the plan adds, because the spec's own Testing
+    # section asks for the pre-spawn guard to be covered and no external input
+    # can otherwise make that guard trip.
+    [string]$InjectEnvKey
 )
 
 $ErrorActionPreference = 'Stop'
@@ -466,12 +511,15 @@ BeforeAll {
             Set-Content -LiteralPath (Join-Path $p "$sessionId.jsonl") -Value '{"type":"user"}'
         }
     }
+    # -BridgeHome, not -Home: `$HOME` is ReadOnly + AllScope, so a parameter of
+    # that name cannot be bound and every call would throw at parameter binding.
+    # Same reason as Config.Tests.ps1.
     function Invoke-Locate {
-        param([string]$Home, [string]$ConfigDir, [string]$SessionId)
+        param([string]$BridgeHome, [string]$ConfigDir, [string]$SessionId)
         $out = & pwsh -NoProfile -Command "
             `$env:CLAUDE_CONFIG_DIR = '$ConfigDir'
             `$env:CLAUDE_CODE_SESSION_ID = '$SessionId'
-            & '$script:Script' -ClaudeHome '$Home' -DryRun
+            & '$script:Script' -ClaudeHome '$BridgeHome' -DryRun
             exit `$LASTEXITCODE" 2>&1
         [pscustomobject]@{ Code = $LASTEXITCODE; Text = ($out -join "`n") }
     }
@@ -480,20 +528,20 @@ BeforeAll {
 Describe 'session locator' {
     It 'exits 1 with a remedy when the session id is unset' {
         $h = New-Enabled-Home
-        $r = Invoke-Locate -Home $h -ConfigDir $h -SessionId ''
+        $r = Invoke-Locate -BridgeHome $h -ConfigDir $h -SessionId ''
         $r.Code | Should -Be 1
         $r.Text | Should -Match 'CLAUDE_CODE_SESSION_ID'
     }
     It 'exits 1 naming the search path when nothing matches' {
         $h = New-Enabled-Home
-        $r = Invoke-Locate -Home $h -ConfigDir $h -SessionId 'no-such-session'
+        $r = Invoke-Locate -BridgeHome $h -ConfigDir $h -SessionId 'no-such-session'
         $r.Code | Should -Be 1
         $r.Text | Should -Match 'no transcript'
     }
     It 'exits 1 listing every path when more than one matches' {
         $h = New-Enabled-Home
         New-Projects -base $h -projectDirs @('C--a--repo', 'C--b--repo') -sessionId 'dup-id'
-        $r = Invoke-Locate -Home $h -ConfigDir $h -SessionId 'dup-id'
+        $r = Invoke-Locate -BridgeHome $h -ConfigDir $h -SessionId 'dup-id'
         $r.Code | Should -Be 1
         $r.Text | Should -Match 'matches 2 transcripts'
         $r.Text | Should -Match 'C--a--repo'
@@ -502,7 +550,7 @@ Describe 'session locator' {
     It 'never falls back to a nearby transcript' {
         $h = New-Enabled-Home
         New-Projects -base $h -projectDirs @('C--a--repo') -sessionId 'some-other-session'
-        $r = Invoke-Locate -Home $h -ConfigDir $h -SessionId 'wanted-session'
+        $r = Invoke-Locate -BridgeHome $h -ConfigDir $h -SessionId 'wanted-session'
         $r.Code | Should -Be 1
         $r.Text | Should -Not -Match 'some-other-session'
     }
@@ -628,10 +676,25 @@ Describe 'record filters' {
         $r.turns_rendered | Should -Be 2
     }
 }
+```
 
+**Every filter below uses `-match` with an escaped regex, never `-like`.** In
+PowerShell's wildcard grammar `[...]` is a *character class*, so `-like '*[tool_use]*'`
+means "contains any one of `t o l _ u s e`" — it matches essentially every line in the
+render, including the 2000-char `tool_result` line, and `Measure-Object -Maximum` then
+returns the whole render's longest line. Both cap tests would fail on correct output
+while appearing to test the cap.
+
+Each cap test also asserts its marker is **present** before measuring: an empty
+pipeline gives `(@() | Measure-Object -Maximum).Maximum` = `$null`, and `$null` compares
+`-le` any number, so a mis-synthesized fixture or an over-eager filter would make the
+assertion pass while measuring nothing at all.
+
+```powershell
 Describe 'block caps' {
     It 'caps thinking at 600 chars' {
         $r = Render-Fixture 'caps.jsonl'
+        $r.render | Should -Match '\[thinking\]'
         ([regex]::Matches($r.render, '\[thinking\] (.{0,700}?)(\r?\n|$)') |
             ForEach-Object { $_.Groups[1].Value.Length } |
             Measure-Object -Maximum).Maximum | Should -BeLessOrEqual 620
@@ -642,13 +705,14 @@ Describe 'block caps' {
     It 'caps tool_use input at 800 chars' {
         $r = Render-Fixture 'caps.jsonl'
         $r.render | Should -Match '\[tool_use\]'
-        ($r.render -split "`n" | Where-Object { $_ -like '*[tool_use]*' } |
+        ($r.render -split "`n" | Where-Object { $_ -match '\[tool_use\]' } |
             ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum |
             Should -BeLessOrEqual 900   # 800 + the name prefix
     }
     It 'caps tool_result mid-transcript AND inside the last 12 turns' {
         $r = Render-Fixture 'caps.jsonl' -Config @{ maxToolResultChars = 100 }
-        ($r.render -split "`n" | Where-Object { $_ -like '*[tool_result]*' } |
+        $r.render | Should -Match '\[tool_result\]'
+        ($r.render -split "`n" | Where-Object { $_ -match '\[tool_result\]' } |
             ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum |
             Should -BeLessOrEqual 130
     }
@@ -749,6 +813,17 @@ function Format-Block($block, [int]$maxToolResult) {
 }
 
 function Format-Turn($rec, [int]$maxToolResult) {
+    # message.content is EITHER a block array OR a bare string - Claude Code
+    # writes plain-string content for ordinary typed user messages, which is
+    # exactly the shape of the first user message the whole budget sequence
+    # exists to preserve. Wrapping a string in @() yields a one-element array
+    # whose element has no .type, so Format-Block's switch would fall to
+    # `default` and return '' - the turn would render as a header with an empty
+    # body, silently. (Task 1 Step 5's measurement code branches on this same
+    # distinction, which is where the shape is confirmed to exist.)
+    if ($rec.message.content -is [string]) {
+        return "--- $($rec.type) ---`n$($rec.message.content)"
+    }
     $blocks = @($rec.message.content)
     $parts  = foreach ($b in $blocks) { Format-Block $b $maxToolResult }
     $body   = ($parts | Where-Object { $_ }) -join "`n"
@@ -1013,7 +1088,7 @@ BeforeAll {
     $script:Fixtures = Join-Path $PSScriptRoot 'fixtures'
 
     function Invoke-DryRun {
-        param([hashtable]$PoisonEnv = @{}, [int]$PersonaChars = 20)
+        param([hashtable]$PoisonEnv = @{}, [int]$PersonaChars = 20, [string[]]$Extra = @())
         $h = Join-Path ([System.IO.Path]::GetTempPath()) ("ab-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $h -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $h 'advisor-bridge.json') -Value '{"enabled": true}'
@@ -1026,9 +1101,9 @@ BeforeAll {
             $sets
             `$env:CLAUDE_CONFIG_DIR = '$h'
             `$env:CLAUDE_CODE_SESSION_ID = 'fix-session'
-            & '$script:Script' -ClaudeHome '$h' -DryRun
+            & '$script:Script' -ClaudeHome '$h' -DryRun $($Extra -join ' ')
             exit `$LASTEXITCODE" 2>&1
-        [pscustomobject]@{ Code = $LASTEXITCODE; Text = ($out -join "`n") }
+        [pscustomobject]@{ Code = $LASTEXITCODE; Text = ($out -join "`n"); Home = $h }
     }
 }
 
@@ -1054,6 +1129,40 @@ Describe 'environment scrub' {
     It 'sets CLAUDE_EFFORT explicitly rather than inheriting it' {
         $r = Invoke-DryRun -PoisonEnv @{ CLAUDE_EFFORT = 'low' }
         ($r.Text | ConvertFrom-Json).env.CLAUDE_EFFORT | Should -Be 'xhigh'
+    }
+}
+
+Describe 'pre-spawn guard' {
+    # The negative test the guard would otherwise lack. Without it, deleting the
+    # whole comparison block leaves every test in this file green - the other
+    # three only prove the CONSTRUCTION is right, and construction and guard are
+    # derived from the same whitelist, so no poisoned input can separate them.
+    It 'exits 2 and logs model_guard when the child environment gains a stray key' {
+        $r = Invoke-DryRun -Extra @('-InjectEnvKey', 'STRAY_KEY')
+        $r.Code | Should -Be 2
+        $r.Text | Should -Match 'does not match the whitelist'
+        $r.Text | Should -Match 'STRAY_KEY'
+        $row = (Get-Content (Join-Path $r.Home 'advisor-bridge.log.jsonl') |
+                Select-Object -Last 1) | ConvertFrom-Json
+        $row.verdict | Should -Be 'model_guard'
+    }
+    It 'refuses the injection seam outside a dry run' {
+        # Exit 1, and no log row: the seam is rejected before anything is
+        # attempted, so it is a wrapper refusal, not an untrustworthy result.
+        $h = Join-Path ([System.IO.Path]::GetTempPath()) ("ab-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $h -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $h 'advisor-bridge.json') -Value '{"enabled": true}'
+        Set-Content -LiteralPath (Join-Path $h 'advisor-bridge-persona.md') -Value 'be terse'
+        $proj = Join-Path $h 'projects' 'C--fixture'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Copy-Item (Join-Path $script:Fixtures 'basic.jsonl') (Join-Path $proj 'fix-session.jsonl')
+        $out = & pwsh -NoProfile -Command "
+            `$env:CLAUDE_CONFIG_DIR = '$h'
+            `$env:CLAUDE_CODE_SESSION_ID = 'fix-session'
+            & '$script:Script' -ClaudeHome '$h' -InjectEnvKey 'STRAY_KEY'
+            exit `$LASTEXITCODE" 2>&1
+        $LASTEXITCODE | Should -Be 1
+        ($out -join "`n") | Should -Match 'requires -DryRun'
     }
 }
 
@@ -1174,6 +1283,55 @@ foreach ($a in @(
 `ArgumentList`, never a hand-built `Arguments` string: it applies the CRT's quoting rules per element. The persona is arbitrary user-editable markdown with quotes, backslashes and newlines, and editing it is this project's documented iteration loop — `ollama-worker.ps1:344-367` records what the naive version did to two *allowlisted* short strings.
 
 ```powershell
+# --- Test seam: force a guard mismatch -------------------------------------
+# Honoured ONLY under -DryRun, which spawns nothing and bills nothing, so it
+# cannot alter a real call. It exists because the guard below is otherwise
+# unreachable by any external input: $actual and $expected are derived from the
+# same whitelist and the same GetEnvironmentVariable calls, so nothing a test
+# can set makes them diverge - and a guard that no test can trip is a guard that
+# could be deleted with every test still green.
+if ($InjectEnvKey) {
+    if (-not $DryRun) { Fail "-InjectEnvKey is a test seam and requires -DryRun" }
+    $psi.Environment[$InjectEnvKey] = 'injected'
+}
+
+# --- Log row writer --------------------------------------------------------
+# Defined here, above the guard, rather than beside the spawn: the pre-spawn
+# guard is itself an exit-2 path, and both the Global Constraints and the spec
+# require a row on every exit-0 and exit-2 path - "the pre-spawn guard at step 9
+# included, since the exit-2 table gives it a verdict and a verdict only exists
+# inside a row".
+#
+# $haveUsage keys on ENVELOPE PRESENCE, not on the verdict. Keying it on
+# `$verdict -eq 'ok'` would null the token and cost fields on model_guard and on
+# an envelope-bearing child_error - calls that were really billed - so the cost
+# column `## Cost` calibrates from would under-report real spend on exactly the
+# guard-trip path. The nulls exist to distinguish a call that produced no
+# envelope from a free one; that is a question about the envelope, not the
+# verdict.
+function Write-LogRow([string]$verdict, $envelope, [int]$durationMs, [string]$source) {
+    $haveUsage = [bool]$envelope -and
+                 ($envelope.PSObject.Properties.Name -contains 'modelUsage') -and
+                 $envelope.modelUsage
+    $row = [ordered]@{
+        ts             = (Get-Date).ToUniversalTime().ToString('o')
+        session_id     = $sessionId
+        model          = $model
+        chars_sent     = $charsSent
+        turns_rendered = $turnsRendered
+        turns_elided   = $elided
+        lines_skipped  = $skipped
+        input_tokens   = if ($haveUsage) { ($envelope.modelUsage.PSObject.Properties.Value.inputTokens  | Measure-Object -Sum).Sum } else { $null }
+        output_tokens  = if ($haveUsage) { ($envelope.modelUsage.PSObject.Properties.Value.outputTokens | Measure-Object -Sum).Sum } else { $null }
+        cost_usd       = if ($haveUsage) { ($envelope.modelUsage.PSObject.Properties.Value.costUSD      | Measure-Object -Sum).Sum } else { $null }
+        duration_ms    = $durationMs
+        verdict        = $verdict
+    }
+    if ($source) { $row['source'] = $source }
+    try { Add-Content -LiteralPath $logPath -Value ($row | ConvertTo-Json -Depth 4 -Compress) }
+    catch { [Console]::Error.WriteLine("advisor-bridge: could not append to $logPath") }
+}
+
 # --- 9. Pre-spawn guard ----------------------------------------------------
 # Key-set EQUALITY, not "contains no ANTHROPIC_*". The Problem section names
 # CLAUDE_CODE_SUBAGENT_MODEL as part of the same leak and a prefix check passes
@@ -1191,11 +1349,12 @@ $expected = @($ENV_WHITELIST | Where-Object {
 if (($actual -join ',') -ne ($expected -join ',')) {
     $extra   = @($actual   | Where-Object { $_ -notin $expected })
     $missing = @($expected | Where-Object { $_ -notin $actual })
+    Write-LogRow 'model_guard' $null 0 $null
     Fail "child environment does not match the whitelist (extra: $($extra -join ',') | missing: $($missing -join ','))" 2
 }
 ```
 
-Exit 2, not 1: this is not a configuration mistake the user can fix by editing a file — it means the environment scrub itself is broken, which is the same "do not trust this result" class as the post-run guard.
+Exit 2, not 1: this is not a configuration mistake the user can fix by editing a file — it means the environment scrub itself is broken, which is the same "do not trust this result" class as the post-run guard. It writes a `model_guard` row before exiting, because the spec's exit-2 table assigns this guard that verdict and a verdict has nowhere to live except a row.
 
 - [ ] **Step 5: Relocate and widen `-DryRun`**
 
@@ -1247,7 +1406,7 @@ if (-not (Test-Path -LiteralPath $scratchDir)) {
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `Invoke-Pester advisor-bridge/tests/Env.Tests.ps1 -Output Detailed`
-Expected: PASS, 5 tests.
+Expected: PASS, 7 tests.
 
 Then re-run the whole suite — relocating `-DryRun` moved it past the executable
 resolution, the persona preflight and the guard, so a render test that passed in
@@ -1355,15 +1514,52 @@ Describe 'post-run model guard' {
     }
 }
 
+Describe 'the other terminal verdicts' {
+    # Without these three, child_error and no_envelope - two of the five
+    # documented verdicts - are never reached by any test, and the precedence
+    # rule lives only in a comment.
+    It 'reports child_error when the envelope says is_error' {
+        $r = Invoke-WithEnvelope 'envelope-child-error.json'
+        $r.Code | Should -Be 2
+        $r.Text | Should -Not -Match 'SECRET-ADVICE-BODY'
+        $r.Rows[-1].verdict | Should -Be 'child_error'
+    }
+    It 'lets model_guard beat child_error when both apply' {
+        $r = Invoke-WithEnvelope 'envelope-error-and-wrong-model.json'
+        $r.Code | Should -Be 2
+        $r.Rows[-1].verdict | Should -Be 'model_guard'
+    }
+    It 'reports no_envelope when nothing parses as a result envelope' {
+        $r = Invoke-WithEnvelope 'envelope-malformed.json'
+        $r.Code | Should -Be 2
+        $r.Rows[-1].verdict | Should -Be 'no_envelope'
+    }
+}
+
 Describe 'log row' {
     It 'carries all twelve documented fields' {
         $r = Invoke-WithEnvelope 'envelope-ok.json'
-        foreach ($f in 'ts','session_id','model','chars_sent','turns_rendered','turns_elided',
-                       'lines_skipped','input_tokens','output_tokens','cost_usd','duration_ms','verdict') {
+        foreach ($f in $script:LogFields) {
             $r.Rows[-1].PSObject.Properties.Name | Should -Contain $f
         }
     }
+    It 'records real token and cost figures on a model_guard trip, not nulls' {
+        # The call was billed. Nulling the cost here would hide real spend in
+        # the one column `## Cost` calibrates from.
+        $r = Invoke-WithEnvelope 'envelope-two-models.json'
+        $r.Rows[-1].verdict  | Should -Be 'model_guard'
+        $r.Rows[-1].cost_usd | Should -Not -BeNullOrEmpty
+    }
 }
+```
+
+Add the shared field list to the `BeforeAll`, so the timeout test below asserts the
+same twelve fields rather than a hand-picked three:
+
+```powershell
+    $script:LogFields = @('ts','session_id','model','chars_sent','turns_rendered',
+                          'turns_elided','lines_skipped','input_tokens','output_tokens',
+                          'cost_usd','duration_ms','verdict')
 ```
 
 - [ ] **Step 3: Build the four envelope fixtures**
@@ -1396,6 +1592,28 @@ From the shape recorded in Step 1. Assuming `modelUsage` is an object keyed by m
 // envelope-no-modelusage.json
 {"type":"result","is_error":false,"result":"SECRET-ADVICE-BODY","duration_ms":900}
 ```
+
+Three more, because otherwise two of the five documented verdicts are never
+reached by any test and the documented precedence rule is asserted only in prose:
+
+```json
+// envelope-child-error.json — is_error true, model correct: proves child_error fires
+{"type":"result","is_error":true,"result":"SECRET-ADVICE-BODY",
+ "modelUsage":{"claude-fable-5-1":{"inputTokens":1414,"outputTokens":4,"costUSD":0.029}},
+ "duration_ms":64000}
+```
+
+```json
+// envelope-error-and-wrong-model.json — both conditions hold, so it pins the
+// precedence: model_guard must win over child_error.
+{"type":"result","is_error":true,"result":"SECRET-ADVICE-BODY",
+ "modelUsage":{"glm-5.3-flash:cloud":{"inputTokens":10,"outputTokens":4,"costUSD":0}},
+ "duration_ms":900}
+```
+
+`envelope-malformed.json` is not JSON at all — write the literal bytes
+`{ this is not an envelope` — so the `-EnvelopeFile` parse fails and `no_envelope`
+is reached.
 
 - [ ] **Step 4: Run tests to verify they fail**
 
@@ -1436,14 +1654,25 @@ else {
     # pipe. Unguarded, under $ErrorActionPreference = 'Stop', that kills the
     # wrapper before any log row and with an exit code outside the published
     # table. Same hazard and same remedy as the renderer's per-line try/catch.
+    #
+    # WriteAsync, not Write: the timeout only arms at WaitForExit BELOW, so a
+    # synchronous write is outside its cover. A child that neither reads stdin
+    # nor exits blocks forever once the 80 KB render passes the pipe buffer -
+    # the exact hang the timeout exists for, in the one window the timeout does
+    # not watch.
     $writeFailed = $false
     try {
-        $proc.StandardInput.Write($rendered)
-        $proc.StandardInput.Close()
+        $writeTask = $proc.StandardInput.WriteAsync($rendered)
+        if (-not $writeTask.Wait($timeoutSeconds * 1000)) {
+            try { $proc.Kill($true) } catch { }
+            $verdict = 'timeout'
+        }
+        else { $proc.StandardInput.Close() }
     }
     catch { $writeFailed = $true }
 
-    if (-not $proc.WaitForExit($timeoutSeconds * 1000)) {
+    if ($verdict -eq 'timeout') { }   # already killed above; skip the wait
+    elseif (-not $proc.WaitForExit($timeoutSeconds * 1000)) {
         # Kill($true) takes the whole process tree. `claude` on Windows launches
         # a node child, and killing only the parent leaves it holding the pipe.
         try { $proc.Kill($true) } catch { }
@@ -1509,29 +1738,18 @@ if ($envelope -and $verdict -in 'ok', 'child_error') {
 }
 
 # --- 14. Log row -----------------------------------------------------------
-# Written on every exit-0 and exit-2 path. Exit-1 paths write none: nothing was
-# attempted, there is no verdict to record, and a row per disabled-gate call
-# would swamp the cost column the calibration reads.
-$haveUsage = ($verdict -eq 'ok') -and $envelope
-$row = [ordered]@{
-    ts             = (Get-Date).ToUniversalTime().ToString('o')
-    session_id     = $sessionId
-    model          = $model
-    chars_sent     = $charsSent
-    turns_rendered = $turnsRendered
-    turns_elided   = $elided
-    lines_skipped  = $skipped
-    # null, never zero, when no envelope came back: writing zeros would make a
-    # killed call indistinguishable from a free one in the cost column.
-    input_tokens   = if ($haveUsage) { ($envelope.modelUsage.PSObject.Properties.Value.inputTokens  | Measure-Object -Sum).Sum } else { $null }
-    output_tokens  = if ($haveUsage) { ($envelope.modelUsage.PSObject.Properties.Value.outputTokens | Measure-Object -Sum).Sum } else { $null }
-    cost_usd       = if ($haveUsage) { ($envelope.modelUsage.PSObject.Properties.Value.costUSD      | Measure-Object -Sum).Sum } else { $null }
-    duration_ms    = [int]$sw.ElapsedMilliseconds
-    verdict        = $verdict
-}
-if ($source) { $row['source'] = $source }
-try { Add-Content -LiteralPath $logPath -Value ($row | ConvertTo-Json -Depth 4 -Compress) }
-catch { [Console]::Error.WriteLine("advisor-bridge: could not append to $logPath") }
+# Written on every exit-0 and exit-2 path, through the same Write-LogRow the
+# pre-spawn guard uses. Exit-1 paths write none: nothing was attempted, there is
+# no verdict to record, and a row per disabled-gate call would swamp the cost
+# column the calibration reads.
+#
+# Note what Write-LogRow does NOT do: it does not null the token and cost fields
+# just because the verdict is not 'ok'. A model_guard trip and an
+# envelope-bearing child_error were both really billed, and nulling them there
+# would make the cost column under-report real spend on exactly the guard path.
+# The nulls distinguish "no envelope came back" from "free", which is a question
+# about the envelope, not the verdict.
+Write-LogRow $verdict $envelope ([int]$sw.ElapsedMilliseconds) $source
 
 # --- 15. Output and exit ---------------------------------------------------
 if ($verdict -ne 'ok') {
@@ -1567,6 +1785,7 @@ Describe 'timeout' {
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
         Copy-Item (Join-Path $PSScriptRoot 'fixtures' 'basic.jsonl') (Join-Path $proj 'fix-session.jsonl')
 
+        $start = Get-Date   # anchor for the orphan-process check below
         $out = & pwsh -NoProfile -Command "
             `$env:PATH = '$dir;' + `$env:PATH
             `$env:CLAUDE_CONFIG_DIR = '$h'
@@ -1580,6 +1799,26 @@ Describe 'timeout' {
         $row.cost_usd    | Should -BeNullOrEmpty
         $row.duration_ms | Should -BeGreaterThan 1500
         $row.duration_ms | Should -BeLessThan 8000
+
+        # The spec requires the twelve fields on the TIMEOUT path too, not only
+        # on success - a row that silently lost half its columns when the call
+        # failed would be worst exactly where it is most needed.
+        foreach ($f in $script:LogFields) {
+            $row.PSObject.Properties.Name | Should -Contain $f
+        }
+
+        # No orphaned child. Kill($true) takes the whole tree because `claude` on
+        # Windows launches a further process; a regression to a parent-only
+        # Kill() leaves that grandchild running and holding the pipe, and every
+        # assertion above still passes. This is the only check that catches it.
+        # The stub's grandchild is `ping`, started after the run began.
+        Start-Sleep -Milliseconds 500
+        @(Get-Process -Name 'PING' -ErrorAction SilentlyContinue |
+            Where-Object { $_.StartTime -gt $start }).Count | Should -Be 0
+
+        # And no leftover temp files: the wrapper writes none on this path.
+        @(Get-ChildItem -LiteralPath $h -Filter '*.tmp' -ErrorAction SilentlyContinue).Count |
+            Should -Be 0
     }
 }
 ```
@@ -1689,8 +1928,11 @@ git commit -m "feat(advisor-bridge): advisor persona"
 
 BeforeAll {
     $script:Hook = Join-Path $PSScriptRoot '..' 'hooks' 'advisor-bridge-status.py'
+    # $Config is UNTYPED: a [string] parameter coerces $null to '', so
+    # `if ($null -ne $Config)` would always be true and the "config is absent"
+    # case below would silently become "config is empty" - a different branch.
     function Invoke-Hook {
-        param([string]$Config, [string]$BaseUrl)
+        param($Config, [string]$BaseUrl)
         $h = Join-Path ([System.IO.Path]::GetTempPath()) ("ab-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $h -Force | Out-Null
         if ($null -ne $Config) { Set-Content -LiteralPath (Join-Path $h 'advisor-bridge.json') -Value $Config }
@@ -1704,6 +1946,7 @@ BeforeAll {
 
 Describe 'hook gating' {
     It 'is silent when the config is absent' {
+        # Genuinely absent, not empty - see the untyped $Config above.
         Invoke-Hook -Config $null -BaseUrl 'http://127.0.0.1:11434' | Should -BeNullOrEmpty
     }
     It 'is silent when the config is unreadable' {
@@ -2000,7 +2243,7 @@ This is the first time two packages in this repo append to the same `SessionStar
 
 **Files:**
 - Create: `advisor-bridge/install.ps1`
-- Modify: `ollama-workers/install.ps1:120-140` (the verifier block)
+- Modify: `ollama-workers/install.ps1:16-21` (add the `-ClaudeHome` seam), `:125-131` (guard the null-`hooks` loop), `:120-140` (the verifier block)
 - Test: `advisor-bridge/tests/Install.Tests.ps1`
 
 **Interfaces:**
@@ -2086,6 +2329,51 @@ Describe 'installer' {
         $cmds = @((Get-Content -Raw (Join-Path $h 'settings.json') | ConvertFrom-Json).hooks.SessionStart.hooks.command)
         @($cmds | Where-Object { $_ -like '*advisor-bridge-status*' }).Count | Should -Be 1
     }
+
+    It 'restores the backup and throws when the rewrite loses data' {
+        # The rollback branch is the entire safety net for rewriting a
+        # settings.json two packages now share, and every other test here is a
+        # happy path - a $lost check that never fires, or a restore that does
+        # not restore, would leave all of them green.
+        #
+        # The loss is induced without stubbing anything, using the exact failure
+        # the -Depth 100 comment names: past that maximum ConvertTo-Json emits
+        # the remainder as a type name and only WARNS, which
+        # $ErrorActionPreference does not catch. A hook category nested deeper
+        # than 100 therefore round-trips to something different, the comparison
+        # sees it, and the rollback fires.
+        $deep = '{"type":"command","command":"bash x"}'
+        for ($i = 0; $i -lt 120; $i++) { $deep = '{"n":' + $deep + '}' }
+        $settings = @"
+{
+  "model": "opus[1m]",
+  "hooks": {
+    "SessionStart": [ { "hooks": [ { "type": "command", "command": "python ~/.claude/hooks/ollama-workers-status.py", "timeout": 10 } ] } ],
+    "Deep": $deep
+  }
+}
+"@
+        $h      = New-Fake-ClaudeHome $settings
+        $before = Get-Content -Raw (Join-Path $h 'settings.json')
+        $out    = & pwsh -NoProfile -File $script:Install -ClaudeHome $h 2>&1
+
+        $LASTEXITCODE | Should -Not -Be 0
+        ($out -join "`n") | Should -Match 'restored from'
+        (Get-Content -Raw (Join-Path $h 'settings.json')) | Should -Be $before
+    }
+
+    It 'survives a settings.json with no hooks key at all' {
+        # $before.hooks is $null here. An unguarded `foreach ($cat in
+        # @($before.hooks.Keys))` indexes a null array and throws AFTER the
+        # rewrite has landed and BEFORE the rollback, so the installer would die
+        # with the damaged file in place and never name the backup.
+        $h = New-Fake-ClaudeHome '{ "model": "opus[1m]" }'
+        & pwsh -NoProfile -File $script:Install -ClaudeHome $h | Out-Null
+        $LASTEXITCODE | Should -Be 0
+        $s = Get-Content -Raw (Join-Path $h 'settings.json') | ConvertFrom-Json
+        $s.model | Should -Be 'opus[1m]'
+        @($s.hooks.SessionStart.hooks.command) | Should -Match 'advisor-bridge-status'
+    }
 }
 ```
 
@@ -2161,13 +2449,30 @@ if (Test-Path -LiteralPath $settings) {
     catch { throw "settings.json is not valid JSON: $settings" }
 }
 
+# Validate the package BEFORE the dry-run short-circuit. The sibling runs this
+# check unconditionally (ollama-workers/install.ps1:45-49 sits outside the
+# `if (-not $DryRun)` that wraps only the copy itself), and a dry run whose whole
+# job is "tell me what would happen" must not be the one mode that cannot say
+# "a source file is missing".
+foreach ($c in $copies) {
+    if (-not (Test-Path -LiteralPath (Join-Path $src $c.From))) {
+        throw "missing from package: $($c.From)"
+    }
+}
+
+$alreadyRegistered = [bool](@($existingCommands) | Where-Object { $_ -like '*advisor-bridge-status*' })
+
 if ($DryRun) {
     [ordered]@{
         claude_home            = $claudeHome
         copies                 = @($copies | ForEach-Object { $_.To })
         seeds                  = @($seeds  | ForEach-Object { @{ to = $_.To; action = if (Test-Path -LiteralPath $_.To) { 'keep' } else { 'create' } } })
         existing_session_start = $existingCommands
-        adding                 = $hookCommand
+        # Reports true state on a repeat run, as the sibling's 'already
+        # registered' step does. Unconditionally naming the command would tell
+        # the user a second install is about to add a duplicate it will not add.
+        adding                 = if ($alreadyRegistered) { $null } else { $hookCommand }
+        already_registered     = $alreadyRegistered
     } | ConvertTo-Json -Depth 6
     exit 0
 }
@@ -2176,7 +2481,6 @@ Write-Host 'advisor-bridge install'
 Write-Host 'Files:'
 foreach ($c in $copies) {
     $from = Join-Path $src $c.From
-    if (-not (Test-Path -LiteralPath $from)) { throw "missing from package: $($c.From)" }
     Step "$(if (Test-Path -LiteralPath $c.To) { 'overwrite' } else { 'create' }) $($c.To)"
     $parent = Split-Path -Parent $c.To
     if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
@@ -2196,7 +2500,7 @@ Write-Host 'SessionStart hook:'
 if (-not (Test-Path -LiteralPath $settings)) {
     Step "no settings.json at $settings - add this hook yourself: $hookCommand"
 }
-elseif ($existingCommands | Where-Object { $_ -like '*advisor-bridge-status*' }) {
+elseif ($alreadyRegistered) {
     Step 'already registered'
 }
 else {
@@ -2230,32 +2534,47 @@ else {
     try { $after = Get-Content -Raw -LiteralPath $settings | ConvertFrom-Json -AsHashtable }
     catch { $after = $null; $lost.Add('file no longer parses as JSON') }
 
+    # The whole comparison is wrapped: it runs AFTER the rewrite is already on
+    # disk and BEFORE the rollback below, so any error escaping here kills the
+    # installer with the damaged file in place and never even names the backup.
+    # Whatever goes wrong, it becomes a $lost entry and the file is restored.
     if ($after) {
-        foreach ($key in $before.Keys) {
-            if (-not $after.ContainsKey($key)) { $lost.Add("dropped '$key'"); continue }
-            if ($key -eq 'hooks') { continue }
-            $b = $before[$key] | ConvertTo-Json -Depth 100 -Compress
-            $a = $after[$key]  | ConvertTo-Json -Depth 100 -Compress
-            if ($b -ne $a) { $lost.Add("changed '$key'") }
-        }
-        foreach ($cat in @($before.hooks.Keys)) {
-            if ($cat -eq 'SessionStart') { continue }
-            $b = $before.hooks[$cat] | ConvertTo-Json -Depth 100 -Compress
-            $a = $after.hooks[$cat]  | ConvertTo-Json -Depth 100 -Compress
-            if ($b -ne $a) { $lost.Add("changed hook '$cat'") }
-        }
+        try {
+            foreach ($key in $before.Keys) {
+                if (-not $after.ContainsKey($key)) { $lost.Add("dropped '$key'"); continue }
+                if ($key -eq 'hooks') { continue }
+                $b = $before[$key] | ConvertTo-Json -Depth 100 -Compress
+                $a = $after[$key]  | ConvertTo-Json -Depth 100 -Compress
+                if ($b -ne $a) { $lost.Add("changed '$key'") }
+            }
+            # Guarded: a settings.json with no `hooks` key at all is ordinary -
+            # a file that only sets `model` is enough. Then $before.hooks is
+            # $null, @($null.Keys) yields a one-element array holding $null, and
+            # $before.hooks[$null] is a terminating error under
+            # $ErrorActionPreference = 'Stop'. The sibling has the same shape at
+            # ollama-workers/install.ps1:125-131; Step 4 fixes it there too.
+            if ($before.hooks) {
+                foreach ($cat in @($before.hooks.Keys)) {
+                    if ($cat -eq 'SessionStart') { continue }
+                    $b = $before.hooks[$cat] | ConvertTo-Json -Depth 100 -Compress
+                    $a = $after.hooks[$cat]  | ConvertTo-Json -Depth 100 -Compress
+                    if ($b -ne $a) { $lost.Add("changed hook '$cat'") }
+                }
+            }
 
-        # THE divergence from the sibling: assert EVERY pre-existing command
-        # survived, not just our own. Whichever installer runs second is the one
-        # that can destroy the other's entry.
-        $afterCommands = @(@($after.hooks.SessionStart) | ForEach-Object { $_.hooks } |
-            ForEach-Object { $_.command } | Where-Object { $_ })
-        foreach ($cmd in $existingCommands) {
-            if ($afterCommands -notcontains $cmd) { $lost.Add("dropped SessionStart entry '$cmd'") }
+            # THE divergence from the sibling: assert EVERY pre-existing command
+            # survived, not just our own. Whichever installer runs second is the
+            # one that can destroy the other's entry.
+            $afterCommands = @(@($after.hooks.SessionStart) | ForEach-Object { $_.hooks } |
+                ForEach-Object { $_.command } | Where-Object { $_ })
+            foreach ($cmd in $existingCommands) {
+                if ($afterCommands -notcontains $cmd) { $lost.Add("dropped SessionStart entry '$cmd'") }
+            }
+            if (-not ($afterCommands | Where-Object { $_ -like '*advisor-bridge-status*' })) {
+                $lost.Add('SessionStart entry was not written')
+            }
         }
-        if (-not ($afterCommands | Where-Object { $_ -like '*advisor-bridge-status*' })) {
-            $lost.Add('SessionStart entry was not written')
-        }
+        catch { $lost.Add("verification failed: $($_.Exception.Message)") }
     }
 
     if ($lost.Count) {
@@ -2301,6 +2620,22 @@ if (-not ($afterCommands | Where-Object { $_ -like '*ollama-workers-status*' }))
 }
 ```
 
+Guard the sibling's hook-category loop the same way, for the same reason — a
+`settings.json` carrying no `hooks` key makes `@($before.hooks.Keys)` a one-element
+array holding `$null`, and indexing with it throws after the rewrite has landed and
+before the rollback:
+
+```powershell
+# BEFORE (ollama-workers/install.ps1:125-131)
+foreach ($cat in @($before.hooks.Keys)) {
+
+# AFTER
+if ($before.hooks) {
+    foreach ($cat in @($before.hooks.Keys)) {
+```
+
+(close the added `if` after that loop's existing closing brace)
+
 And add the collection, immediately after `$overlay` is defined:
 
 ```powershell
@@ -2318,17 +2653,70 @@ if (Test-Path -LiteralPath $settings) {
 }
 ```
 
-- [ ] **Step 5: Verify the sibling still installs cleanly**
+- [ ] **Step 5: Give the sibling a `-ClaudeHome` seam so the back-fill is testable**
+
+`ollama-workers/install.ps1` takes only `-DryRun` (`ollama-workers/install.ps1:16`), so
+without this the changed verifier can be exercised **only** against the developer's real
+`~/.claude` — meaning it could not be exercised at all, and the back-fill would ship
+verified by inspection alone. That is the same argument that made `-ClaudeHome` a
+deliverable seam in the engine script.
+
+```powershell
+# BEFORE (ollama-workers/install.ps1:16-21)
+param([switch]$DryRun)
+
+$ErrorActionPreference = 'Stop'
+
+$src        = $PSScriptRoot
+$claudeHome = Join-Path $HOME '.claude'
+
+# AFTER
+param([switch]$DryRun, [string]$ClaudeHome)
+
+$ErrorActionPreference = 'Stop'
+
+$src        = $PSScriptRoot
+$claudeHome = if ($ClaudeHome) { $ClaudeHome } else { Join-Path $HOME '.claude' }
+```
+
+Nothing else in that file changes: every path below already derives from `$claudeHome`.
+
+Then add one case to `advisor-bridge/tests/Install.Tests.ps1`, so the sibling's changed
+verifier has an actual regression test rather than a reading:
+
+```powershell
+Describe 'ollama-workers back-fill' {
+    It 'refuses to drop an advisor-bridge SessionStart entry' {
+        $sibling = Join-Path $PSScriptRoot '..' '..' 'ollama-workers' 'install.ps1'
+        $h = New-Fake-ClaudeHome @'
+{
+  "hooks": {
+    "SessionStart": [ { "hooks": [ { "type": "command", "command": "python ~/.claude/hooks/advisor-bridge-status.py", "timeout": 10 } ] } ]
+  }
+}
+'@
+        & pwsh -NoProfile -File $sibling -ClaudeHome $h | Out-Null
+        $cmds = @((Get-Content -Raw (Join-Path $h 'settings.json') | ConvertFrom-Json).hooks.SessionStart.hooks.command)
+        # Both entries present: the sibling added its own AND kept ours. Before
+        # the back-fill its verifier checked only for its own string, so a
+        # rewrite that dropped this one would have verified clean.
+        ($cmds -join ' ') | Should -Match 'advisor-bridge-status'
+        ($cmds -join ' ') | Should -Match 'ollama-workers-status'
+    }
+}
+```
+
+- [ ] **Step 6: Verify the sibling still installs cleanly**
 
 Run: `pwsh -NoProfile -File ollama-workers/install.ps1 -DryRun`
 Expected: the same plan it printed before the change, no errors.
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [ ] **Step 7: Run tests to verify they pass**
 
 Run: `Invoke-Pester advisor-bridge/tests -Output Detailed`
 Expected: PASS, whole suite.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add advisor-bridge/install.ps1 advisor-bridge/tests/Install.Tests.ps1 ollama-workers/install.ps1
@@ -2473,10 +2861,12 @@ git commit -m "docs(advisor-bridge): README registration and the manual e2e proc
 
 ## Self-Review
 
-**Spec coverage.** Every spec section maps to a task: Naming → Global Constraints + Task 11's install paths; Components → Task 11; Order of operations → Tasks 2–7 in that order; Session locator → Task 3; Renderer → Tasks 4–5; Child spawn → Task 6; Persona → Task 8; Guards → Tasks 6 (pre-spawn) and 7 (post-run); Output/logging/exits → Task 7; Skill → Task 10; SessionStart hook → Task 9; Config → Task 2; Cost → Task 10 and Task 12 (the log column, not the estimate); Install → Task 11; Testing → every task's test steps plus Task 12's manual procedure. Both *For the implementer to verify* items are steps, not notes: the `modelUsage` shape is Task 7 Step 1, and the hook-text-inside-user-records question is Task 1 Step 5 with an explicit STOP if the answer is yes.
+**Spec coverage.** Every spec section maps to a task: Naming → Global Constraints + Task 11's install paths; Components → Task 11; Order of operations → Tasks 2–7 in that order; Session locator → Task 3; Renderer → Tasks 4–5; Child spawn → Task 6; Persona → Task 8; Guards → Tasks 6 (pre-spawn) and 7 (post-run); Output/logging/exits → Task 7; Skill → Task 10; SessionStart hook → Task 9; Config → Task 2; Cost → Task 10 and Task 12 (the log column, not the estimate); Install → Task 11; Testing → every task's test steps plus Task 12's manual procedure. Both *For the implementer to verify* items are steps, not notes: the `modelUsage` shape is Task 7 Step 1, and the hook-text-inside-user-records question is Task 1 Step 5 — **already settled empirically** (0 of 119 `user` records; every hook and reminder payload lives in a separate `attachment` record), so that step is a re-confirmation with a STOP that fires only if a Claude Code upgrade has changed the layout.
+
+**One deliberate addition beyond the spec.** The spec names four test seams; the plan adds a fifth, `-InjectEnvKey`, honoured only alongside `-DryRun`. The spec's own Testing section asks for the pre-spawn guard to be covered, and it cannot be: `$actual` and `$expected` are both derived from `$ENV_WHITELIST` and the same `GetEnvironmentVariable` calls, so no external input makes them diverge — a guard no test can trip is a guard that could be deleted with the suite still green. Under `-DryRun` nothing spawns and nothing is billed, and the seam is refused outright otherwise. This belongs in the spec's `### Guards` and `## Testing` sections the next time it is opened.
 
 **One spec item is deliberately deferred:** whether SessionStart fires with `source: "compact"`. It cannot be settled without an installed hook, so it is not a task gate — it is checked during Task 12's manual run, and if the hook does fire on compact, no code changes (the hook has no matcher to exclude it).
 
 **Placeholders.** None. Every code step carries the actual code; every test step names the command and the expected result. Two places say "adjust to match what you recorded" — Task 4's property paths and Task 7's guard shape — and both are bounded by a preceding step that produces the recording, which is the honest treatment for a schema this plan has not observed.
 
-**Type consistency.** `Fail($message, $code)`, `Get-PositiveInt($value, $default)`, `Read-Turns($path)` → `@{Turns; Skipped}`, `Format-Block($block, $maxToolResult)`, `Format-Turn($rec, $maxToolResult)`, `Limit-Text($s, $max)`, `New-Header($total, $elided, $skippedLines)`, `Build($truncate)`, `Get-ClaudePath()` are each defined once and used with matching arity throughout. `$charsSent`, `$turnsRendered`, `$elided`, `$skipped` are set in Tasks 4–5 and consumed by the `-DryRun` block in Task 6 and the log row in Task 7 under those exact names, which are also the JSON keys the tests assert on (`chars_sent`, `turns_rendered`, `turns_elided`, `lines_skipped`).
+**Type consistency.** `Fail($message, $code)`, `Get-PositiveInt($value, $default)`, `Read-Turns($path)` → `@{Turns; Skipped}`, `Format-Block($block, $maxToolResult)`, `Format-Turn($rec, $maxToolResult)`, `Limit-Text($s, $max)`, `New-Header($total, $elided, $skippedLines)`, `Build($truncate)`, `Get-ClaudePath()`, `Write-LogRow($verdict, $envelope, $durationMs, $source)` are each defined once and used with matching arity throughout. `Write-LogRow` is defined in Task 6, above the pre-spawn guard that is its first caller, and reused by Task 7 — one writer, so the twelve fields cannot drift between the guard path and the spawn path. `$charsSent`, `$turnsRendered`, `$elided`, `$skipped` are set in Tasks 4–5 and consumed by the `-DryRun` block in Task 6 and the log row in Task 7 under those exact names, which are also the JSON keys the tests assert on (`chars_sent`, `turns_rendered`, `turns_elided`, `lines_skipped`).
