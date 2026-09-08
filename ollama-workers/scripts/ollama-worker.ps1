@@ -17,19 +17,31 @@ them - a session produced by a non-Anthropic backend fails to resume against
 the Anthropic API.
 
 The worker runs with --dangerously-skip-permissions, so -Cwd is required and
-must be a linked git worktree - see the guard below.
+must be a linked git worktree - see Test-LinkedWorktree.
 
-Exit codes: 0 done, 2 escalate to an Anthropic implementer, 1 wrapper error.
+-Probe answers "would a dispatch into -Cwd get past the preflight below?"
+without launching anything: it runs every preflight check the dispatch path
+runs - cwd, worktree, settings overlay, ollama binary, model tag syntax - and
+prints the verdict as JSON. `enabled` is reported, not enforced, so a probe
+works while workers are off and `on` can check the directory it is enabling
+for. It exists because those checks were previously reachable only by
+dispatching, which made a whole class of misconfiguration silent: an
+orchestrator that read the worktree rule and correctly routed around it
+produced no error, no log line, and no signal that the feature was inert.
+
+Exit codes: 0 done (probe: dispatchable), 2 escalate to an Anthropic
+implementer, 1 wrapper error (probe: not dispatchable).
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$BriefFile,
+    [string]$BriefFile,
     [string]$Cwd,
     [string]$Resume,
     [string]$Model,
     [int]$MaxTurns,
     [string]$Label,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$Probe
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,17 +52,153 @@ $overlay    = Join-Path $claudeHome 'ollama-settings.json'
 $logPath    = Join-Path $claudeHome 'ollama-workers.log.jsonl'
 $workerCfg  = Join-Path $HOME '.claude-ollama-worker'
 
+$worktreeHelp = "  Create one with: git worktree add <path> <branch>"
+
 function Fail([string]$message, [int]$code = 1) {
     [Console]::Error.WriteLine("ollama-worker: $message")
     exit $code
 }
 
-if (-not (Test-Path -LiteralPath $BriefFile)) { Fail "brief file not found: $BriefFile" }
+function Write-LogRow([System.Collections.IDictionary]$row) {
+    try { Add-Content -LiteralPath $logPath -Value ($row | ConvertTo-Json -Depth 4 -Compress) }
+    catch { [Console]::Error.WriteLine("ollama-worker: could not append to $logPath") }
+}
+
+function Get-OllamaPath {
+    $p = (Get-Command ollama -ErrorAction SilentlyContinue).Source
+    if (-not $p) { $p = Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe' }
+    if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+    return $null
+}
+
+# The run below passes --dangerously-skip-permissions, so nothing will stop the
+# worker from editing or deleting anything under $Cwd. $Cwd therefore has to be
+# disposable, and that has to be checked mechanically: an orchestrator picks it
+# programmatically for every dispatch, so a doc convention only holds until the
+# first slip in brief-generation.
+#
+# git's own bookkeeping is the test. In a linked worktree --git-dir is
+# <primary>/.git/worktrees/<name> while --git-common-dir is <primary>/.git; in a
+# primary checkout the two are identical. Note this rejects plain directories
+# too, which matters more than it looks: if any ancestor is a repo (a home
+# directory under version control, say) a scratch path silently resolves to
+# *that* repo, and the worker would be editing inside it.
+#
+# --path-format=absolute needs git >= 2.31. Older git errors out, and a
+# non-zero exit or a throw both land in the same fail-closed branch.
+#
+# One implementation, two callers: the dispatch guard below and -Probe. They
+# have to agree - a probe that says DISPATCHABLE where a dispatch then fails
+# would restore the silence this function's second caller exists to break.
+function Test-LinkedWorktree([string]$path) {
+    $dirs = @()
+    $code = 1
+    try {
+        $dirs = @(& git -C $path rev-parse --path-format=absolute --git-dir --git-common-dir 2>$null)
+        $code = $LASTEXITCODE
+    }
+    catch { $code = 1 }
+
+    if ($code -ne 0 -or $dirs.Count -lt 2) {
+        return @{ ok = $false; reason = 'not a git worktree'; gitDir = $null; gitCommonDir = $null }
+    }
+    if ([string]::Equals($dirs[0], $dirs[1], [StringComparison]::OrdinalIgnoreCase)) {
+        return @{ ok = $false; reason = 'primary checkout'; gitDir = $dirs[0]; gitCommonDir = $dirs[1] }
+    }
+    return @{ ok = $true; reason = ''; gitDir = $dirs[0]; gitCommonDir = $dirs[1] }
+}
+
+# Required for a dispatch, but not [Parameter(Mandatory)] and not checked under
+# -Probe: a mandatory parameter prompts, and this script is only ever run
+# headless, where a prompt hangs until timeout. A probe has no brief.
+if (-not $Probe) {
+    if (-not $BriefFile) { Fail '-BriefFile is required' }
+    if (-not (Test-Path -LiteralPath $BriefFile)) { Fail "brief file not found: $BriefFile" }
+}
 
 $state = @{}
 if (Test-Path -LiteralPath $statePath) {
     try { $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json -AsHashtable }
     catch { Fail "state file is not valid JSON: $statePath" }
+}
+
+# Resolved above the enabled gate because -Probe reports them while workers are
+# off. Both are pure reads of $state; nothing acts on either until after the
+# gate. -as [int], not a cast: a non-numeric maxTurns would otherwise throw a
+# terminating error here and take a probe down before it could report why.
+if (-not $Model) { $Model = if ($state.model) { $state.model } else { 'glm-5.3-flash:cloud' } }
+if (-not $PSBoundParameters.ContainsKey('MaxTurns')) {
+    $stateTurns = $state.maxTurns -as [int]
+    $MaxTurns = if ($stateTurns) { $stateTurns } else { 25 }
+}
+$modelSyntaxOk = $Model -match '^[A-Za-z0-9][A-Za-z0-9._:/-]*$'
+
+# -Probe: report whether a dispatch into $Cwd would clear the preflight below,
+# without launching anything. Deliberately above the enabled gate - `on` probes
+# the directory it is about to enable for, and `status` has to be able to say
+# "enabled, but not dispatchable here", which is precisely the state that used
+# to look healthy from every angle while no dispatch could ever succeed.
+#
+# The checks are the dispatch path's own, in the dispatch path's order, so the
+# verdict cannot drift from what a dispatch would actually do. `enabled` is
+# reported beside the verdict rather than folded into it: it is a switch the
+# user owns, while everything in $reason is a fact about this directory or
+# install that turning the switch on will not change.
+if ($Probe) {
+    if (-not $Cwd) { $Cwd = (Get-Location).Path }
+
+    $reason = ''
+    $remedy = ''
+    $wt = @{ gitDir = $null; gitCommonDir = $null }
+
+    if (-not (Test-Path -LiteralPath $Cwd)) {
+        $reason = 'cwd not found'
+        $remedy = "  Pass -Cwd a directory that exists."
+    }
+    else {
+        $wt = Test-LinkedWorktree $Cwd
+        if (-not $wt.ok)                                 { $reason = $wt.reason; $remedy = $worktreeHelp }
+        elseif (-not (Test-Path -LiteralPath $overlay))  { $reason = 'settings overlay not found'; $remedy = "  Re-run ollama-workers/install.ps1 to seed $overlay" }
+        elseif (-not (Get-OllamaPath))                   { $reason = 'ollama executable not found'; $remedy = '  Install Ollama, then: ollama signin' }
+        elseif (-not $modelSyntaxOk)                     { $reason = "model tag is not dispatchable: $Model"; $remedy = '  Set a usable tag with: /ollama-workers on <model>' }
+    }
+
+    $dispatchable = [string]::IsNullOrEmpty($reason)
+
+    [ordered]@{
+        dispatchable    = $dispatchable
+        reason          = $reason
+        remedy          = $remedy
+        cwd             = $Cwd
+        git_dir         = $wt.gitDir
+        git_common_dir  = $wt.gitCommonDir
+        enabled         = ($state.enabled -eq $true)
+        model           = $Model
+        model_syntax_ok = [bool]$modelSyntaxOk
+        max_turns       = $MaxTurns
+    } | ConvertTo-Json -Depth 4 -Compress
+
+    # The availability row calibration was missing. A skipped dispatch writes
+    # nothing, so ~/.claude/ollama-workers.log.jsonl could not tell "the worker
+    # was never usable in this repo" from "no task was a good fit" - and any
+    # retuning read out of it was drawing on data the failure mode deletes.
+    # Logged only when workers are ON and the answer is no: a yes teaches
+    # calibration nothing, and a probe while off is the user checking a switch,
+    # not a dispatch that was lost. event='probe' keeps these rows out of the
+    # turn and escalation statistics, which are about runs.
+    if (($state.enabled -eq $true) -and -not $dispatchable) {
+        Write-LogRow ([ordered]@{
+            ts           = (Get-Date).ToUniversalTime().ToString('o')
+            event        = 'probe'
+            label        = $Label
+            cwd          = $Cwd
+            model        = $Model
+            dispatchable = $false
+            reason       = $reason
+        })
+    }
+
+    if ($dispatchable) { exit 0 } else { exit 1 }
 }
 
 # The off switch is enforced here, not only in the status hook and the skill's
@@ -71,11 +219,6 @@ if ($state.enabled -ne $true) {
     Fail "ollama workers are disabled in $statePath`n  Enable with: /ollama-workers on"
 }
 
-if (-not $Model)               { $Model = if ($state.model) { $state.model } else { 'glm-5.3-flash:cloud' } }
-if (-not $PSBoundParameters.ContainsKey('MaxTurns')) {
-    $MaxTurns = if ($state.maxTurns) { [int]$state.maxTurns } else { 25 }
-}
-
 # $Model and $Resume are the only values that reach the child's command line
 # from outside this script - $Cwd and $BriefFile travel as -WorkingDirectory and
 # -RedirectStandardInput, and $overlay derives from $HOME. Both are checked
@@ -90,7 +233,7 @@ if (-not $PSBoundParameters.ContainsKey('MaxTurns')) {
 # than ^uuid$ deliberately: the CLI emits canonical UUIDs today (verified
 # 5e08f631-daaf-40ab-8bfa-d5c3f40ace37), and a charset check blocks every
 # injection character without breaking if that format ever changes.
-if ($Model -notmatch '^[A-Za-z0-9][A-Za-z0-9._:/-]*$') {
+if (-not $modelSyntaxOk) {
     Fail "model tag has characters that are not allowed on a command line: $Model"
 }
 if ($Resume -and $Resume -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
@@ -102,40 +245,18 @@ if (-not $Cwd) { Fail '-Cwd is required (a linked git worktree)' }
 if (-not (Test-Path -LiteralPath $Cwd)) { Fail "cwd not found: $Cwd" }
 if (-not (Test-Path -LiteralPath $overlay)) { Fail "settings overlay not found: $overlay" }
 
-# The run below passes --dangerously-skip-permissions, so nothing will stop the
-# worker from editing or deleting anything under $Cwd. $Cwd therefore has to be
-# disposable, and that has to be checked mechanically: an orchestrator picks it
-# programmatically for every dispatch, so a doc convention only holds until the
-# first slip in brief-generation.
-#
-# git's own bookkeeping is the test. In a linked worktree --git-dir is
-# <primary>/.git/worktrees/<name> while --git-common-dir is <primary>/.git; in a
-# primary checkout the two are identical. Note this rejects plain directories
-# too, which matters more than it looks: if any ancestor is a repo (a home
-# directory under version control, say) a scratch path silently resolves to
-# *that* repo, and the worker would be editing inside it.
-#
-# --path-format=absolute needs git >= 2.31. Older git errors out, and a
-# non-zero exit or a throw both land in the same fail-closed branch.
-$gitDirs = @()
-$gitExit = 1
-try {
-    $gitDirs = @(& git -C $Cwd rev-parse --path-format=absolute --git-dir --git-common-dir 2>$null)
-    $gitExit = $LASTEXITCODE
-}
-catch { $gitExit = 1 }
-
-$worktreeHelp = "  Create one with: git worktree add <path> <branch>"
-if ($gitExit -ne 0 -or $gitDirs.Count -lt 2) {
-    Fail "-Cwd is not a git worktree: $Cwd`n  The worker runs with --dangerously-skip-permissions and only accepts one.`n$worktreeHelp"
-}
-if ([string]::Equals($gitDirs[0], $gitDirs[1], [StringComparison]::OrdinalIgnoreCase)) {
+# See Test-LinkedWorktree above for why this is checked and not trusted. The
+# messages stay verbatim: they are what a rejected dispatch shows the caller.
+$wt = Test-LinkedWorktree $Cwd
+if ($wt.reason -eq 'primary checkout') {
     Fail "-Cwd is a primary checkout, not a linked worktree: $Cwd`n  The worker runs with --dangerously-skip-permissions and refuses to edit a`n  primary checkout.`n$worktreeHelp"
 }
+if (-not $wt.ok) {
+    Fail "-Cwd is not a git worktree: $Cwd`n  The worker runs with --dangerously-skip-permissions and only accepts one.`n$worktreeHelp"
+}
 
-$ollama = (Get-Command ollama -ErrorAction SilentlyContinue).Source
-if (-not $ollama) { $ollama = Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe' }
-if (-not (Test-Path -LiteralPath $ollama)) { Fail 'ollama executable not found on PATH or in LOCALAPPDATA' }
+$ollama = Get-OllamaPath
+if (-not $ollama) { Fail 'ollama executable not found on PATH or in LOCALAPPDATA' }
 
 # Isolated config dir, with plugins junctioned in so the worker sees the same
 # skills (TDD, verification-before-completion) the brief refers to. A junction,
@@ -280,6 +401,7 @@ $verdict | ConvertTo-Json -Depth 6 -Compress
 
 $logEntry = [ordered]@{
     ts          = (Get-Date).ToUniversalTime().ToString('o')
+    event       = 'run'
     label       = $Label
     cwd         = $Cwd
     model       = $Model
@@ -290,11 +412,6 @@ $logEntry = [ordered]@{
     escalate    = $verdict.escalate
     reason      = $verdict.reason
 }
-try {
-    Add-Content -LiteralPath $logPath -Value ($logEntry | ConvertTo-Json -Depth 4 -Compress)
-}
-catch {
-    [Console]::Error.WriteLine("ollama-worker: could not append to $logPath")
-}
+Write-LogRow $logEntry
 
 if ($escalate) { exit 2 } else { exit 0 }
