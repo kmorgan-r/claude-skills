@@ -143,21 +143,44 @@ Get-Content $f | ForEach-Object {
 
 Write the findings to `advisor-bridge/tests/fixtures/SCHEMA.md` as a table: record `type` values seen, where `isSidechain` sits, where the content blocks sit (`message.content[]` vs `content[]`), and the key names inside each block type (`text`, `thinking`, `name`/`input`, `content`). **If the nesting differs from `message.content[]`, every code block in Tasks 4 and 5 must be adjusted to match — the schema on disk wins over this plan.**
 
-- [ ] **Step 5: Settle the open question — does hook text ride inside `user` records?**
+- [ ] **Step 5: Confirm the settled open question — does hook text ride inside `user` records?**
 
-The spec lists this under *For the implementer to verify*. One grep answers it:
+The spec lists this under *For the implementer to verify*. **It was measured against
+a real 216-assistant-turn transcript before this plan was written, and the answer is
+NO.** Every `<system-reminder>`, hook payload, `gitStatus`, `userEmail` and
+environment block lived in its own `attachment` record — `attachment.type` values
+`hook_success`, `hook_additional_context`, `environment`, `session_context`,
+`total_tokens_reminder` — and **zero** of the 119 `user` records carried one inside
+`message.content`. The `type` filter alone accounts for the saving, and no stripping
+rule is needed.
+
+Re-confirm on this machine, since a Claude Code upgrade could change the layout. The
+grep must read **only `message.content` text**, never the serialized record: a
+record's `toolUseResult` routinely quotes file contents that themselves mention
+`system-reminder`, and grepping the whole record returns false positives (it did, on
+the first attempt at this measurement).
 
 ```powershell
+$hit = 0
 Get-Content $f | ForEach-Object {
     try { $r = $_ | ConvertFrom-Json } catch { return }
-    if ($r.type -eq 'user') { ($r | ConvertTo-Json -Depth 20) }
-} | Select-String -Pattern 'system-reminder|hook additional context' | Measure-Object | Select-Object Count
+    if ($r.type -ne 'user') { return }
+    $texts = @()
+    if ($r.message.content -is [string]) { $texts += $r.message.content }
+    else { foreach ($b in $r.message.content) { if ($b.type -eq 'text') { $texts += $b.text } } }
+    foreach ($t in $texts) { if ($t -match '<system-reminder>') { $hit++; break } }
+}
+"user records carrying <system-reminder> inside their own text: $hit"
 ```
 
-Record the answer in `SCHEMA.md` under a heading `## Does hook output ride inside user records?`.
+Record the count in `SCHEMA.md` under a heading `## Does hook output ride inside user records?`, together with the `attachment.type` values seen.
 
-- **Count is 0** → the `type` filter alone accounts for the 96.6% saving. Note that and move on.
-- **Count is > 0** → STOP and report. A stripping rule must be added to the spec's `### Renderer` (naming the delimiters and whether the removed span counts toward `chars_sent`) before Task 4 is written, and a golden case added here. Do not invent the rule inside the implementation.
+- **Count is 0** — the expected result. Note it and move on.
+- **Count is > 0** → STOP and report. The record layout changed since this was
+  measured. A stripping rule must be added to the spec's `### Renderer` (naming the
+  delimiters and whether the removed span counts toward `chars_sent`) before Task 4
+  is written, and a golden case added here. Do not invent the rule inside the
+  implementation.
 
 - [ ] **Step 6: Synthesize the fixtures**
 
@@ -178,17 +201,22 @@ function Use($n, $i)     { [ordered]@{ type = 'tool_use';    name = $n; input = 
 function Res($s)         { [ordered]@{ type = 'tool_result'; content = $s } }
 ```
 
-The seven fixtures:
+The seven fixtures. **The "Must contain" column is not decoration — Tasks 4 and 5
+grep for these exact strings, and a fixture synthesized without them fails tests
+that look correct.** Every marker sits in a `text` block, so a filter that wrongly
+kept the record would render it.
 
-| Fixture | Contents |
-|---|---|
-| `basic.jsonl` | one `user`, one `assistant`, one `attachment` record (attachment must be dropped) |
-| `sidechain.jsonl` | one `user` with `isSidechain: true` (dropped), one **with the key absent entirely** (kept), one with `false` (kept) |
-| `caps.jsonl` | `thinking` of 900 chars, `tool_use` input of 1200 chars, `tool_result` of 5000 chars — one pair mid-transcript and one inside the last 12 turns |
-| `long.jsonl` | 40 turns, the first user message ~500 chars, each later turn ~500 chars — long enough that the first message falls outside the last-12 window |
-| `oversized-tail.jsonl` | 3 turns, the most recent a single `text` block of 200,000 chars |
-| `truncated.jsonl` | two valid records, then a third line cut mid-object (no closing brace) |
-| `empty.jsonl` | three `attachment` records and nothing else |
+| Fixture | Contents | Must contain (later tasks grep these) |
+|---|---|---|
+| `basic.jsonl` | one `user`, one `assistant`, one `attachment` record. The attachment is shaped like a turn — `message.content` with a `text` block — so that dropping it is proved by the filter, not by the record being unrenderable | `ATTACHMENT-MARKER` in the attachment record's text, and nowhere else |
+| `sidechain.jsonl` | one `user` with `isSidechain: true` (dropped), one **with the key absent entirely** (kept), one with `false` (kept) | `SIDECHAIN-MARKER` in the `isSidechain: true` record's text, and nowhere else |
+| `caps.jsonl` | `thinking` of 900 chars, `tool_use` input of 1200 chars, `tool_result` of 5000 chars — one pair mid-transcript and one inside the last 12 turns | — |
+| `long.jsonl` | 40 turns, the first user message ~500 chars, each later turn ~500 chars — long enough that the first message falls outside the last-12 window | `FIRST-MESSAGE-MARKER-END` as the **last** characters of the first user message's text, so its survival proves the message was kept whole rather than head-truncated |
+| `oversized-tail.jsonl` | 3 turns, the most recent a single `text` block of 200,000 chars | — |
+| `truncated.jsonl` | two valid records, then a third line cut mid-object (no closing brace) | — |
+| `empty.jsonl` | three `attachment` records and nothing else | — |
+
+The envelope fixtures in Task 7 carry their own marker, `SECRET-ADVICE-BODY`; they are written literally there.
 
 - [ ] **Step 7: Run the harness test to verify it passes**
 
@@ -266,7 +294,12 @@ Describe 'numeric coercion' {
         $h = New-Home '{"enabled": true, "charBudget": "wide"}'
         $r = Invoke-Bridge -Home $h -ExtraArgs @('-DryRun')
         $r.Text | Should -Not -Match 'wide'
-        $r.Code | Should -Not -Be 0   # later checks still fail; it must not THROW on the cast
+        # No exit-code assertion. At this task the script ends after the config
+        # read, so it exits 0; asserting non-zero would fail here and start
+        # passing only as a side effect of later tasks appending code. The
+        # negative below is the real check - `-as [int]` must not throw under
+        # $ErrorActionPreference = 'Stop'.
+        $r.Text | Should -Not -Match 'Cannot convert'
     }
     It 'falls back to the default on a negative timeoutSec' {
         $h = New-Home '{"enabled": true, "timeoutSec": -5}'
@@ -537,7 +570,13 @@ git commit -m "feat(advisor-bridge): session locator with three fail-closed path
 
 **Interfaces:**
 - Consumes: `$transcriptPath`, `$maxToolResultChars`, `Fail`.
-- Produces: `Read-Turns([string]$path)` returning `@{ Turns = <object[]>; Skipped = <int> }` where each turn is `@{ Role = 'user'|'assistant'; Text = <string> }`; `Format-Block($block, [int]$maxToolResult)` returning the rendered string for one content block.
+- Produces: `Read-Turns([string]$path)` returning `@{ Turns = <object[]>; Skipped = <int> }` where each turn is `@{ Role = 'user'|'assistant'; Text = <string> }`; `Format-Block($block, [int]$maxToolResult)` returning the rendered string for one content block; a **minimal `-DryRun` emitter** (Step 5) printing `render`, `chars_sent`, `turns_rendered`, `turns_elided`, `lines_skipped`.
+
+**`-DryRun` is built in this task, not in Task 6.** Every assertion in
+`Render.Tests.ps1` reads its JSON, so a renderer whose seam arrives two tasks later
+is a renderer whose tests cannot pass in its own task. Task 5 extends the emitter
+with the budgeted values and Task 6 relocates it below the environment build and
+adds `env`/`args`/`cwd`/`exe`.
 
 **If `SCHEMA.md` from Task 1 records a nesting other than `message.content[]`, adjust the property paths below to match it.** The schema on disk is the authority.
 
@@ -595,7 +634,10 @@ Describe 'block caps' {
         $r = Render-Fixture 'caps.jsonl'
         ([regex]::Matches($r.render, '\[thinking\] (.{0,700}?)(\r?\n|$)') |
             ForEach-Object { $_.Groups[1].Value.Length } |
-            Measure-Object -Maximum).Maximum | Should -BeLessOrEqual 600
+            Measure-Object -Maximum).Maximum | Should -BeLessOrEqual 620
+        # 620, not 600: Limit-Text appends ' [truncated]' (12 chars) AFTER the
+        # 600-char cut, so a capped line is 612 long. Asserting 600 fails on
+        # correct output.
     }
     It 'caps tool_use input at 800 chars' {
         $r = Render-Fixture 'caps.jsonl'
@@ -742,12 +784,39 @@ function New-Header([int]$total, [int]$elided, [int]$skippedLines) {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [ ] **Step 5: Append the minimal `-DryRun` emitter**
+
+```powershell
+# --- -DryRun (minimal) -----------------------------------------------------
+# A deliverable seam, not a test-only afterthought, and it belongs in THIS task:
+# every assertion in Render.Tests.ps1 reads this JSON. It is deliberately
+# outside the stdout/exit contract - it prints JSON and exits 0 without
+# spawning, which is not "advice returned" in the sense of the exit table.
+#
+# Task 5 replaces the body with the budgeted values; Task 6 moves the block
+# below the environment build and adds env, args, cwd and exe. Until then it
+# reports only what the renderer itself knows, with turns_elided fixed at 0
+# because nothing elides yet.
+if ($DryRun) {
+    $rendered = (New-Header $allTurns.Count 0 $skipped) +
+                (($allTurns | ForEach-Object { Format-Turn $_ $maxToolResultChars }) -join "`n`n")
+    [ordered]@{
+        render         = $rendered
+        chars_sent     = $rendered.Length
+        turns_rendered = $allTurns.Count
+        turns_elided   = 0
+        lines_skipped  = $skipped
+    } | ConvertTo-Json -Depth 8
+    exit 0
+}
+```
+
+- [ ] **Step 6: Run tests to verify they pass**
 
 Run: `Invoke-Pester advisor-bridge/tests/Render.Tests.ps1 -Output Detailed`
 Expected: the filter, cap, header and non-empty tests PASS. The budget tests do not exist yet.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add advisor-bridge/scripts/advisor-bridge.ps1 advisor-bridge/tests/Render.Tests.ps1
@@ -887,12 +956,33 @@ $turnsRendered = $keepIdx.Count
 $charsSent     = $rendered.Length
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Update the `-DryRun` emitter to report the budgeted render**
+
+Replace the minimal emitter Task 4 appended with this one. It must sit **below** the
+budget block just added — `$rendered`, `$charsSent`, `$turnsRendered` and `$elided`
+do not exist above it, and leaving the old emitter in place would report the
+unbudgeted render, so the two termination tests would read a `chars_sent` no budget
+step ever touched and pass on a script that never terminates.
+
+```powershell
+if ($DryRun) {
+    [ordered]@{
+        render         = $rendered
+        chars_sent     = $charsSent
+        turns_rendered = $turnsRendered
+        turns_elided   = $elided
+        lines_skipped  = $skipped
+    } | ConvertTo-Json -Depth 8
+    exit 0
+}
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
 
 Run: `Invoke-Pester advisor-bridge/tests/Render.Tests.ps1 -Output Detailed`
 Expected: PASS, all render tests.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add advisor-bridge/scripts/advisor-bridge.ps1 advisor-bridge/tests/Render.Tests.ps1
@@ -1053,13 +1143,22 @@ $psi.WorkingDirectory       = $scratchDir
 # the mistake the guard below exists to catch.
 $psi.Environment.Clear()
 foreach ($k in $ENV_WHITELIST) {
-    if ($k -eq 'CLAUDE_EFFORT') { continue }
+    if ($k -in 'CLAUDE_EFFORT', 'HOME') { continue }
     $v = [Environment]::GetEnvironmentVariable($k)
     if ($null -ne $v) { $psi.Environment[$k] = $v }
 }
 # Set explicitly, not inherited, so its value is a decision recorded here rather
 # than an accident of what the parent happened to export.
 $psi.Environment['CLAUDE_EFFORT'] = 'xhigh'
+
+# HOME is NOT a Windows environment variable - it is a git-bash export. Plain
+# pwsh does not have $env:HOME (PowerShell's $HOME automatic variable is derived
+# from USERPROFILE and is a different thing). Inheriting it would make both the
+# child's environment and the guard's key set depend on which shell launched the
+# wrapper, so it is derived here instead and the child always gets one.
+$homeDir = [Environment]::GetEnvironmentVariable('HOME')
+if (-not $homeDir) { $homeDir = [Environment]::GetEnvironmentVariable('USERPROFILE') }
+if ($homeDir) { $psi.Environment['HOME'] = $homeDir }
 
 foreach ($a in @(
     '-p'
@@ -1082,7 +1181,13 @@ foreach ($a in @(
 # release adds. The whitelist is already enumerated, so equality costs nothing
 # and closes the whole family rather than one prefix of it.
 $actual   = @($psi.Environment.Keys) | Sort-Object
-$expected = @($ENV_WHITELIST | Where-Object { $_ -eq 'CLAUDE_EFFORT' -or $null -ne [Environment]::GetEnvironmentVariable($_) }) | Sort-Object
+$expected = @($ENV_WHITELIST | Where-Object {
+    switch ($_) {
+        'CLAUDE_EFFORT' { $true }          # always set explicitly above
+        'HOME'          { [bool]$homeDir } # derived above, not inherited
+        default         { $null -ne [Environment]::GetEnvironmentVariable($_) }
+    }
+}) | Sort-Object
 if (($actual -join ',') -ne ($expected -join ',')) {
     $extra   = @($actual   | Where-Object { $_ -notin $expected })
     $missing = @($expected | Where-Object { $_ -notin $actual })
@@ -1092,7 +1197,17 @@ if (($actual -join ',') -ne ($expected -join ',')) {
 
 Exit 2, not 1: this is not a configuration mistake the user can fix by editing a file — it means the environment scrub itself is broken, which is the same "do not trust this result" class as the post-run guard.
 
-- [ ] **Step 5: Append `-DryRun`**
+- [ ] **Step 5: Relocate and widen `-DryRun`**
+
+`-DryRun` already exists — Task 4 added it and Task 5 gave it the budgeted values.
+**Move that block from where Task 5 left it to here**, below the environment build
+and the pre-spawn guard, and widen it with `env`, `args`, `cwd`, `exe` and `model`.
+There must be exactly one `if ($DryRun)` block in the finished script: leaving the
+earlier one in place would exit before the environment is ever built, and every
+assertion in `Env.Tests.ps1` would read a JSON object with no `env` key.
+
+Placing it after the guard is deliberate — the guard's exit 2 must be reachable in a
+dry run, since the environment-scrub tests are the only thing that exercises it.
 
 ```powershell
 # --- -DryRun ---------------------------------------------------------------
@@ -1132,7 +1247,11 @@ if (-not (Test-Path -LiteralPath $scratchDir)) {
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `Invoke-Pester advisor-bridge/tests/Env.Tests.ps1 -Output Detailed`
-Expected: PASS, 5 tests. Re-run the whole suite — `Render.Tests.ps1` now gets real `-DryRun` JSON.
+Expected: PASS, 5 tests.
+
+Then re-run the whole suite — relocating `-DryRun` moved it past the executable
+resolution, the persona preflight and the guard, so a render test that passed in
+Task 5 can now fail on a preflight that fires first. This is the run that catches it.
 
 Run: `Invoke-Pester advisor-bridge/tests -Output Detailed`
 Expected: PASS.
@@ -1311,8 +1430,18 @@ else {
     # only the timeout breaks it.
     $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
     $stderrTask = $proc.StandardError.ReadToEndAsync()
-    $proc.StandardInput.Write($rendered)
-    $proc.StandardInput.Close()
+
+    # The child can die before it ever reads stdin - a rejected argument, a
+    # missing credential - and this Write then raises an IOException on a broken
+    # pipe. Unguarded, under $ErrorActionPreference = 'Stop', that kills the
+    # wrapper before any log row and with an exit code outside the published
+    # table. Same hazard and same remedy as the renderer's per-line try/catch.
+    $writeFailed = $false
+    try {
+        $proc.StandardInput.Write($rendered)
+        $proc.StandardInput.Close()
+    }
+    catch { $writeFailed = $true }
 
     if (-not $proc.WaitForExit($timeoutSeconds * 1000)) {
         # Kill($true) takes the whole process tree. `claude` on Windows launches
@@ -1336,9 +1465,10 @@ else {
         # timeout beats a nonzero exit (a killed child also exits nonzero, and
         # timeout is the more specific fact); then child_error; then
         # no_envelope.
-        if ($envelope.is_error -eq $true) { $verdict = 'child_error' }
-        elseif ($exitCode -ne 0)          { $verdict = 'child_error' }
-        elseif ($null -eq $envelope)      { $verdict = 'no_envelope' }
+        if ($writeFailed)                     { $verdict = 'child_error' }
+        elseif ($envelope.is_error -eq $true) { $verdict = 'child_error' }
+        elseif ($exitCode -ne 0)              { $verdict = 'child_error' }
+        elseif ($null -eq $envelope)          { $verdict = 'no_envelope' }
     }
 }
 $sw.Stop()
@@ -1356,11 +1486,23 @@ $sw.Stop()
 # This guard is what makes the whole design safe. Without it the failure mode
 # the bridge exists to prevent - GLM advising GLM - returns silently, formatted
 # as advice.
-if ($verdict -in 'ok', 'child_error') {
+#
+# The `$envelope` non-null test is load-bearing, not defensive. A timeout, a
+# broken stdin pipe or an auth failure leaves no envelope at all; without this
+# test `$used` would be empty, `$used.Count -ne 1` would hold, and EVERY such
+# failure would be relabelled `model_guard` - so the log column and the message
+# the caller sees would both report "the wrong model answered" for a call in
+# which no model answered. `no_envelope` and `child_error` already carry those
+# cases and already exit 2. The guard only decides between models when a reply
+# actually arrived.
+if ($envelope -and $verdict -in 'ok', 'child_error') {
     $used = @()
-    if ($envelope -and $envelope.PSObject.Properties.Name -contains 'modelUsage' -and $envelope.modelUsage) {
+    if ($envelope.PSObject.Properties.Name -contains 'modelUsage' -and $envelope.modelUsage) {
         $used = @($envelope.modelUsage.PSObject.Properties.Name)
     }
+    # An envelope that arrived but named no model is still a guard trip: the
+    # reply is real and its provenance is unverifiable, which is the one thing
+    # the caller must not act on.
     if ($used.Count -ne 1 -or $used[0] -ne $model) {
         $verdict = 'model_guard'
     }
