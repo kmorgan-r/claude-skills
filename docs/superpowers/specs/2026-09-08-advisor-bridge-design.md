@@ -113,17 +113,29 @@ reorders them loses the property.
    nothing.
 8. Build the child environment from empty.
 9. **Pre-spawn guard** on that environment → exit 2 if it trips.
-10. Create `~/.claude/advisor-scratch` if absent.
+10. Create `~/.claude/advisor-bridge-scratch` if absent.
 11. Spawn, with the timeout armed.
-12. **Post-run model guard** on the envelope → exit 2 if it trips.
-13. Write the log row.
-14. Print `result` to stdout, exit 0.
+12. Classify the child's outcome, in this precedence: **timeout** beats a
+    nonzero exit (a killed child also exits nonzero, and `timeout` is the more
+    specific fact); then `child_error` (`is_error`, or a nonzero exit); then
+    `no_envelope` (nothing on stdout parses as a result envelope). All three
+    exit 2.
+13. **Post-run model guard** on the envelope → exit 2 if it trips. `model_guard`
+    beats `child_error` wherever both could apply, for the same reason: a reply
+    from the wrong model is what the caller must not act on.
+14. Write the log row.
+15. Print `result` to stdout, exit 0.
 
 The gate at step 2 sits above everything that costs money or touches the
 filesystem, for the reason `ollama-worker.ps1:314` gives for its own: an
 orchestrator can dispatch on stale context after a compact, so the mechanism
-owns the gate, not the system prompt. The log row at step 13 is written on every
-terminating path from step 11 onward, including the timeout and both guards.
+owns the gate, not the system prompt.
+
+The log row is written on every exit-0 and exit-2 path — the pre-spawn guard at
+step 9 included, since the exit-2 table gives it a verdict and a verdict only
+exists inside a row. Exit-1 paths write none: nothing was attempted, there is no
+verdict to record, and a row per disabled-gate call would swamp the cost column
+`## Cost` calibrates from.
 
 ### Session locator
 
@@ -215,13 +227,20 @@ Budget enforcement, applied in this order until under `charBudget`:
 4. **Still over: truncate the tail window itself**, oldest-first within it, down
    to the first user message plus the most recent turn, each marked
    `[truncated]`.
-5. **Still over: truncate the first user message**, marked `[truncated]`.
+5. **Still over: truncate the most recent turn**, marked `[truncated]`.
+6. **Still over: truncate the first user message**, marked `[truncated]`.
 
-Steps 1 and 2 are preservation floors, not reductions; only 3, 4 and 5 remove
-text. Without 4 and 5 the sequence has no terminal step — a first message plus
-twelve turns that together exceed the budget would ship over budget at full
-per-call cost, silently. The golden-render test asserts the final rendered
-length is `<= charBudget` for a fixture built to blow it.
+Steps 1 and 2 are preservation floors, not reductions; only 3 through 6 remove
+text, and they run in ascending order of what it costs to lose the content —
+which is why the first user message is cut last rather than first.
+
+Steps 4–6 truncate `text` blocks, the one block type the table above renders in
+full and therefore the only content no cap otherwise bounds. Without all three
+the sequence has no terminal step: a first message plus twelve turns that
+together exceed the budget, **or a single oversized final turn**, would ship
+over budget at full per-call cost, silently. The golden-render test asserts the
+final rendered length is `<= charBudget` — an assertion that is unsatisfiable
+unless every block type is reachable by some truncation step.
 
 A header precedes the render: cwd, git branch, the caller's model, total turn
 count, turns elided, and lines skipped as unparseable.
@@ -287,7 +306,7 @@ without touching code, which is the property that mattered. Do not add
 ignored whenever `--system-prompt` is passed, so it would be a flag that reads
 as load-bearing while doing nothing.
 
-Working directory `~/.claude/advisor-scratch`, created on demand; exit 1 with the
+Working directory `~/.claude/advisor-bridge-scratch`, created on demand; exit 1 with the
 path if it cannot be created. The advisor child needs no repository access — it
 has no tools — and running it in the caller's cwd would file its transcript in
 the caller's project directory, where the next `claude --continue` could resume
@@ -377,6 +396,13 @@ above leans on it.
 stdout carries the envelope's `result` text and nothing else. The caller is a
 model reading advice, not a JSON parser.
 
+Two exceptions, both test seams (see `## Testing`): `-DryRun` prints its JSON
+plan and exits 0 without spawning, and `-EnvelopeFile` prints a canned reply.
+Neither is "advice returned" in the sense of the exit table below. An
+`-EnvelopeFile` run additionally writes `"source": "envelope-file"` into its log
+row, so a canned row can never be read as a billed one by the cost calibration
+or by the manual end-to-end check.
+
 One row per run appended to `~/.claude/advisor-bridge.log.jsonl`: `ts`,
 `session_id` (the caller's), `model`, `chars_sent`, `turns_rendered`,
 `turns_elided`, `lines_skipped`, `input_tokens`, `output_tokens`, `cost_usd`,
@@ -404,7 +430,7 @@ locally, costs nothing, and names a remedy:
 - `CLAUDE_CODE_SESSION_ID` unset
 - Transcript: no match, or more than one match
 - Render produced zero turns
-- `~/.claude/advisor-scratch` could not be created
+- `~/.claude/advisor-bridge-scratch` could not be created
 
 **Exit 2 — the call was attempted and its result is not trustworthy:**
 
@@ -478,6 +504,12 @@ Without this the enforced gate has no surface: a fresh install seeds
 exits silently when the file is missing, unreadable, or `enabled` is not `true`
 — the pattern at `ollama-workers-status.py:73-83`, documented in
 `ollama-workers/SKILL.md` as "a disabled install costs no context".
+
+Silent on all three branches, and that is a deliberate divergence: the sibling
+prints on its unreadable-file branch (`ollama-workers-status.py:79`). Because
+this hook runs its config read *before* the base-URL check, copying that print
+verbatim would put a message into every Anthropic session too — the exact thing
+the paragraph below forbids.
 
 Only then does it check `ANTHROPIC_BASE_URL`: set, and its host not
 `api.anthropic.com` → inject the advisor protocol as `additionalContext`.
@@ -580,6 +612,12 @@ So: **collect every `SessionStart` command string before the rewrite, and assert
 each one is still present afterwards**, in addition to asserting the new entry
 landed. Roll back to the backup on any loss.
 
+`-DryRun` prints that collected set as JSON — every pre-existing `SessionStart`
+command string, plus the entry it would add — and exits without writing, in the
+shape `ollama-worker.ps1:373-384` uses. The sibling's dry run emits only a step
+line, so a verbatim mirror would leave the install test's preservation assertion
+with no artifact to read.
+
 **Back-fill the same check into `ollama-workers/install.ps1`** in this change.
 The two are symmetric hazards, and whichever installer is run second is the one
 that can destroy the other's entry — fixing only the new one leaves half the
@@ -609,7 +647,7 @@ ship one; a plain `.ps1` harness with `exit 1` would work equally and can be
 substituted at plan time, but the suite must have *a* named runner and a
 documented command — not a list of intentions.
 
-Three test seams are **deliverables of the script**, not test-only afterthoughts,
+Four test seams are **deliverables of the script**, not test-only afterthoughts,
 and are specified here because several of the tests below cannot exist without
 them:
 
@@ -618,6 +656,7 @@ them:
 | `-DryRun` | Prints the constructed child environment, the resolved argument list, the cwd and the rendered char count as JSON, then exits 0 **before spawning**. Mirrors `ollama-worker.ps1:42,373-384`. |
 | `-EnvelopeFile <path>` | Reads a canned result envelope from a file instead of spawning `claude`. The only way to drive the post-run guard against a wrong model without a real, non-deterministic API call. |
 | `-TimeoutSec <n>` | Overrides `timeoutSec`, so the timeout path is testable in 2 s against a slow stub. |
+| `-ClaudeHome <path>` | Overrides the `~/.claude` base for the config, log, persona and scratch paths. Without it the config, guard, timeout and log tests all read the developer's live config — which seeds `enabled: false`, so each exits 1 at step 2 before reaching the behaviour under test — and append to the real log `## Cost` calibrates from. Running the script in a child `pwsh` with `USERPROFILE` overridden is not a substitute: `$HOME` and `~` resolve once in PowerShell and do not follow a mid-process change. |
 
 ### Cases
 
@@ -627,22 +666,25 @@ them:
 - Sidechain filter: `isSidechain: true` dropped; **a record with no
   `isSidechain` field at all is KEPT** (the `-ne $true` rule).
 - Per-block caps: `thinking` at 600, `tool_use` input at 800, `tool_result` at
-  `maxToolResultChars` — including a `tool_result` **inside the last 12 turns**,
-  which the earlier draft's wording would have left uncapped.
+  `maxToolResultChars`, asserted both mid-transcript and **inside the last 12
+  turns**. The cap applies everywhere, and only the tail-window case proves it.
 - Elision: `[N turns elided]` appears with the right N.
 - **First-message independence**: a fixture long enough that the first user
   message falls *outside* the last-12-turns window, asserting it still renders
   in full. Without this, an implementation that folds rule 1 into rule 2 passes
   every other render test.
-- **Termination**: a fixture whose first message plus twelve turns alone exceed
-  `charBudget`, asserting the final render is `<= charBudget` and carries
-  `[truncated]`. This is the case steps 4 and 5 were added for.
+- **Termination**, two fixtures: one whose first message plus twelve turns alone
+  exceed `charBudget`, one whose single most recent turn does. Each asserts the
+  final render is `<= charBudget` and carries `[truncated]`, so the budget
+  sequence is shown to terminate from either end.
 - **Truncated final line**: a fixture whose last line is a half-written JSON
   record, asserting the render succeeds and the header reports one skipped line.
-- **Hook text inside a surviving record**: a `user` record whose own content
-  carries system-reminder / hook output, asserting it is stripped. The 96.6%
-  saving is otherwise an inferred property rather than a tested one — the
-  `type` filter only proves that *attachment* records go.
+- **Attachment saving, scoped to what is specified**: assert what the `type`
+  filter actually does — `attachment` records go — and nothing more. The 96.6%
+  figure is measured against that filter alone. Whether hook output *also* rides
+  inside surviving `user` records is an open question listed under *For the
+  implementer to verify*, and until it is settled a stripping assertion would
+  test a behaviour no rule in `### Renderer` specifies.
 - **Empty render**: a transcript of nothing but attachments, asserting exit 1
   naming the transcript path, with no child spawned.
 
@@ -688,8 +730,8 @@ documented fields on both the success and the timeout paths.
 
 **Install** — `-DryRun` against a fixture `settings.json` that already contains
 an `ollama-workers-status` SessionStart entry: assert the plan preserves it.
-Then a real run against a temp `~/.claude`, asserting both entries are present
-afterwards and that a simulated loss triggers the rollback.
+Then a real run under `-ClaudeHome <temp dir>`, asserting both entries are
+present afterwards and that a simulated loss triggers the rollback.
 
 **Skill invocation timeout** — grep `SKILL.md` for `timeout: 300000`. Trivial,
 static, and guards the failure the spec itself calls most likely to spoil first
@@ -718,6 +760,12 @@ executable test.
 
 - **The `modelUsage` envelope shape**, before writing the post-run guard. See
   `### Guards` — this is a prerequisite, not a nice-to-have.
+- **Whether hook output and system-reminders also ride inside surviving `user`
+  records**, not only in `attachment` records. One grep of a real transcript
+  settles it. If they do, an explicit stripping rule belongs in `### Renderer`
+  first — naming the delimiters, and whether the removed span counts toward
+  `chars_sent` — and a golden case second. As specified the renderer has three
+  rules, and none of them removes anything from inside a `text` block.
 - **Whether SessionStart fires with `source: "compact"`.** The native advisor
   survives a compact because it lives in the system prompt; this bridge's
   protocol arrives as `additionalContext` and may not. If it does fire, the
@@ -727,8 +775,9 @@ executable test.
 `ollama-workers/install.ps1` is the model for this install script and is on
 `main`. Read it there. Both installers write into `~/.claude`, so this one must
 stay consistent with it on idempotence and on seeding the JSON config only when
-absent — and must diverge from it on the `SessionStart` verification, per
-`## Install`.
+absent. On the `SessionStart` verification it must diverge from that file *as it
+stands on `main` today* — and `## Install` requires back-filling the same check
+there in this change, after which the two converge again.
 
 ## Out of scope
 
