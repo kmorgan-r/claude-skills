@@ -233,6 +233,10 @@ function New-Header([int]$total, [int]$elided, [int]$skippedLines) {
 # Six steps. 1 and 2 are preservation floors, not reductions; only 3 through 6
 # remove text, and they run in ascending order of what it costs to lose the
 # content - which is why the first user message is cut LAST rather than first.
+# Steps 3-6 run ONLY "until under charBudget" (spec 2026-09-08, budget
+# section): a transcript that already fits must not lose a single turn, so
+# each step re-checks the length and stops the moment it is satisfied rather
+# than always running to completion.
 #
 # Steps 4-6 truncate `text` blocks, the one block type Format-Block renders in
 # full and therefore the only content no cap otherwise bounds. Without all three
@@ -250,55 +254,86 @@ function Join-Render([string[]]$bodies, [int]$elidedCount, [int]$total, [int]$sk
     (New-Header $total $elidedCount $skippedLines) + ($bodies -join "`n`n")
 }
 
-# Step 1 + 2: the floors.
+# Step 1 + 2: the floors - the first user message and the last-12 tail window
+# are never elided by step 3, no matter how far over budget the transcript is.
+# Everything with an index strictly between $firstUserIdx and $tailStart is a
+# middle turn: a step-3 elision candidate, oldest (lowest index) first.
 $tailStart = [Math]::Max($firstUserIdx + 1, $allTurns.Count - $TAIL)
-$keepIdx   = [System.Collections.Generic.List[int]]::new()
-$keepIdx.Add($firstUserIdx)
-for ($i = $tailStart; $i -lt $allTurns.Count; $i++) { $keepIdx.Add($i) }
+$midCount  = [Math]::Max(0, $tailStart - ($firstUserIdx + 1))
 
-# Step 3: drop middle turns oldest-first. Everything between the first user
-# message and the tail window is already excluded above; the elision marker is
-# what tells the advisor it is not reading everything.
-$elided = $allTurns.Count - $keepIdx.Count
+# Format-Turn re-serializes tool_use/tool_result JSON on every call; caching by
+# index means the step-3 loop below - which rebuilds the render once per turn
+# it considers eliding - does not redo that work for turns it has already
+# rendered on a prior iteration.
+$bodyCache = @{}
+function Get-Body([int]$idx) {
+    if (-not $bodyCache.ContainsKey($idx)) {
+        $bodyCache[$idx] = Format-Turn $allTurns[$idx] $maxToolResultChars
+    }
+    return $bodyCache[$idx]
+}
 
-function Build([hashtable]$truncate) {
+function Build([hashtable]$truncate, [int]$elidedCount) {
     $bodies = [System.Collections.Generic.List[string]]::new()
-    for ($k = 0; $k -lt $keepIdx.Count; $k++) {
-        $idx  = $keepIdx[$k]
-        $body = Format-Turn $allTurns[$idx] $maxToolResultChars
-        if ($truncate.ContainsKey($idx)) { $body = Limit-Text $body $truncate[$idx] }
-        if ($k -eq 1 -and $elided -gt 0) { $bodies.Add("[$elided turns elided]") }
+    $first  = Get-Body $firstUserIdx
+    if ($truncate.ContainsKey($firstUserIdx)) { $first = Limit-Text $first $truncate[$firstUserIdx] }
+    $bodies.Add($first)
+    if ($elidedCount -gt 0) { $bodies.Add("[$elidedCount turns elided]") }
+    # The middle turns NOT yet elided: oldest-first elision means the surviving
+    # middle turns are always the newest ones, i.e. those just before $tailStart.
+    for ($i = $firstUserIdx + 1 + $elidedCount; $i -lt $tailStart; $i++) {
+        $bodies.Add((Get-Body $i))
+    }
+    for ($i = $tailStart; $i -lt $allTurns.Count; $i++) {
+        $body = Get-Body $i
+        if ($truncate.ContainsKey($i)) { $body = Limit-Text $body $truncate[$i] }
         $bodies.Add($body)
     }
-    return Join-Render $bodies.ToArray() $elided $allTurns.Count $skipped
+    return Join-Render $bodies.ToArray() $elidedCount $allTurns.Count $skipped
 }
 
 $truncate = @{}
-$rendered = Build $truncate
+
+# Step 3: drop middle turns oldest-first, one at a time, stopping the instant
+# the render fits - a transcript that already fits under $charBudget elides
+# nothing at all, and $elided ends at 0.
+$elided   = 0
+$rendered = Build $truncate $elided
+while ($rendered.Length -gt $charBudget -and $elided -lt $midCount) {
+    $elided++
+    $rendered = Build $truncate $elided
+}
 
 # Step 4: truncate the tail window oldest-first, down to the first user message
-# plus the most recent turn.
-$tailIdx = @($keepIdx | Where-Object { $_ -ne $firstUserIdx })
+# plus the most recent turn. Reachable only once step 3 has already elided
+# every middle turn ($elided -eq $midCount) and the render is still over
+# budget - otherwise step 3 would already have stopped the loop above.
+# PowerShell's `..` produces a DESCENDING range when start > end - if the
+# transcript is short enough that $tailStart already equals $allTurns.Count
+# (a 1-turn transcript, or the first user message itself is the last turn),
+# $tailStart..($allTurns.Count - 1) would wrongly yield the first user
+# message's own index instead of an empty tail window.
+$tailIdx = if ($tailStart -lt $allTurns.Count) { @($tailStart..($allTurns.Count - 1)) } else { @() }
 for ($t = 0; $t -lt $tailIdx.Count - 1 -and $rendered.Length -gt $charBudget; $t++) {
     $truncate[$tailIdx[$t]] = 200
-    $rendered = Build $truncate
+    $rendered = Build $truncate $elided
 }
 
 # Step 5: truncate the most recent turn itself.
 if ($rendered.Length -gt $charBudget -and $tailIdx.Count -gt 0) {
     $last = $tailIdx[-1]
     $over = $rendered.Length - $charBudget
-    $cur  = (Format-Turn $allTurns[$last] $maxToolResultChars).Length
+    $cur  = (Get-Body $last).Length
     $truncate[$last] = [Math]::Max(200, $cur - $over - 64)
-    $rendered = Build $truncate
+    $rendered = Build $truncate $elided
 }
 
 # Step 6: last resort - truncate the first user message.
 if ($rendered.Length -gt $charBudget) {
     $over = $rendered.Length - $charBudget
-    $cur  = (Format-Turn $allTurns[$firstUserIdx] $maxToolResultChars).Length
+    $cur  = (Get-Body $firstUserIdx).Length
     $truncate[$firstUserIdx] = [Math]::Max(200, $cur - $over - 64)
-    $rendered = Build $truncate
+    $rendered = Build $truncate $elided
 }
 
 # The floor of 200 chars per turn means an absurdly small charBudget cannot be
@@ -308,7 +343,7 @@ if ($rendered.Length -gt $charBudget) {
     Fail "charBudget $charBudget is too small to render even a minimal transcript ($($rendered.Length) chars)`n  Raise charBudget in $configPath."
 }
 
-$turnsRendered = $keepIdx.Count
+$turnsRendered = $allTurns.Count - $elided
 $charsSent     = $rendered.Length
 
 # --- -DryRun -----------------------------------------------------------

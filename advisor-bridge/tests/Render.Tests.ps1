@@ -148,4 +148,50 @@ Describe 'budget enforcement' {
         $r.chars_sent | Should -BeLessOrEqual 5000
         $r.render | Should -Match '\[truncated\]'
     }
+    # Cutting the first message LAST (rather than first) is the design claim
+    # this task exists to justify, and none of the four tests above pin the
+    # order: at 12000 no reduction step runs at all, and at 3000/5000 step 6
+    # (or step 5) already fires, so the first message is gone from the render
+    # in a CORRECT implementation too. A budget where step 4 fires but step 6
+    # does not is the only place order is observable - empirically, that band
+    # for long.jsonl is charBudget in [3243, 6884]: below 3243 step 6 starts
+    # truncating the first message even in the correct cut-last order, and at
+    # or above 6885 the floor state (first message + 12 tail turns, all
+    # elided down to that) already fits, so no truncation step runs at all.
+    # 6000 sits in the middle of that band with roughly 900 chars of headroom
+    # on the high side and 2750 on the low side. A first-cut-first
+    # implementation loses FIRST-MESSAGE-MARKER-END here even though
+    # [truncated] is present, because it burns the first message down before
+    # ever reaching the tail window.
+    It 'cuts the first user message LAST, not first, when the tail window alone forces truncation' {
+        $r = Render-Fixture 'long.jsonl' -Config @{ charBudget = 6000 }
+        $r.render | Should -Match '\[truncated\]'
+        $r.render | Should -Match 'FIRST-MESSAGE-MARKER-END'
+    }
+    # Not Render-Fixture: it pipes stdout through ConvertFrom-Json, which
+    # throws on this path's plain-text Fail output instead of producing a
+    # clean assertion failure (see Mutation A in the task report). Copies the
+    # 'non-empty check' Describe's pattern instead, which exits the child
+    # process directly and asserts on raw text.
+    It 'exits 1 naming the budget and the floor size when charBudget is too small to render anything' {
+        $h = Join-Path ([System.IO.Path]::GetTempPath()) ("ab-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $h -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $h 'advisor-bridge.json') -Value '{"enabled": true, "charBudget": 100}'
+        Set-Content -LiteralPath (Join-Path $h 'advisor-bridge-persona.md') -Value 'be terse'
+        $proj = Join-Path $h 'projects' 'C--fixture'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Copy-Item (Join-Path $script:Fixtures 'basic.jsonl') (Join-Path $proj 'fix-session.jsonl')
+        $out = & pwsh -NoProfile -Command "
+            `$env:CLAUDE_CONFIG_DIR = '$h'
+            `$env:CLAUDE_CODE_SESSION_ID = 'fix-session'
+            & '$script:Script' -ClaudeHome '$h' -DryRun
+            exit `$LASTEXITCODE" 2>&1
+        $LASTEXITCODE | Should -Be 1
+        # Paired per Rule 1: the locator and the non-empty check also exit 1,
+        # so a bare exit-code assertion here would be un-failable against a
+        # regression that deleted this specific guard but left another
+        # fail-closed path standing. 'too small to render' is unique to this
+        # Fail call.
+        ($out -join "`n") | Should -Match 'too small to render'
+    }
 }
