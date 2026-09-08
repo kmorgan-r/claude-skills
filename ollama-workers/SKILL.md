@@ -25,10 +25,14 @@ pwsh -NoProfile -File "$HOME/.claude/scripts/ollama-worker.ps1" -Probe
 ```
 
 The probe runs the wrapper's own preflight against the current directory - the
-worktree guard, the settings overlay, the ollama binary, the model tag's syntax
-- and prints one JSON line: `dispatchable`, `reason`, `remedy`, `enabled`,
-`model`, `model_syntax_ok`. Exit 0 means a dispatch from here would get past the
-preflight, 1 means it would not.
+model tag's syntax, the directory, the settings overlay, the worktree guard,
+the ollama binary - and prints one JSON line: `dispatchable`, `reason`,
+`remedy`, `enabled`, `model`, `model_syntax_ok`. Exit 0 means a dispatch from
+here would get past the preflight, 1 means it would not.
+
+`reason` names the *first* blocker, in the order a dispatch hits them, so fixing
+it is what unblocks the next attempt. It is not a list: a directory with two
+faults reports the first, and re-probing after the fix reveals the next.
 
 Report it as **DISPATCHABLE** or **NOT DISPATCHABLE: <reason>**, and on a no,
 the `remedy` line too. Never report enabled without it. `enabled`, `model`,
