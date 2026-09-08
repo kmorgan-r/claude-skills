@@ -62,4 +62,16 @@ Describe 'session locator' {
         $r.Code | Should -Be 1
         $r.Text | Should -Not -Match 'some-other-session'
     }
+    # Pins the escape fix: `Get-Item -Path` treats its whole argument as a
+    # wildcard pattern, so an unescaped session id of '*' would glob-match any
+    # transcript under any project directory - resolving a DIFFERENT session's
+    # transcript with exit 0 and no warning. That is the exact failure the
+    # rest of this Describe block claims to refuse.
+    It 'does not treat a wildcard session id as a glob that matches everything' {
+        $h = New-Enabled-Home
+        New-Projects -base $h -projectDirs @('C--a--repo') -sessionId 'victims-real-session'
+        $r = Invoke-Locate -BridgeHome $h -ConfigDir $h -SessionId '*'
+        $r.Code | Should -Be 1
+        $r.Text | Should -Not -Match 'victims-real-session'
+    }
 }

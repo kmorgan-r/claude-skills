@@ -95,7 +95,7 @@ $timeoutSeconds     = if ($PSBoundParameters.ContainsKey('TimeoutSec')) {
 
 # --- 5. Locate the caller's transcript -------------------------------------
 # Glob, rather than recomputing Claude Code's cwd-to-directory-name mangling
-# (C:\Users\<user>\... -> C--Users-<user>-...). That rule is undocumented, and
+# (C:\Users\<you>\... -> C--Users-<you>-...). That rule is undocumented, and
 # reimplementing it buys nothing a glob does not already give while its failure
 # mode is a wrong-or-missing file rather than an error.
 #
@@ -109,7 +109,15 @@ if (-not $sessionId) {
 }
 
 $callerBase = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' }
-$pattern    = Join-Path $callerBase 'projects' '*' "$sessionId.jsonl"
+# `Get-Item -Path` treats its whole argument as a wildcard pattern, not a
+# literal path - so an unescaped session id or base directory containing
+# `*`, `?` or `[` would silently glob-match (resolving a DIFFERENT session's
+# transcript with exit 0) or silently miss (a legitimate transcript under a
+# bracketed directory name). WildcardPattern.Escape neutralises metacharacters
+# in the two interpolated components while leaving the literal `*` directory
+# segment as a real wildcard.
+$wc         = [System.Management.Automation.WildcardPattern]
+$pattern    = Join-Path $wc::Escape($callerBase) 'projects' '*' "$($wc::Escape($sessionId)).jsonl"
 $found      = @(Get-Item -Path $pattern -ErrorAction SilentlyContinue)
 
 if ($found.Count -eq 0) {

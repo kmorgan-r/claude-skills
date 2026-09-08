@@ -44,24 +44,41 @@ BeforeAll {
 }
 
 Describe 'enabled gate' {
+    # A bare exit-code assertion never stands alone in this file: every task
+    # from Task 3 onward appends another fail-closed step below the gate, and
+    # each one exits 1 for its OWN reason - so an exit-1 assertion with no
+    # distinctive text passes just as well when the gate itself is deleted
+    # and the run instead dies one step later, at the locator, because the
+    # helper's session id ('no-such-session') never resolves a transcript.
+    # A reviewer proved this by mutation: with the gate's `Fail` removed
+    # entirely, all eight tests below still passed. Every exit-1 assertion
+    # in this Describe block is therefore paired with
+    # `Should -Match 'disabled or unreadable config'` - the text unique to
+    # the gate's own `Fail` call - so a test can only pass when the gate
+    # itself is what fired.
     It 'exits 1 when enabled is false' {
         $h = New-Home '{"enabled": false}'
-        (Invoke-Bridge -BridgeHome $h).Code | Should -Be 1
+        $r = Invoke-Bridge -BridgeHome $h
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'disabled or unreadable config'
     }
     It 'exits 1 when the config file is absent' {
         $h = New-Home $null
         (Join-Path $h 'advisor-bridge.json') | Should -Not -Exist   # the case really is "absent"
         $r = Invoke-Bridge -BridgeHome $h
         $r.Code | Should -Be 1
-        $r.Text | Should -Match 'advisor-bridge'
+        $r.Text | Should -Match 'disabled or unreadable config'
     }
     It 'exits 1 when the config file is not valid JSON' {
         $h = New-Home '{ this is not json'
-        (Invoke-Bridge -BridgeHome $h).Code | Should -Be 1
+        $r = Invoke-Bridge -BridgeHome $h
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'disabled or unreadable config'
     }
     It 'writes no log row on an exit-1 path' {
         $h = New-Home '{"enabled": false}'
-        Invoke-Bridge -BridgeHome $h | Out-Null
+        $r = Invoke-Bridge -BridgeHome $h
+        $r.Text | Should -Match 'disabled or unreadable config'
         Join-Path $h 'advisor-bridge.log.jsonl' | Should -Not -Exist
     }
     # `-ne $true` array-filters instead of comparing when the left operand is
@@ -73,19 +90,27 @@ Describe 'enabled gate' {
     # tightening that also closes string/numeric truthy values.
     It 'exits 1 when enabled is an empty array' {
         $h = New-Home '{"enabled": []}'
-        (Invoke-Bridge -BridgeHome $h).Code | Should -Be 1
+        $r = Invoke-Bridge -BridgeHome $h
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'disabled or unreadable config'
     }
     It 'exits 1 when enabled is a non-empty array' {
         $h = New-Home '{"enabled": [true, false]}'
-        (Invoke-Bridge -BridgeHome $h).Code | Should -Be 1
+        $r = Invoke-Bridge -BridgeHome $h
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'disabled or unreadable config'
     }
     It 'exits 1 when enabled is the string "true"' {
         $h = New-Home '{"enabled": "true"}'
-        (Invoke-Bridge -BridgeHome $h).Code | Should -Be 1
+        $r = Invoke-Bridge -BridgeHome $h
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'disabled or unreadable config'
     }
     It 'exits 1 when enabled is the number 1' {
         $h = New-Home '{"enabled": 1}'
-        (Invoke-Bridge -BridgeHome $h).Code | Should -Be 1
+        $r = Invoke-Bridge -BridgeHome $h
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'disabled or unreadable config'
     }
 }
 
