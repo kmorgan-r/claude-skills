@@ -1,6 +1,6 @@
 ---
 name: ollama-workers
-description: Turn Ollama cloud models (glm-5.3-flash, glm-5.3, kimi-k3) on or off as implementers for superpowers plan execution, and report which model is active. Use when the user says /ollama-workers, asks to enable or disable ollama or GLM or Kimi workers, asks which worker model is active, wants to switch the worker model, or asks whether plan tasks are running on an open model.
+description: Turn Ollama cloud models (glm-5.3-flash, glm-5.3, kimi-k3) on or off as implementers for superpowers plan execution, and report which model is active. Use when the user says /ollama-workers, asks to enable or disable ollama or GLM or Kimi workers, asks which worker model is active, wants to switch the worker model, asks whether plan tasks are running on an open model, asks whether the worker can dispatch from the current directory, or asks why no task went to the worker.
 ---
 
 # Ollama workers

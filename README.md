@@ -162,7 +162,11 @@ cp -r find-cold-leads ~/.claude/skills/
   rewrite is compared against that backup key by key and rolled back if anything moved.
 - **Off by default, and invisible when off.** State lives in
   `~/.claude/ollama-workers.json`; the SessionStart hook prints the routing rule only
-  when enabled, so a disabled install costs no context. `enabled` is enforced by the
+  when enabled, so a disabled install costs no context. When it is enabled the hook
+  also probes the session's directory and says so when a dispatch from there would be
+  refused — being on and being dispatchable are separate facts, and reporting only the
+  first is what once made a whole plan skip the worker with nothing logged and nothing
+  said. `enabled` is enforced by the
   wrapper, not just by the hook and the skill's prose: it exits 1 before launching
   anything unless the state file says `enabled: true`, so a dispatch on stale context
   cannot reach a third-party endpoint while the feature is off. A missing state file
@@ -187,11 +191,16 @@ cp -r find-cold-leads ~/.claude/skills/
   every dispatch, that is enforced rather than documented: the wrapper accepts only a
   linked git worktree (`git rev-parse --git-dir` differing from `--git-common-dir`) and
   fails closed on a primary checkout, a plain directory, or a path whose only repo is an
-  ancestor's. The two values that reach that child's command line from outside the script
+  ancestor's. `ollama-worker.ps1 -Probe [-Cwd <path>]` runs that check and the rest of
+  the preflight without launching anything, which is what `status`, `on` and the hook
+  report from — one implementation, so a probe cannot promise what a dispatch refuses. The two values that reach that child's command line from outside the script
   (`-Model`, whether passed or read from state, and `-Resume`) are allowlisted - a model
   tag to `[A-Za-z0-9._:/-]`, a session id to `[A-Za-z0-9._-]`, neither with a leading
   dash - and the line itself is built by the CRT's own quoting rules, so neither can
   close an argument early and append flags of its own.
-- Every run appends one line to `~/.claude/ollama-workers.log.jsonl` (model, num_turns,
-  duration_ms, escalate, reason). Calibrate `maxTurns` and the routing rubric from that
-  log rather than from published benchmarks.
+- Every run appends one line to `~/.claude/ollama-workers.log.jsonl` (`event: "run"`,
+  model, num_turns, duration_ms, escalate, reason). A probe that finds the directory
+  not dispatchable while workers are on appends an `event: "probe"` row, so the log
+  distinguishes "the worker was never usable in this repo" from "no task was a good
+  fit" — a task that is never dispatched writes nothing otherwise. Calibrate `maxTurns`
+  and the routing rubric from the run rows rather than from published benchmarks.
