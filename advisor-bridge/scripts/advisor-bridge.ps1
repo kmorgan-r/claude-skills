@@ -92,3 +92,31 @@ $timeoutSeconds     = if ($PSBoundParameters.ContainsKey('TimeoutSec')) {
                       } else {
                           Get-PositiveInt $cfgRaw.timeoutSec 240
                       }
+
+# --- 5. Locate the caller's transcript -------------------------------------
+# Glob, rather than recomputing Claude Code's cwd-to-directory-name mangling
+# (C:\Users\<user>\... -> C--Users-<user>-...). That rule is undocumented, and
+# reimplementing it buys nothing a glob does not already give while its failure
+# mode is a wrong-or-missing file rather than an error.
+#
+# The base is the CALLER's config dir, not $claudeHome: -ClaudeHome redirects
+# this script's own files, whereas the transcript belongs to whichever session
+# invoked us. Ollama sessions do not set CLAUDE_CONFIG_DIR today, but honouring
+# it costs one line and ignoring it would be a wrong-file failure, not an error.
+$sessionId = $env:CLAUDE_CODE_SESSION_ID
+if (-not $sessionId) {
+    Fail "CLAUDE_CODE_SESSION_ID is not set - this script must run inside a Claude Code session, not from a bare shell."
+}
+
+$callerBase = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' }
+$pattern    = Join-Path $callerBase 'projects' '*' "$sessionId.jsonl"
+$found      = @(Get-Item -Path $pattern -ErrorAction SilentlyContinue)
+
+if ($found.Count -eq 0) {
+    Fail "no transcript for session $sessionId under $(Join-Path $callerBase 'projects')\*\`n  The session may not have been written yet; send one message and retry."
+}
+if ($found.Count -gt 1) {
+    $list = ($found | ForEach-Object { "    $($_.FullName)" }) -join "`n"
+    Fail "session id $sessionId matches $($found.Count) transcripts:`n$list`n  Rendering the wrong one would advise on someone else's session. Delete or move`n  the stale copy, or set CLAUDE_CONFIG_DIR to disambiguate."
+}
+$transcriptPath = $found[0].FullName
