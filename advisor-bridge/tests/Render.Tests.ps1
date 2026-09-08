@@ -127,3 +127,25 @@ Describe 'non-empty check' {
         ($out -join "`n") | Should -Match 'no user or assistant turns survived'
     }
 }
+
+Describe 'budget enforcement' {
+    It 'renders the first user message in full even when it falls outside the last 12 turns' {
+        $r = Render-Fixture 'long.jsonl' -Config @{ charBudget = 12000 }
+        $r.render | Should -Match 'FIRST-MESSAGE-MARKER-END'
+    }
+    It 'marks elided middle turns with a count' {
+        $r = Render-Fixture 'long.jsonl' -Config @{ charBudget = 12000 }
+        $r.render | Should -Match '\[\d+ turns elided\]'
+        $r.turns_elided | Should -BeGreaterThan 0
+    }
+    It 'terminates under budget when the first message plus twelve turns alone exceed it' {
+        $r = Render-Fixture 'long.jsonl' -Config @{ charBudget = 3000 }
+        $r.chars_sent | Should -BeLessOrEqual 3000
+        $r.render | Should -Match '\[truncated\]'
+    }
+    It 'terminates under budget when a single most-recent turn exceeds it' {
+        $r = Render-Fixture 'oversized-tail.jsonl' -Config @{ charBudget = 5000 }
+        $r.chars_sent | Should -BeLessOrEqual 5000
+        $r.render | Should -Match '\[truncated\]'
+    }
+}

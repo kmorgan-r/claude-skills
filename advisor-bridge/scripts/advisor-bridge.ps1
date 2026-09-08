@@ -229,24 +229,102 @@ function New-Header([int]$total, [int]$elided, [int]$skippedLines) {
     ) -join "`n"
 }
 
-# --- -DryRun (minimal) -----------------------------------------------------
+# --- Budget ----------------------------------------------------------------
+# Six steps. 1 and 2 are preservation floors, not reductions; only 3 through 6
+# remove text, and they run in ascending order of what it costs to lose the
+# content - which is why the first user message is cut LAST rather than first.
+#
+# Steps 4-6 truncate `text` blocks, the one block type Format-Block renders in
+# full and therefore the only content no cap otherwise bounds. Without all three
+# the sequence has no terminal step: a first message plus twelve turns that
+# together exceed the budget, or a single oversized final turn, would ship over
+# budget at full per-call cost and say nothing about it.
+$TAIL = 12
+
+$firstUserIdx = 0
+for ($i = 0; $i -lt $allTurns.Count; $i++) {
+    if ($allTurns[$i].type -eq 'user') { $firstUserIdx = $i; break }
+}
+
+function Join-Render([string[]]$bodies, [int]$elidedCount, [int]$total, [int]$skippedLines) {
+    (New-Header $total $elidedCount $skippedLines) + ($bodies -join "`n`n")
+}
+
+# Step 1 + 2: the floors.
+$tailStart = [Math]::Max($firstUserIdx + 1, $allTurns.Count - $TAIL)
+$keepIdx   = [System.Collections.Generic.List[int]]::new()
+$keepIdx.Add($firstUserIdx)
+for ($i = $tailStart; $i -lt $allTurns.Count; $i++) { $keepIdx.Add($i) }
+
+# Step 3: drop middle turns oldest-first. Everything between the first user
+# message and the tail window is already excluded above; the elision marker is
+# what tells the advisor it is not reading everything.
+$elided = $allTurns.Count - $keepIdx.Count
+
+function Build([hashtable]$truncate) {
+    $bodies = [System.Collections.Generic.List[string]]::new()
+    for ($k = 0; $k -lt $keepIdx.Count; $k++) {
+        $idx  = $keepIdx[$k]
+        $body = Format-Turn $allTurns[$idx] $maxToolResultChars
+        if ($truncate.ContainsKey($idx)) { $body = Limit-Text $body $truncate[$idx] }
+        if ($k -eq 1 -and $elided -gt 0) { $bodies.Add("[$elided turns elided]") }
+        $bodies.Add($body)
+    }
+    return Join-Render $bodies.ToArray() $elided $allTurns.Count $skipped
+}
+
+$truncate = @{}
+$rendered = Build $truncate
+
+# Step 4: truncate the tail window oldest-first, down to the first user message
+# plus the most recent turn.
+$tailIdx = @($keepIdx | Where-Object { $_ -ne $firstUserIdx })
+for ($t = 0; $t -lt $tailIdx.Count - 1 -and $rendered.Length -gt $charBudget; $t++) {
+    $truncate[$tailIdx[$t]] = 200
+    $rendered = Build $truncate
+}
+
+# Step 5: truncate the most recent turn itself.
+if ($rendered.Length -gt $charBudget -and $tailIdx.Count -gt 0) {
+    $last = $tailIdx[-1]
+    $over = $rendered.Length - $charBudget
+    $cur  = (Format-Turn $allTurns[$last] $maxToolResultChars).Length
+    $truncate[$last] = [Math]::Max(200, $cur - $over - 64)
+    $rendered = Build $truncate
+}
+
+# Step 6: last resort - truncate the first user message.
+if ($rendered.Length -gt $charBudget) {
+    $over = $rendered.Length - $charBudget
+    $cur  = (Format-Turn $allTurns[$firstUserIdx] $maxToolResultChars).Length
+    $truncate[$firstUserIdx] = [Math]::Max(200, $cur - $over - 64)
+    $rendered = Build $truncate
+}
+
+# The floor of 200 chars per turn means an absurdly small charBudget cannot be
+# met. That is a config error, not a case to support - but it must not ship a
+# silent overrun either.
+if ($rendered.Length -gt $charBudget) {
+    Fail "charBudget $charBudget is too small to render even a minimal transcript ($($rendered.Length) chars)`n  Raise charBudget in $configPath."
+}
+
+$turnsRendered = $keepIdx.Count
+$charsSent     = $rendered.Length
+
+# --- -DryRun -----------------------------------------------------------
 # A deliverable seam, not a test-only afterthought, and it belongs in THIS task:
 # every assertion in Render.Tests.ps1 reads this JSON. It is deliberately
 # outside the stdout/exit contract - it prints JSON and exits 0 without
 # spawning, which is not "advice returned" in the sense of the exit table.
 #
-# Task 5 replaces the body with the budgeted values; Task 6 moves the block
-# below the environment build and adds env, args, cwd and exe. Until then it
-# reports only what the renderer itself knows, with turns_elided fixed at 0
-# because nothing elides yet.
+# Task 6 moves this block below the environment build and adds env, args, cwd
+# and exe.
 if ($DryRun) {
-    $rendered = (New-Header $allTurns.Count 0 $skipped) +
-                (($allTurns | ForEach-Object { Format-Turn $_ $maxToolResultChars }) -join "`n`n")
     [ordered]@{
         render         = $rendered
-        chars_sent     = $rendered.Length
-        turns_rendered = $allTurns.Count
-        turns_elided   = 0
+        chars_sent     = $charsSent
+        turns_rendered = $turnsRendered
+        turns_elided   = $elided
         lines_skipped  = $skipped
     } | ConvertTo-Json -Depth 8
     exit 0
