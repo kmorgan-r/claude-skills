@@ -316,17 +316,16 @@ The golden fixture is synthesized, not a captured probe session. Real
 transcripts carry absolute paths, the user's email, and machine details, and
 this repo is public.
 
-Two things for the implementer to verify rather than assume:
+One thing for the implementer to verify rather than assume: whether
+SessionStart fires with `source: "compact"`. The native advisor survives a
+compact because it lives in the system prompt; this bridge's protocol arrives
+as `additionalContext` and may not. If it does fire, the hook's matcher must
+not exclude it, or the protocol silently disappears mid-session.
 
-- Whether SessionStart fires with `source: "compact"`. The native advisor
-  survives a compact because it lives in the system prompt; this bridge's
-  protocol arrives as `additionalContext` and may not. If it does fire, the
-  hook's matcher must not exclude it, or the protocol silently disappears
-  mid-session.
-- `ollama-workers/install.ps1` is the model for this install script but is not
-  on `main` — read it from the `cs-wt/ollama-workers` worktree
-  (`feat/ollama-workers`). Both branches install into `~/.claude`, so whichever
-  merges second inherits the job of keeping the two install scripts consistent.
+`ollama-workers/install.ps1` is the model for this install script and is on
+`main`. Read it there. Both installers write into `~/.claude`, so this one
+must stay consistent with it — same idempotence rules, same seed-on-first-
+install-only treatment of the JSON config, same junction handling.
 
 ## Out of scope
 
