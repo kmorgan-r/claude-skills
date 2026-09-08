@@ -128,3 +128,122 @@ if ($found.Count -gt 1) {
     Fail "session id $sessionId matches $($found.Count) transcripts:`n$list`n  Rendering the wrong one would advise on someone else's session. Delete or move`n  the stale copy, or set CLAUDE_CONFIG_DIR to disambiguate."
 }
 $transcriptPath = $found[0].FullName
+
+# --- 6. Render -------------------------------------------------------------
+# Line by line, each line in its own try/catch, and the file opened share-read.
+# Both halves are load-bearing: the caller's own Claude Code process is
+# appending to this file while we read it, so the last line is routinely a
+# partial record. Under $ErrorActionPreference = 'Stop' an unguarded
+# ConvertFrom-Json on it is a terminating error that would kill the wrapper
+# before any log row and with an exit code outside the published table. Same
+# hazard, same remedy, as ollama-worker.ps1:412-424.
+function Read-Turns([string]$path) {
+    $turns   = [System.Collections.Generic.List[object]]::new()
+    $skipped = 0
+    $fs      = [System.IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    $reader  = [System.IO.StreamReader]::new($fs)
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            if (-not $line.Trim()) { continue }
+            $rec = $null
+            try { $rec = $line | ConvertFrom-Json } catch { $skipped++; continue }
+
+            if ($rec.type -notin 'user', 'assistant') { continue }
+            # -ne $true, NOT -eq $false: a record omitting the field entirely is
+            # a main-agent record and must be kept.
+            if ($rec.isSidechain -eq $true) { continue }
+
+            $turns.Add($rec)
+        }
+    }
+    finally { $reader.Dispose(); $fs.Dispose() }
+    return @{ Turns = $turns; Skipped = $skipped }
+}
+
+function Limit-Text([string]$s, [int]$max) {
+    if ($null -eq $s) { return '' }
+    if ($s.Length -le $max) { return $s }
+    return $s.Substring(0, $max) + ' [truncated]'
+}
+
+function Format-Block($block, [int]$maxToolResult) {
+    switch ($block.type) {
+        'text'        { return $block.text }
+        'thinking'    { return "[thinking] " + (Limit-Text $block.thinking 600) }
+        'tool_use'    {
+            $input = $block.input | ConvertTo-Json -Depth 6 -Compress
+            return "[tool_use] $($block.name) " + (Limit-Text $input 800)
+        }
+        'tool_result' {
+            $content = if ($block.content -is [string]) { $block.content }
+                       else { $block.content | ConvertTo-Json -Depth 6 -Compress }
+            return "[tool_result] " + (Limit-Text $content $maxToolResult)
+        }
+        default       { return '' }
+    }
+}
+
+function Format-Turn($rec, [int]$maxToolResult) {
+    # message.content is EITHER a block array OR a bare string - Claude Code
+    # writes plain-string content for ordinary typed user messages, which is
+    # exactly the shape of the first user message the whole budget sequence
+    # exists to preserve. Wrapping a string in @() yields a one-element array
+    # whose element has no .type, so Format-Block's switch would fall to
+    # `default` and return '' - the turn would render as a header with an empty
+    # body, silently. (Task 1 Step 5's measurement code branches on this same
+    # distinction, which is where the shape is confirmed to exist.)
+    if ($rec.message.content -is [string]) {
+        return "--- $($rec.type) ---`n$($rec.message.content)"
+    }
+    $blocks = @($rec.message.content)
+    $parts  = foreach ($b in $blocks) { Format-Block $b $maxToolResult }
+    $body   = ($parts | Where-Object { $_ }) -join "`n"
+    return "--- $($rec.type) ---`n$body"
+}
+
+$read     = Read-Turns $transcriptPath
+$allTurns = @($read.Turns)
+$skipped  = $read.Skipped
+
+# --- 7. Non-empty check ----------------------------------------------------
+# A full-price call over an empty render returns confident advice about nothing.
+if ($allTurns.Count -eq 0) {
+    Fail "no user or assistant turns survived the filters in $transcriptPath`n  Nothing to advise on."
+}
+
+function New-Header([int]$total, [int]$elided, [int]$skippedLines) {
+    $branch = try { (& git rev-parse --abbrev-ref HEAD 2>$null) } catch { $null }
+    if (-not $branch) { $branch = '(not a git repo)' }
+    @(
+        "cwd: $((Get-Location).Path)"
+        "branch: $branch"
+        "caller model: $($env:ANTHROPIC_DEFAULT_OPUS_MODEL ?? '(unknown)')"
+        "turns: $total"
+        "elided: $elided"
+        "unparseable lines skipped: $skippedLines"
+        ''
+    ) -join "`n"
+}
+
+# --- -DryRun (minimal) -----------------------------------------------------
+# A deliverable seam, not a test-only afterthought, and it belongs in THIS task:
+# every assertion in Render.Tests.ps1 reads this JSON. It is deliberately
+# outside the stdout/exit contract - it prints JSON and exits 0 without
+# spawning, which is not "advice returned" in the sense of the exit table.
+#
+# Task 5 replaces the body with the budgeted values; Task 6 moves the block
+# below the environment build and adds env, args, cwd and exe. Until then it
+# reports only what the renderer itself knows, with turns_elided fixed at 0
+# because nothing elides yet.
+if ($DryRun) {
+    $rendered = (New-Header $allTurns.Count 0 $skipped) +
+                (($allTurns | ForEach-Object { Format-Turn $_ $maxToolResultChars }) -join "`n`n")
+    [ordered]@{
+        render         = $rendered
+        chars_sent     = $rendered.Length
+        turns_rendered = $allTurns.Count
+        turns_elided   = 0
+        lines_skipped  = $skipped
+    } | ConvertTo-Json -Depth 8
+    exit 0
+}
