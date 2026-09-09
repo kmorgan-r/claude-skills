@@ -93,6 +93,35 @@ $timeoutSeconds     = if ($PSBoundParameters.ContainsKey('TimeoutSec')) {
                           Get-PositiveInt $cfgRaw.timeoutSec 240
                       }
 
+# --- 3. Resolve the claude executable --------------------------------------
+# A missing binary must be a named preflight blocker with a remedy, not a raw
+# spawn exception with no exit-table entry. Same shape as ollama-worker.ps1's
+# Get-OllamaPath.
+function Get-ClaudePath {
+    $p = (Get-Command claude -ErrorAction SilentlyContinue).Source
+    if (-not $p) { $p = Join-Path $HOME '.local\bin\claude.exe' }
+    if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+    return $null
+}
+$claudeExe = Get-ClaudePath
+if (-not $claudeExe) {
+    Fail "claude executable not found on PATH or at ~/.local/bin/claude.exe`n  Install the Claude Code CLI, then retry."
+}
+
+# --- 4. Read the persona ---------------------------------------------------
+if (-not (Test-Path -LiteralPath $personaPath)) {
+    Fail "persona not found: $personaPath`n  Re-run advisor-bridge/install.ps1 to place it."
+}
+$persona = try { Get-Content -Raw -LiteralPath $personaPath } catch { $null }
+if ($null -eq $persona -or -not $persona.Trim()) {
+    Fail "persona is empty or unreadable: $personaPath"
+}
+# Windows caps a command line at 32767 chars and the persona is the only
+# unbounded element on it. A persona this long is a bug in the persona.
+if ($persona.Length -gt 16000) {
+    Fail "persona is $($persona.Length) chars, over the 16000 limit: $personaPath"
+}
+
 # --- 5. Locate the caller's transcript -------------------------------------
 # Glob, rather than recomputing Claude Code's cwd-to-directory-name mangling
 # (C:\Users\<you>\... -> C--Users-<you>-...). That rule is undocumented, and
@@ -385,16 +414,140 @@ if ($rendered.Length -gt $charBudget) {
 $turnsRendered = $allTurns.Count - $elided
 $charsSent     = $rendered.Length
 
-# --- -DryRun -----------------------------------------------------------
-# A deliverable seam, not a test-only afterthought, and it belongs in THIS task:
-# every assertion in Render.Tests.ps1 reads this JSON. It is deliberately
-# outside the stdout/exit contract - it prints JSON and exits 0 without
-# spawning, which is not "advice returned" in the sense of the exit table.
+# --- 8. Build the child environment from empty -----------------------------
+# A whitelist, not a blacklist of ANTHROPIC_* vars to unset. A blacklist is one
+# Ollama release away from missing a newly-exported variable, and the symptom of
+# that miss is GLM answering in the advisor's voice - which reads as success.
 #
-# Task 6 moves this block below the environment build and adds env, args, cwd
-# and exe.
+# PATHEXT and COMSPEC are on the list because `claude` on Windows is commonly a
+# .cmd shim, and a shim launched with UseShellExecute = $false needs both.
+$ENV_WHITELIST = @('PATH','PATHEXT','COMSPEC','USERPROFILE','HOME','TEMP',
+                   'SystemRoot','APPDATA','LOCALAPPDATA','CLAUDE_EFFORT')
+
+$psi = [System.Diagnostics.ProcessStartInfo]::new()
+$psi.FileName               = $claudeExe
+$psi.UseShellExecute        = $false
+$psi.RedirectStandardInput  = $true
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError  = $true
+$psi.WorkingDirectory       = $scratchDir
+
+# .Environment is PRE-POPULATED from the current process. "From empty" requires
+# this explicit Clear() - it is not the default, and forgetting it is exactly
+# the mistake the guard below exists to catch.
+$psi.Environment.Clear()
+foreach ($k in $ENV_WHITELIST) {
+    if ($k -in 'CLAUDE_EFFORT', 'HOME') { continue }
+    $v = [Environment]::GetEnvironmentVariable($k)
+    if ($null -ne $v) { $psi.Environment[$k] = $v }
+}
+# Set explicitly, not inherited, so its value is a decision recorded here rather
+# than an accident of what the parent happened to export.
+$psi.Environment['CLAUDE_EFFORT'] = 'xhigh'
+
+# HOME is NOT a Windows environment variable - it is a git-bash export. Plain
+# pwsh does not have $env:HOME (PowerShell's $HOME automatic variable is derived
+# from USERPROFILE and is a different thing). Inheriting it would make both the
+# child's environment and the guard's key set depend on which shell launched the
+# wrapper, so it is derived here instead and the child always gets one.
+$homeDir = [Environment]::GetEnvironmentVariable('HOME')
+if (-not $homeDir) { $homeDir = [Environment]::GetEnvironmentVariable('USERPROFILE') }
+if ($homeDir) { $psi.Environment['HOME'] = $homeDir }
+
+foreach ($a in @(
+    '-p'
+    '--model', $model
+    '--system-prompt', $persona
+    '--tools', ''
+    '--strict-mcp-config'
+    '--setting-sources', ''
+    '--output-format', 'json'
+)) { [void]$psi.ArgumentList.Add($a) }
+
+# --- Test seam: force a guard mismatch -------------------------------------
+# Honoured ONLY under -DryRun, which spawns nothing and bills nothing, so it
+# cannot alter a real call. It exists because the guard below is otherwise
+# unreachable by any external input: $actual and $expected are derived from the
+# same whitelist and the same GetEnvironmentVariable calls, so nothing a test
+# can set makes them diverge - and a guard that no test can trip is a guard that
+# could be deleted with every test still green.
+if ($InjectEnvKey) {
+    if (-not $DryRun) { Fail "-InjectEnvKey is a test seam and requires -DryRun" }
+    $psi.Environment[$InjectEnvKey] = 'injected'
+}
+
+# --- Log row writer --------------------------------------------------------
+# Defined here, above the guard, rather than beside the spawn: the pre-spawn
+# guard is itself an exit-2 path, and both the Global Constraints and the spec
+# require a row on every exit-0 and exit-2 path - "the pre-spawn guard at step 9
+# included, since the exit-2 table gives it a verdict and a verdict only exists
+# inside a row".
+#
+# $haveUsage keys on ENVELOPE PRESENCE, not on the verdict. Keying it on
+# `$verdict -eq 'ok'` would null the token and cost fields on model_guard and on
+# an envelope-bearing child_error - calls that were really billed - so the cost
+# column `## Cost` calibrates from would under-report real spend on exactly the
+# guard-trip path. The nulls exist to distinguish a call that produced no
+# envelope from a free one; that is a question about the envelope, not the
+# verdict.
+function Write-LogRow([string]$verdict, $envelope, [int]$durationMs, [string]$source) {
+    $haveUsage = [bool]$envelope -and
+                 ($envelope.PSObject.Properties.Name -contains 'modelUsage') -and
+                 $envelope.modelUsage
+    $row = [ordered]@{
+        ts             = (Get-Date).ToUniversalTime().ToString('o')
+        session_id     = $sessionId
+        model          = $model
+        chars_sent     = $charsSent
+        turns_rendered = $turnsRendered
+        turns_elided   = $elided
+        lines_skipped  = $skipped
+        input_tokens   = if ($haveUsage) { ($envelope.modelUsage.PSObject.Properties.Value.inputTokens  | Measure-Object -Sum).Sum } else { $null }
+        output_tokens  = if ($haveUsage) { ($envelope.modelUsage.PSObject.Properties.Value.outputTokens | Measure-Object -Sum).Sum } else { $null }
+        cost_usd       = if ($haveUsage) { ($envelope.modelUsage.PSObject.Properties.Value.costUSD      | Measure-Object -Sum).Sum } else { $null }
+        duration_ms    = $durationMs
+        verdict        = $verdict
+    }
+    if ($source) { $row['source'] = $source }
+    try { Add-Content -LiteralPath $logPath -Value ($row | ConvertTo-Json -Depth 4 -Compress) }
+    catch { [Console]::Error.WriteLine("advisor-bridge: could not append to $logPath") }
+}
+
+# --- 9. Pre-spawn guard ----------------------------------------------------
+# Key-set EQUALITY, not "contains no ANTHROPIC_*". The Problem section names
+# CLAUDE_CODE_SUBAGENT_MODEL as part of the same leak and a prefix check passes
+# it untouched; so would any future CLAUDE_* or provider variable an Ollama
+# release adds. The whitelist is already enumerated, so equality costs nothing
+# and closes the whole family rather than one prefix of it.
+$actual   = @($psi.Environment.Keys) | Sort-Object
+$expected = @($ENV_WHITELIST | Where-Object {
+    switch ($_) {
+        'CLAUDE_EFFORT' { $true }          # always set explicitly above
+        'HOME'          { [bool]$homeDir } # derived above, not inherited
+        default         { $null -ne [Environment]::GetEnvironmentVariable($_) }
+    }
+}) | Sort-Object
+if (($actual -join ',') -ne ($expected -join ',')) {
+    $extra   = @($actual   | Where-Object { $_ -notin $expected })
+    $missing = @($expected | Where-Object { $_ -notin $actual })
+    Write-LogRow 'model_guard' $null 0 $null
+    Fail "child environment does not match the whitelist (extra: $($extra -join ',') | missing: $($missing -join ','))" 2
+}
+
+# --- -DryRun ---------------------------------------------------------------
+# A deliverable seam, not a test-only afterthought: the environment-scrub and
+# render assertions cannot exist without it. It is deliberately OUTSIDE the
+# stdout/exit contract - it prints JSON and exits 0 without spawning, which is
+# not "advice returned" in the sense of the exit table.
 if ($DryRun) {
+    $envOut = [ordered]@{}
+    foreach ($k in (@($psi.Environment.Keys) | Sort-Object)) { $envOut[$k] = $psi.Environment[$k] }
     [ordered]@{
+        env            = $envOut
+        args           = @($psi.ArgumentList)
+        cwd            = $psi.WorkingDirectory
+        exe            = $claudeExe
+        model          = $model
         render         = $rendered
         chars_sent     = $charsSent
         turns_rendered = $turnsRendered
@@ -402,4 +555,14 @@ if ($DryRun) {
         lines_skipped  = $skipped
     } | ConvertTo-Json -Depth 8
     exit 0
+}
+
+# --- 10. Scratch directory -------------------------------------------------
+# The child needs no repository access - it has no tools - and running it in the
+# caller's cwd would file its transcript in the caller's project directory,
+# where the next `claude --continue` could resume the advisor instead of the
+# user's own session.
+if (-not (Test-Path -LiteralPath $scratchDir)) {
+    try { New-Item -ItemType Directory -Path $scratchDir -Force | Out-Null }
+    catch { Fail "could not create scratch directory: $scratchDir" }
 }
