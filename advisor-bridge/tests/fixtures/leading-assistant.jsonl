@@ -1,0 +1,3 @@
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Leading assistant turn with no user turn before it - e.g. an injected compact summary at record 0."}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"First real user turn."}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reply to the first user turn."}]}}

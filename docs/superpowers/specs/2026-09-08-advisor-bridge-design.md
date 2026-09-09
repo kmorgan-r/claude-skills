@@ -371,7 +371,7 @@ Two, both mandatory, both fail-closed. Both exit 2.
 2. **Post-run.** Assert the configured model is present in the result
    envelope's `modelUsage`, and that every *other* key present is a
    `claude-haiku-` housekeeping entry (see **Captured shape** below — a real
-   call always carries one). Any other model — including a second *non-haiku*
+   call was observed to carry one). Any other model — including a second *non-haiku*
    Anthropic model — means the call was answered, in whole or in part, by
    something other than the intended advisor: discard the reply, exit 2, log
    it.

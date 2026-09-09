@@ -311,7 +311,17 @@ for ($i = 0; $i -lt $allTurns.Count; $i++) {
 }
 
 function Join-Render([string[]]$bodies, [int]$elidedCount, [int]$total, [int]$skippedLines) {
-    (New-Header $total $elidedCount $skippedLines) + ($bodies -join "`n`n")
+    # $elidedCount is the MIDDLE-turn elision count from the budget search below -
+    # it is also what the inline "[N turns elided]" marker inside $bodies describes,
+    # so it must stay exactly that for Build's own use. The header's count is a
+    # broader claim ("how many turns are missing from this render, full stop") and
+    # must also include the $firstUserIdx leading turns Build() never visits at all:
+    # Build always starts serialization AT $firstUserIdx, so turns 0..firstUserIdx-1
+    # (any assistant records before the first user turn) never enter $bodies and,
+    # without this addition, were never counted as missing anywhere - the header
+    # would read "elided: 0" directly above a body one or more turns short of
+    # "turns: $total".
+    (New-Header $total ($elidedCount + $firstUserIdx) $skippedLines) + ($bodies -join "`n`n")
 }
 
 # Step 1 + 2: the floors - the first user message and the last-12 tail window
@@ -435,7 +445,13 @@ if ($rendered.Length -gt $charBudget) {
     Fail "charBudget $charBudget is too small to render even a minimal transcript ($($rendered.Length) chars)`n  Raise charBudget in $configPath."
 }
 
-$turnsRendered = $allTurns.Count - $elided
+# - $firstUserIdx, not just $elided: any assistant records before the first user
+# turn are never entered into $bodies by Build() (it always starts AT
+# $firstUserIdx), so they are silently absent from $rendered exactly like an
+# elided middle turn is - but were not being subtracted here before this fix,
+# which overcounted $turnsRendered by $firstUserIdx on any transcript with such
+# leading turns. See tests/fixtures/leading-assistant.jsonl.
+$turnsRendered = $allTurns.Count - $elided - $firstUserIdx
 $charsSent     = $rendered.Length
 
 # --- 8. Build the child environment from empty -----------------------------
@@ -524,7 +540,12 @@ function Write-LogRow([string]$verdict, $envelope, [int]$durationMs, [string]$so
         model          = $model
         chars_sent     = $charsSent
         turns_rendered = $turnsRendered
-        turns_elided   = $elided
+        # $elided + $firstUserIdx, matching New-Header's own count (Join-Render,
+        # above) and $turnsRendered's own subtraction just above it - all three
+        # describe the same fact ("how many turns are missing from what was sent")
+        # and must agree, or the log and the rendered header tell the reader two
+        # different stories about the same run.
+        turns_elided   = $elided + $firstUserIdx
         lines_skipped  = $skipped
         input_tokens   = if ($haveUsage) { ($envelope.modelUsage.PSObject.Properties.Value.inputTokens  | Measure-Object -Sum).Sum } else { $null }
         output_tokens  = if ($haveUsage) { ($envelope.modelUsage.PSObject.Properties.Value.outputTokens | Measure-Object -Sum).Sum } else { $null }
@@ -575,7 +596,7 @@ if ($DryRun) {
         render         = $rendered
         chars_sent     = $charsSent
         turns_rendered = $turnsRendered
-        turns_elided   = $elided
+        turns_elided   = $elided + $firstUserIdx
         lines_skipped  = $skipped
     } | ConvertTo-Json -Depth 8
     exit 0
@@ -590,3 +611,183 @@ if (-not (Test-Path -LiteralPath $scratchDir)) {
     try { New-Item -ItemType Directory -Path $scratchDir -Force | Out-Null }
     catch { Fail "could not create scratch directory: $scratchDir" }
 }
+
+# --- 11. Spawn -------------------------------------------------------------
+$sw       = [System.Diagnostics.Stopwatch]::StartNew()
+$verdict  = 'ok'
+$envelope = $null
+$exitCode = 0
+$source   = $null
+
+if ($EnvelopeFile) {
+    # A deliverable test seam, outside the stdout/exit contract. It writes
+    # source='envelope-file' into its log row so a canned row can never be read
+    # as a billed one by the cost calibration or the manual e2e check.
+    $source = 'envelope-file'
+    try { $envelope = Get-Content -Raw -LiteralPath $EnvelopeFile | ConvertFrom-Json }
+    catch { $envelope = $null }
+    if ($envelope -and $envelope.type -ne 'result') { $envelope = $null }
+
+    # The seam must classify exactly as the spawn path does, or the verdicts it
+    # exists to exercise are unreachable through it. Without the is_error arm, a
+    # canned error envelope parses cleanly, $verdict stays 'ok', the post-run
+    # guard sees the configured model present and does not trip - so the script
+    # exits 0 and prints the reply. The child_error test would fail outright, and
+    # the model_guard-beats-child_error test would pass for the wrong reason,
+    # leaving the precedence rule asserted only in prose.
+    #
+    # Classify here rather than hoisting the spawn branch's chain out of its
+    # `else`: that chain also reads $writeFailed and $exitCode, and running it
+    # unconditionally would reclassify both timeout paths.
+    if ($null -eq $envelope)              { $verdict = 'no_envelope' }
+    elseif ($envelope.is_error -eq $true) { $verdict = 'child_error' }
+}
+else {
+    $proc = [System.Diagnostics.Process]::Start($psi)
+
+    # Start draining stdout and stderr BEFORE writing stdin. The rendered
+    # transcript can be 80 KB; if the child fills its stdout pipe while we are
+    # still writing stdin and nobody is reading, both sides block forever and
+    # only the timeout breaks it.
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+
+    # The child can die before it ever reads stdin - a rejected argument, a
+    # missing credential - and this Write then raises an IOException on a broken
+    # pipe. Unguarded, under $ErrorActionPreference = 'Stop', that kills the
+    # wrapper before any log row and with an exit code outside the published
+    # table. Same hazard and same remedy as the renderer's per-line try/catch.
+    #
+    # WriteAsync, not Write: the timeout only arms at WaitForExit BELOW, so a
+    # synchronous write is outside its cover. A child that neither reads stdin
+    # nor exits blocks forever once the 80 KB render passes the pipe buffer -
+    # the exact hang the timeout exists for, in the one window the timeout does
+    # not watch.
+    $writeFailed = $false
+    try {
+        $writeTask = $proc.StandardInput.WriteAsync($rendered)
+        if (-not $writeTask.Wait($timeoutSeconds * 1000)) {
+            try { $proc.Kill($true) } catch { }
+            $verdict = 'timeout'
+        }
+        else { $proc.StandardInput.Close() }
+    }
+    catch { $writeFailed = $true }
+
+    if ($verdict -eq 'timeout') { }   # already killed above; skip the wait
+    elseif (-not $proc.WaitForExit($timeoutSeconds * 1000)) {
+        # Kill($true) takes the whole process tree. `claude` on Windows launches
+        # a node child, and killing only the parent leaves it holding the pipe.
+        try { $proc.Kill($true) } catch { }
+        $verdict = 'timeout'
+    }
+    else {
+        $exitCode  = $proc.ExitCode
+        # FLAGGED, NOT FIXED: this GetResult() has no timeout of its own. Task 7's
+        # own timeout test demonstrated - not merely theorized - that a Windows
+        # child can leave a grandchild alive holding a duplicate handle to this
+        # process's end of the pipe (claude.exe -> node is the production shape;
+        # the test's compiled stub -> ping reproduced it directly), which keeps a
+        # redirected stream from reaching EOF until that grandchild exits on its
+        # own. Here $proc.WaitForExit() has ALREADY returned true, i.e. claude.exe
+        # itself exited cleanly - but if it left such a descendant behind, this
+        # line could still block past $timeoutSeconds with no further guard. The
+        # 8.3s real capture in the task-7 report drained without incident, so this
+        # is not reproduced against a genuine `claude` process, but the mechanism
+        # is proven, not assumed. Left for the reviewer rather than fixed here.
+        $stdoutRaw = $stdoutTask.GetAwaiter().GetResult()
+        $stderrRaw = $stderrTask.GetAwaiter().GetResult()
+        if ($stderrRaw) { [Console]::Error.Write($stderrRaw) }
+
+        $line = $stdoutRaw -split "`n" | Where-Object { $_.TrimStart().StartsWith('{') } | Select-Object -Last 1
+        if ($line) {
+            try { $envelope = $line | ConvertFrom-Json } catch { $envelope = $null }
+            if ($envelope.type -ne 'result') { $envelope = $null }
+        }
+
+        # --- 12. Classify, in this precedence ------------------------------
+        # timeout beats a nonzero exit (a killed child also exits nonzero, and
+        # timeout is the more specific fact); then child_error; then
+        # no_envelope.
+        if ($writeFailed)                     { $verdict = 'child_error' }
+        elseif ($envelope.is_error -eq $true) { $verdict = 'child_error' }
+        elseif ($exitCode -ne 0)              { $verdict = 'child_error' }
+        elseif ($null -eq $envelope)          { $verdict = 'no_envelope' }
+    }
+}
+$sw.Stop()
+
+# --- 13. Post-run model guard ----------------------------------------------
+# NOT "keys equal exactly {$model}". Task 7's own live capture (see the spec's
+# `### Guards` "Captured shape") found that a normal, correctly-routed,
+# is_error:false call comes back with TWO modelUsage keys, not one: the
+# configured model, plus a `claude-haiku-*` entry Claude Code always adds for
+# an unrelated purpose (the child transcript's own `ai-title` record - the
+# session's auto-generated short title - shows the haiku call never authored
+# `result`; both real `assistant` records in that transcript name the
+# CONFIGURED model). A literal "set equals {$model}" guard would trip on every
+# legitimate call and make the whole feature undeployable - fail-closed in the
+# safe direction, but useless. So: the configured model must be present, and
+# every OTHER key present must itself be a haiku-family entry; anything else
+# (a second non-haiku Anthropic model, a third-party model id, or the haiku
+# entry alone with the configured model missing) still trips the guard exactly
+# as the original "membership is not enough" reasoning intended - this is
+# still not membership, because it does not let an arbitrary second model ride
+# alongside the configured one for free.
+#
+# model_guard beats child_error wherever both could apply: a reply from the
+# wrong model is what the caller must not act on.
+#
+# This guard is what makes the whole design safe. Without it the failure mode
+# the bridge exists to prevent - GLM advising GLM - returns silently, formatted
+# as advice.
+#
+# The `$envelope` non-null test is load-bearing, not defensive. A timeout, a
+# broken stdin pipe or an auth failure leaves no envelope at all; without this
+# test `$used` would be empty, `$used -notcontains $model` would hold, and
+# EVERY such failure would be relabelled `model_guard` - so the log column and
+# the message the caller sees would both report "the wrong model answered" for
+# a call in which no model answered. `no_envelope` and `child_error` already
+# carry those cases and already exit 2. The guard only decides between models
+# when a reply actually arrived.
+if ($envelope -and $verdict -in 'ok', 'child_error') {
+    $used = @()
+    if ($envelope.PSObject.Properties.Name -contains 'modelUsage' -and $envelope.modelUsage) {
+        $used = @($envelope.modelUsage.PSObject.Properties.Name)
+    }
+    # Keys other than the configured model. An envelope naming ONLY a haiku
+    # helper - the configured model missing entirely - must still trip: without
+    # excluding $model from $others first, a naive "are all the extras haiku"
+    # check would pass that shape, because $others would be empty by accident
+    # (the sole key was never compared against $model at all). The explicit
+    # `$used -notcontains $model` clause below is what actually catches it.
+    $others      = @($used | Where-Object { $_ -ne $model })
+    $unexplained = @($others | Where-Object { $_ -notmatch '^claude-haiku-' })
+    if ($used -notcontains $model -or $unexplained.Count -gt 0) {
+        $verdict = 'model_guard'
+    }
+}
+
+# --- 14. Log row -----------------------------------------------------------
+# Written on every exit-0 and exit-2 path, through the same Write-LogRow the
+# pre-spawn guard uses. Exit-1 paths write none: nothing was attempted, there is
+# no verdict to record, and a row per disabled-gate call would swamp the cost
+# column the calibration reads.
+#
+# Note what Write-LogRow does NOT do: it does not null the token and cost fields
+# just because the verdict is not 'ok'. A model_guard trip and an
+# envelope-bearing child_error were both really billed, and nulling them there
+# would make the cost column under-report real spend on exactly the guard path.
+# The nulls distinguish "no envelope came back" from "free", which is a question
+# about the envelope, not the verdict.
+Write-LogRow $verdict $envelope ([int]$sw.ElapsedMilliseconds) $source
+
+# --- 15. Output and exit ---------------------------------------------------
+if ($verdict -ne 'ok') {
+    [Console]::Error.WriteLine("advisor-bridge: advisor call failed ($verdict) - reply discarded")
+    exit 2
+}
+# stdout carries the envelope's result text and nothing else. The caller is a
+# model reading advice, not a JSON parser.
+Write-Output $envelope.result
+exit 0
