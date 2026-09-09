@@ -7,8 +7,9 @@ is a procedure a human runs once after install and after any change to the spawn
 Cost: this procedure makes two full-size calls, roughly $0.20–0.40 each depending on
 transcript size — the main run below, and a second run in Assertion 4 against a
 different kind of transcript — plus one much smaller call in the envelope-shape check
-(a trivial prompt, a few cents), which only needs to be repeated after a `claude` CLI
-upgrade, not on every pass of this procedure.
+(a trivial prompt with the short system prompt and no tools, ~$0.029 per the spec's
+`## Cost` measurement for that flag set), which only needs to be repeated after a
+`claude` CLI upgrade, not on every pass of this procedure.
 
 ## Setup
 
@@ -38,12 +39,14 @@ also never surfaces the child's raw stdout (it keeps only the parsed envelope), 
 cannot be checked from inside the run above without editing the script — it needs its
 own small, separate call.
 
-Run once, and again after upgrading the `claude` CLI, with a trivial prompt so it costs
-a few cents rather than the full transcript price:
+Run once, and again after upgrading the `claude` CLI, with a trivial prompt and the
+wrapper's own flags — `--system-prompt` and `--tools ''` included — so it costs
+~$0.029 (the spec's `## Cost` measurement for this flag set) rather than the full
+transcript price, and so the check is faithful to the wrapper's real argv:
 
 ```powershell
 $cfg = Get-Content -Raw "$HOME/.claude/advisor-bridge.json" | ConvertFrom-Json
-$raw = "reply in one word" | & claude -p --model $cfg.model --output-format json --strict-mcp-config --setting-sources ''
+$raw = "reply in one word" | & claude -p --model $cfg.model --system-prompt 'be terse' --tools '' --strict-mcp-config --setting-sources '' --output-format json
 @($raw).Count   # expect 1
 ```
 
