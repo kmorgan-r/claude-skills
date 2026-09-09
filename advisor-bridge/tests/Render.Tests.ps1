@@ -137,6 +137,16 @@ Describe 'budget enforcement' {
         $r = Render-Fixture 'long.jsonl' -Config @{ charBudget = 12000 }
         $r.render | Should -Match '\[\d+ turns elided\]'
         $r.turns_elided | Should -BeGreaterThan 0
+        # At 12000, step 3 alone finds a fit (measured elsewhere at
+        # elided=18, chars_sent=11545) and steps 4-6 never run - so a
+        # correct render has no '[truncated]' marker. An off-by-one that
+        # under-elides by even 1 turn leaves step 3's render over budget,
+        # which falls through to step 4 and stamps '[truncated]' onto a
+        # tail turn - this line exists to catch exactly that regression.
+        # It does NOT catch over-elision (eliding more turns than the
+        # true minimum still renders under budget with no '[truncated]'
+        # marker, so a too-eager search would pass this test silently).
+        $r.render | Should -Not -Match '\[truncated\]'
     }
     It 'terminates under budget when the first message plus twelve turns alone exceed it' {
         $r = Render-Fixture 'long.jsonl' -Config @{ charBudget = 3000 }
