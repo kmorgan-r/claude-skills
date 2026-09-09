@@ -44,6 +44,15 @@ wrapper's own flags — `--system-prompt` and `--tools ''` included — so it co
 ~$0.029 (the spec's `## Cost` measurement for this flag set) rather than the full
 transcript price, and so the check is faithful to the wrapper's real argv:
 
+**Run it from a clean shell, never from inside the non-Anthropic session.** The
+session shell exports the router's `ANTHROPIC_API_KEY`; a plain `& claude -p`
+inherits it, routes to the router, and 404s on the advisor model
+(`api_error_status: 404`, "It may not exist or you may not have access to it") —
+the first real run hit exactly this from inside the session. The wrapper itself
+never does, because it rebuilds the child's environment from empty. A fresh
+PowerShell window outside the session reproduces the wrapper's auth condition
+without replicating its spawn. A 404 here means the environment, not the model.
+
 ```powershell
 $cfg = Get-Content -Raw "$HOME/.claude/advisor-bridge.json" | ConvertFrom-Json
 $raw = "reply in one word" | & claude -p --model $cfg.model --system-prompt 'be terse' --tools '' --strict-mcp-config --setting-sources '' --output-format json
@@ -93,6 +102,20 @@ the last line that starts with a curly brace — needs revisiting. That is a cha
    (Select-String -Path $child -Pattern 'hook_success' | Measure-Object).Count
    ```
    Expected: **0**. A non-zero count means the child is reading `settings.json`.
+   **A substring match is not proof by itself.** The rendered transcript is the
+   child's first user message, so any text the caller's session read — including
+   this file, which contains the literal word above — arrives inside a
+   `"type":"user"` line and matches the grep. Observed in the first real run:
+   count 3, structured count 0. Confirm a non-zero grep structurally, parsing
+   each line as JSON and counting only entries that are actual hook events:
+   ```powershell
+   (Get-Content $child | ForEach-Object { try { $_ | ConvertFrom-Json } catch {} } |
+       Where-Object { $_.type -eq 'system' -or $_.hook_event_name -or
+                      ($_.subtype -and $_.subtype -like 'hook*') } |
+       Measure-Object).Count
+   ```
+   Quoted text never satisfies this — a message whose content merely contains
+   the word parses as `user`/`assistant` and has none of those fields.
 4. **The reply passes the persona's actual review bar** — not the vaguer "the advice
    is advice." Run the call above twice: once against a transcript of a genuinely
    stuck session, once against a transcript where the caller's work is genuinely
