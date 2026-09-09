@@ -369,10 +369,13 @@ Two, both mandatory, both fail-closed. Both exit 2.
    nothing and closes the whole family rather than one prefix of it.
 
 2. **Post-run.** Assert the configured model is present in the result
-   envelope's `modelUsage`, and that every *other* key present is a
-   `claude-haiku-` housekeeping entry (see **Captured shape** below — a real
-   call was observed to carry one). Any other model — including a second *non-haiku*
-   Anthropic model — means the call was answered, in whole or in part, by
+   envelope's `modelUsage` **and that its own entry reports `outputTokens >
+   0`**, and that every *other* key present is a `claude-haiku-<snapshot>`
+   housekeeping entry, matched case-sensitively with a version digit required
+   after the prefix (see **Captured shape** below — a real call was observed
+   to carry one). Any other model — including a second *non-haiku* Anthropic
+   model, or a key merely shaped like the haiku prefix without a real
+   snapshot id — means the call was answered, in whole or in part, by
    something other than the intended advisor: discard the reply, exit 2, log
    it.
 
@@ -383,8 +386,14 @@ Two, both mandatory, both fail-closed. Both exit 2.
    — so a bare `-contains $model` check is still wrong. But naive set equality
    is *also* wrong: see **Captured shape**, which found that a normal,
    successful, correctly-routed call is a two-key envelope, not a one-key one.
-   The rule actually enforced is: `$model` must be present, and
-   `keys - {$model}` must be empty once haiku-family keys are removed from it.
+   Membership is also not enough on its own even restricted to `$model`
+   itself: an envelope can name the configured model while that model's own
+   entry did none of the work (`outputTokens: 0`) and a haiku-family entry
+   carried the real content instead — presence of the key is not proof of
+   authorship. The rule actually enforced is: `$model` must be present with
+   `outputTokens > 0` on its own entry, and `keys - {$model}` must be empty
+   once haiku-family keys (case-sensitive `claude-haiku-` prefix followed by a
+   digit) are removed from it.
 
 The second guard is the one that makes this safe to build. Without it the whole
 failure mode this bridge exists to prevent — GLM advising GLM — returns
