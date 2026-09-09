@@ -309,7 +309,9 @@ always probes and "not installed" is an answer. `enabled`, `dispatchable` and
 `reason` are the probe's own fields verbatim (`reason` is `""` when
 dispatchable). `route` is what implementer dispatches actually do: `"worker"`
 (this directory already dispatches — a `ship-fleet` instance is the ordinary
-case), `"worktree"` (P4 must cut one, and `worktree` holds its absolute path),
+case), `"worktree"` (P4 must cut one, and `worktree` holds its absolute path —
+non-`null` means one already exists, so a P4 re-entered after compaction reuses it
+instead of re-cutting, which is why this field is preserved and not recomputed),
 `"anthropic"` (no worker; every implementer is an Anthropic subagent). P0 can
 only record an intent, so P4 rewrites the block from what it actually achieved —
 a `"worktree"` route left in state by P0 and never confirmed by P4 would assert
@@ -659,9 +661,51 @@ P0 does. Then:
 - `route:"worker"` → this directory is already a linked worktree (a `ship-fleet`
   instance is the ordinary case). Worker dispatches pass `-Cwd` = this directory.
 - `route:"worktree"` → workers are enabled and this directory can never dispatch.
-  Cut one below instead of accepting the downgrade. `ollama-workers` is explicit
-  that a plan executed from a primary checkout should move to a worktree, not
-  quietly route every task to Anthropic.
+  Cut one below instead of accepting the downgrade — unless `worker_routing.worktree`
+  is already set, which means a previous P4 block cut it and this is a resume: run
+  the resume guard first and reuse it. `ollama-workers` is explicit that a plan
+  executed from a primary checkout should move to a worktree, not quietly route
+  every task to Anthropic.
+
+**Resume guard — read `worker_routing.worktree` before cutting anything.** P4 is
+re-entered from the top on every resume (First action reads state and lands in the
+phase it names), so the cut below runs more than once and has to be idempotent. It
+is not. `git worktree add` on the path of a live worktree dies with `fatal:
+'<path>' already exists` (exit 128), and **`--force` does not override it** — that
+flag covers a branch already checked out and a *missing but registered* path, not a
+directory that is present. There is no recovery at the git level, so the guard is
+state, not error handling. When `worktree` is set, do NOT run the cut; verify what
+state names and reuse it:
+
+```bash
+WT="<worker_routing.worktree>"                       # verbatim from state
+git -C "$WT" rev-parse --git-dir >/dev/null 2>&1 && echo REUSE || echo RECUT
+```
+
+- `REUSE` → the worktree is live. Skip both the cut and the Step 2 setup below
+  (`node_modules` is untracked, so it survived), and go straight to the confirming
+  probe. Then **Dispatching into it**: step 1's `reset --hard "$TIP"` re-syncs the
+  worktree to the branch tip, picking up every task that landed before the
+  interruption. That is the whole re-sync a resume needs.
+- `RECUT` → state names a worktree git can no longer resolve: a `git worktree
+  remove` that half-ran, or a directory deleted by hand. Clear BOTH halves before
+  cutting, because either one alone still fails the add —
+
+  ```bash
+  case "$WT" in */ship-wt/*) ;; *) echo "refusing rm outside ship-wt" >&2; exit 1;; esac
+  git worktree prune          # registration without a directory:
+                              #   fatal: '<path>' is a missing but already registered worktree
+  rm -rf "$WT"                # directory without a registration:
+                              #   fatal: '<path>' already exists
+  ```
+
+  then set `worker_routing.worktree` to `null` and cut fresh below. The `rm -rf` is
+  reached only after `rev-parse --git-dir` already FAILED on `$WT`, so it cannot
+  target a live repository — any working tree, this one included, answers that
+  probe. The `case` guard is belt-and-braces on a path read out of a JSON file:
+  every path this skill cuts lives under `ship-wt/`.
+
+With `worktree` still `null` this is a first entry: cut it.
 
 **Cutting the implementation worktree.**
 ```bash
@@ -716,6 +760,14 @@ Nothing failed and no evidence was earned, so tasks go to their ordinary Anthrop
 tier; never promote a worker-shaped task to a larger model because the worker was
 missing.
 
+`fatal: '<path>' already exists` is NOT one of those failures and must never reach
+this fallback. It means the cut ran on a path that was already there — which the
+resume guard exists to prevent, so seeing it means the guard was skipped. Go back
+and run it: the message alone does not say whether that path is a live worktree or
+a leftover directory, and `rev-parse --git-dir` is the only thing that separates
+`REUSE` from `RECUT`. Do not downgrade a whole pipeline to Anthropic over a
+redundant `git worktree add`.
+
 **Dispatching into it**, per task, in this order:
 1. `TIP=$(git rev-parse HEAD)` — evaluated HERE, in the conductor's tree — then
    `git -C "$WT" reset --hard "$TIP"`. **Never a bare `HEAD` under `-C`**: `-C`
@@ -751,10 +803,11 @@ work, 1–2 files, exact functions named. That skill is the single source for bo
 lists and this hook does not restate them.
 
 **Remove the worktree on advance to P5** (`git worktree remove --force "$WT"`) and
-clear `worker_routing.worktree`. Not earlier: a P4 block resumes into the same
-worktree, and `git worktree add` on a path git has already registered fails — so a
-resume that finds `worktree` set in state reuses it, step 1's `reset --hard` being
-the whole re-sync.
+clear `worker_routing.worktree` in the same write — a path left in state after the
+directory is gone sends the next resume down the guard's `RECUT` branch for no
+reason. Not earlier: an interrupted P4 resumes into the same worktree, which is
+what the resume guard above reuses, step 1's `reset --hard` being the whole
+re-sync.
 
 Invoke `subagent-driven-development` via the Skill tool on the `plan` (its Task
 subagents keep your context lean; subagents self-verify per task via TDD). Its
