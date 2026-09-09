@@ -10,10 +10,10 @@ $ErrorActionPreference = 'Stop'
 # $side is deliberately UNTYPED and three-state: $true, $false, or $null meaning
 # "omit the key entirely". The omitted-key record is the only thing that proves
 # the renderer keeps a record unless isSidechain is exactly `$true` (implemented
-# as `-eq $true` guarded by `continue`, not `-eq $false` and not `-ne $true`
-# written directly as the keep condition - see the renderer's own comment for
-# why), and a [bool] parameter cannot express the omitted-key case - $null
-# would coerce to $false and write the key.
+# as `-eq $true` guarded by `continue`, not `-ne $false` as the drop condition
+# and not `-ne $true` written directly as the keep condition - see the
+# renderer's own comment for why), and a [bool] parameter cannot express the
+# omitted-key case - $null would coerce to $false and write the key.
 #
 # $content is likewise untyped so a fixture can carry a bare STRING as
 # message.content, not only a block array. Claude Code writes plain-string

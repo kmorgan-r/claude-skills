@@ -116,17 +116,20 @@ if (-not $claudeExe) {
 # The persona is arbitrary user-editable markdown and editing it is this
 # project's documented iteration loop, so `&`, `|`, `^`, `>` or `%VAR%` in a
 # persona would become live shell syntax on the command line of a paid
-# process.
+# process. `npm install -g` commonly puts a .cmd shim on PATH, so this is not
+# a theoretical shape - it is exactly what the Fail arm below exists for,
+# since an npm shim directory has no sibling .exe to fall back to.
 #
-# Under the default PATHEXT order (.COM;.EXE;.BAT;.CMD;...), Get-Command
-# already prefers a same-directory .exe over a .cmd/.bat, and an npm-style
-# shim directory has no sibling .exe at all - so this branch is not reachable
-# through either of those two shapes. It is a defence for a NON-default
-# PATHEXT ordering (.CMD moved ahead of .EXE, or .EXE dropped from PATHEXT
-# entirely), the one case where Get-Command could still hand back a shim with
-# a real .exe sitting right next to it. Anything past that (searching other
-# directories, trying other names) would be inventing a resolution scheme the
-# Global Constraints forbid; fail closed instead.
+# The sibling-.exe arm below (found -> use it, instead of failing) is
+# different. Under the default PATHEXT order (.COM;.EXE;.BAT;.CMD;...),
+# Get-Command already prefers a same-directory .exe over a .cmd/.bat, so
+# that arm is not reachable through an npm-style shim either - there is no
+# sibling .exe there to find. It is a defence for a NON-default PATHEXT
+# ordering (.CMD moved ahead of .EXE, or .EXE dropped from PATHEXT
+# entirely), the one case where Get-Command could still hand back a shim
+# with a real .exe sitting right next to it. Anything past that (searching
+# other directories, trying other names) would be inventing a resolution
+# scheme the Global Constraints forbid; fail closed instead.
 if ($claudeExe -match '\.(cmd|bat)$') {
     $siblingExe = [System.IO.Path]::ChangeExtension($claudeExe, '.exe')
     if (Test-Path -LiteralPath $siblingExe) {

@@ -190,15 +190,15 @@ Keep records where `type` is `user` or `assistant` **and** `isSidechain` is not
 `true`. Drop everything else.
 
 Implement the drop side as `if ($rec.isSidechain -eq $true) { continue }`, not
-`if ($rec.isSidechain -ne $true) { keep }`. `-eq $false` is ruled out as the
+`if ($rec.isSidechain -ne $true) { keep }`. `-ne $false` is ruled out as the
 drop condition because a record that omits the field entirely is a main-agent
-record and must be kept, and `isSidechain -eq $false` would drop it. Writing
-the keep side directly as `-ne $true` has its own hazard: PowerShell's `-ne`,
-like `-eq`, filters rather than compares when the left-hand side is an array,
-so an array-valued `isSidechain` would turn `-ne $true` into an empty, falsy
-array and wrongly drop the record. `-eq $true` guarded by `continue` hits the
-same array case but fails open instead: the `continue` is skipped and the
-record is kept.
+record and must be kept, and `isSidechain -ne $false` would drop it (`$null -ne
+$false` is `$true`). Writing the keep side directly as `-ne $true` has its own
+hazard: PowerShell's `-ne`, like `-eq`, filters rather than compares when the
+left-hand side is an array, so an array-valued `isSidechain` would turn `-ne
+$true` into an empty, falsy array and wrongly drop the record. `-eq $true`
+guarded by `continue` hits the same array case but keeps the record instead:
+the `continue` is skipped and the record survives.
 
 This filter is doing more work than it appears. In a measured two-turn Ollama
 session the file was 261 KB, of which `attachment` records — hook output,
