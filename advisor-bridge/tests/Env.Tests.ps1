@@ -64,6 +64,18 @@ Describe 'pre-spawn guard' {
         $row = (Get-Content (Join-Path $r.Home 'advisor-bridge.log.jsonl') |
                 Select-Object -Last 1) | ConvertFrom-Json
         $row.verdict | Should -Be 'model_guard'
+        # Write-LogRow is shared with Task 7's spawn path specifically so the
+        # twelve fields cannot drift between the two callers. That invariant
+        # is otherwise unpinned by anything in this suite - a field renamed,
+        # dropped, or added on one call site and not the other would pass
+        # every assertion above, which checks only `verdict`. `source` is
+        # excluded here deliberately: this call passes $source = $null, and
+        # Write-LogRow only adds that key when $source is truthy.
+        $fields = $row.PSObject.Properties.Name | Sort-Object
+        $expectedFields = @('chars_sent','cost_usd','duration_ms','input_tokens',
+                            'lines_skipped','model','output_tokens','session_id',
+                            'ts','turns_elided','turns_rendered','verdict') | Sort-Object
+        ($fields -join ',') | Should -Be ($expectedFields -join ',')
     }
     It 'refuses the injection seam outside a dry run' {
         # Exit 1, and no log row: the seam is rejected before anything is
@@ -86,6 +98,39 @@ Describe 'pre-spawn guard' {
         # that moved this check past Write-LogRow's definition point and
         # called it before Fail-ing would still exit 1 with the same text.
         Join-Path $h 'advisor-bridge.log.jsonl' | Should -Not -Exist
+    }
+}
+
+Describe 'executable resolution' {
+    # BatBadBut (CVE-2024-1874): with UseShellExecute = $false, a .cmd/.bat
+    # FileName hands the command line to cmd.exe /c, which RE-PARSES it -
+    # voiding ArgumentList's per-element CRT quoting, the exact guarantee the
+    # 'argument list' Describe block below depends on. `npm install -g`
+    # commonly puts such a shim ahead of any real .exe on PATH, so this is
+    # fabricated the same way it was proven: a bare claude.cmd placed first
+    # on PATH, with no sibling claude.exe next to it.
+    It 'refuses a .cmd shim instead of spawning it' {
+        $shimDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ab-shim-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $shimDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $shimDir 'claude.cmd') -Value '@echo off'
+        $h = Join-Path ([System.IO.Path]::GetTempPath()) ("ab-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $h -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $h 'advisor-bridge.json') -Value '{"enabled": true}'
+        Set-Content -LiteralPath (Join-Path $h 'advisor-bridge-persona.md') -Value 'be terse'
+        $proj = Join-Path $h 'projects' 'C--fixture'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Copy-Item (Join-Path $script:Fixtures 'basic.jsonl') (Join-Path $proj 'fix-session.jsonl')
+        $out = & pwsh -NoProfile -Command "
+            `$env:PATH = '$shimDir;' + `$env:PATH
+            `$env:CLAUDE_CONFIG_DIR = '$h'
+            `$env:CLAUDE_CODE_SESSION_ID = 'fix-session'
+            & '$script:Script' -ClaudeHome '$h' -DryRun
+            exit `$LASTEXITCODE" 2>&1
+        $LASTEXITCODE | Should -Be 1
+        # Paired per Rule 1: persona-too-large and the injection-seam refusal
+        # also exit 1 in this same file. 'shell shim' is unique to this
+        # specific Fail call.
+        ($out -join "`n") | Should -Match 'shell shim'
     }
 }
 

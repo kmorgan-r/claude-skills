@@ -108,6 +108,30 @@ if (-not $claudeExe) {
     Fail "claude executable not found on PATH or at ~/.local/bin/claude.exe`n  Install the Claude Code CLI, then retry."
 }
 
+# A .cmd/.bat resolution is the BatBadBut hazard (CVE-2024-1874): with
+# UseShellExecute = $false, CreateProcess hands a .bat/.cmd target's command
+# line to cmd.exe /c, which RE-PARSES it - voiding the per-element CRT
+# quoting ArgumentList exists to give us (see the argument list below) and
+# dropping the effective command-line limit from 32767 to cmd.exe's 8191.
+# The persona is arbitrary user-editable markdown and editing it is this
+# project's documented iteration loop, so `&`, `|`, `^`, `>` or `%VAR%` in a
+# persona would become live shell syntax on the command line of a paid
+# process. `npm install -g` commonly puts a .cmd shim ahead of any real .exe
+# on PATH, so this is not a theoretical shape.
+#
+# A same-directory sibling .exe is a resolution, not a guess - it is the
+# real binary the shim wraps, sitting right next to it. Anything past that
+# (searching other directories, trying other names) would be inventing a
+# resolution scheme the Global Constraints forbid; fail closed instead.
+if ($claudeExe -match '\.(cmd|bat)$') {
+    $siblingExe = [System.IO.Path]::ChangeExtension($claudeExe, '.exe')
+    if (Test-Path -LiteralPath $siblingExe) {
+        $claudeExe = $siblingExe
+    } else {
+        Fail "claude resolved to a shell shim, not an executable: $claudeExe`n  A .cmd/.bat target re-parses the command line under cmd.exe, which can`n  turn persona content into shell syntax. Point PATH at a real claude.exe,`n  or install one at ~/.local/bin/claude.exe."
+    }
+}
+
 # --- 4. Read the persona ---------------------------------------------------
 if (-not (Test-Path -LiteralPath $personaPath)) {
     Fail "persona not found: $personaPath`n  Re-run advisor-bridge/install.ps1 to place it."
