@@ -368,28 +368,76 @@ Two, both mandatory, both fail-closed. Both exit 2.
    Ollama release adds. The whitelist is already enumerated, so equality costs
    nothing and closes the whole family rather than one prefix of it.
 
-2. **Post-run.** Assert the result envelope's `modelUsage` key set is non-empty
-   and equals exactly `{<config model>}`. Any other model means the call was
-   answered by something other than the intended advisor: discard the reply,
-   exit 2, log it.
+2. **Post-run.** Assert the configured model is present in the result
+   envelope's `modelUsage`, and that every *other* key present is a
+   `claude-haiku-` housekeeping entry (see **Captured shape** below — a real
+   call always carries one). Any other model — including a second *non-haiku*
+   Anthropic model — means the call was answered, in whole or in part, by
+   something other than the intended advisor: discard the reply, exit 2, log
+   it.
 
-   *Set equality, not membership.* Membership would pass a mixed envelope, which
-   is the shape a fallback or a retry against a different model produces — the
-   exact case the guard is for.
+   *This is deliberately not membership, and not the naive "set equals
+   `{<config model>}`" rule this section originally specified.* Plain
+   membership would pass a mixed envelope, which is the shape a fallback or a
+   retry against a different model produces — the exact case the guard is for
+   — so a bare `-contains $model` check is still wrong. But naive set equality
+   is *also* wrong: see **Captured shape**, which found that a normal,
+   successful, correctly-routed call is a two-key envelope, not a one-key one.
+   The rule actually enforced is: `$model` must be present, and
+   `keys - {$model}` must be empty once haiku-family keys are removed from it.
 
 The second guard is the one that makes this safe to build. Without it the whole
 failure mode this bridge exists to prevent — GLM advising GLM — returns
 silently, formatted as advice.
 
-**Implementer prerequisite: capture the envelope shape first.** The spike
-recorded token counts (`cache_creation 1414, input 2`) but never recorded the
-`modelUsage` field's actual shape — whether it is an object keyed by model id, a
-list, or nested under another key. Run one `claude -p --output-format json` call,
-record the verbatim shape in this section, and write the guard against that.
+**Captured shape (Task 7, one live `claude -p --model claude-fable-5-1
+--output-format json --tools "" --strict-mcp-config --setting-sources ""`
+call, real ids/costs/paths redacted below).** `modelUsage` is an **object keyed
+by model id**, as assumed — but it had **two keys on a normal, `is_error:
+false`, single-turn, tool-free call**, not one:
+
+```
+modelUsage: {
+  "<configured-model-id>": {           // e.g. claude-fable-5-1 — the model actually named by --model
+    inputTokens: <int>, outputTokens: <int>,
+    cacheReadInputTokens: <int>, cacheCreationInputTokens: <int>,
+    webSearchRequests: <int>, costUSD: <float>,
+    contextWindow: <int>, maxOutputTokens: <int>, thinkingTokens: <int>,
+    canonicalModel: "<string, matches the key on this entry>",
+    provider: "firstParty", costBasis: "list"
+  },
+  "claude-haiku-<dated-snapshot>": {    // e.g. claude-haiku-4-5-20251001 — NOT requested, appears anyway
+    inputTokens: <int>, outputTokens: <int>,
+    cacheReadInputTokens: <int>, cacheCreationInputTokens: <int>,
+    webSearchRequests: <int>, costUSD: <float>,
+    contextWindow: <int>, maxOutputTokens: <int>, thinkingTokens: <int>,
+    canonicalModel: "claude-haiku-4-5",  // unversioned — differs from the dated key, unlike the configured model's entry
+    provider: "firstParty", costBasis: "list"
+  }
+}
+```
+
+The second entry is not a fallback and not a leak: the child transcript's own
+`ai-title` record (`{"type":"ai-title","aiTitle":"<generated short title>",
+"sessionId":"<uuid>"}`) shows Claude Code generates a short session title via a
+haiku-family model on every `-p` run, unconditionally — independent of
+`--tools`, `--strict-mcp-config`, and `--setting-sources`, and independent of
+`--model`. Both `assistant` records in that same transcript carry
+`message.model` equal to the *configured* model, confirming the haiku call
+never authored `result` — it only names the session. This was one observation,
+not a determinism proof; the guard rule above still fails closed (to
+`model_guard`, not silently to `ok`) if some future build omits the haiku call
+entirely, since `{$model}` alone still satisfies "keys − {$model}, minus haiku,
+is empty."
+
 Do not write the guard against an assumed shape: a guard that reads a key that
 does not exist yields `$null`, and `$null -eq $null` passes. A fail-closed guard
 that silently inverts to fail-open is worse than no guard, because the design
-above leans on it.
+above leans on it. The failure mode actually hit here ran the other way — a
+guard written against the *assumed* one-key shape is fail-closed in the safe
+direction but trips on every legitimate call, which makes the whole feature
+inert. Both directions matter: fail-open is unsafe, and a guard that always
+fires is undeployable.
 
 ### Output, logging, exits
 
@@ -657,6 +705,7 @@ them:
 | `-EnvelopeFile <path>` | Reads a canned result envelope from a file instead of spawning `claude`. The only way to drive the post-run guard against a wrong model without a real, non-deterministic API call. |
 | `-TimeoutSec <n>` | Overrides `timeoutSec`, so the timeout path is testable in 2 s against a slow stub. |
 | `-ClaudeHome <path>` | Overrides the `~/.claude` base for the config, log, persona and scratch paths. Without it the config, guard, timeout and log tests all read the developer's live config — which seeds `enabled: false`, so each exits 1 at step 2 before reaching the behaviour under test — and append to the real log `## Cost` calibrates from. Running the script in a child `pwsh` with `USERPROFILE` overridden is not a substitute: `$HOME` and `~` resolve once in PowerShell and do not follow a mid-process change. |
+| `-InjectEnvKey <name>` | A fifth seam, honoured only alongside `-DryRun` (it is refused outright otherwise). Adds one stray key to the constructed child environment so the pre-spawn guard's key-set-equality check has something to trip on. Without it, `-DryRun`'s printed environment and the guard's own comparison are derived from the same whitelist and the same `GetEnvironmentVariable` calls, so no external input could ever make them diverge — a guard no test can trip is a guard that could be deleted with every test still green. |
 
 ### Cases
 
@@ -758,14 +807,17 @@ executable test.
 
 ### For the implementer to verify
 
-- **The `modelUsage` envelope shape**, before writing the post-run guard. See
-  `### Guards` — this is a prerequisite, not a nice-to-have.
-- **Whether hook output and system-reminders also ride inside surviving `user`
-  records**, not only in `attachment` records. One grep of a real transcript
-  settles it. If they do, an explicit stripping rule belongs in `### Renderer`
-  first — naming the delimiters, and whether the removed span counts toward
-  `chars_sent` — and a golden case second. As specified the renderer has three
-  rules, and none of them removes anything from inside a `text` block.
+- ~~**The `modelUsage` envelope shape**, before writing the post-run guard. See
+  `### Guards` — this is a prerequisite, not a nice-to-have.~~ Settled by Task
+  7: an object keyed by model id, but with a second, always-present
+  `claude-haiku-` housekeeping key on a normal call — see the **Captured
+  shape** block in `### Guards`. The guard rule and this repo's fixtures were
+  written against that shape, not the one-key shape originally assumed here.
+- ~~**Whether hook output and system-reminders also ride inside surviving
+  `user` records**, not only in `attachment` records.~~ Settled by Task 1 Step
+  5: 0 of 119 `user` records (reproduced at 0 of 285 on a later, larger sample
+  — see `tests/fixtures/SCHEMA.md`). No stripping rule is needed inside
+  `Format-Turn`.
 - **Whether SessionStart fires with `source: "compact"`.** The native advisor
   survives a compact because it lives in the system prompt; this bridge's
   protocol arrives as `additionalContext` and may not. If it does fire, the
