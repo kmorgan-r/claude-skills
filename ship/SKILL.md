@@ -20,7 +20,7 @@ any `/clear` or auto-compact via a state file.
 > Preserved during auto-compaction. After ANY compaction, immediately:
 > 1. Read `.claude-ship-state.json` (repo root).
 > 2. Resume at `phase` using `focus_next`.
-> 3. Preserve: `topic`, `branch`, `phase`, `status`, `pr`, `plan`, `blockers`, `db_gate`, `review_passes`, `repair`, `repair_enabled`, `worker_routing`.
+> 3. Preserve: `topic`, `branch`, `phase`, `status`, `pr`, `plan`, `blockers`, `db_gate`, `review_passes`, `repair`, `repair_enabled`, `worker_routing`, `advisor_routing`.
 > If `phase == "fix-pr-reviews"`, the loop internals belong to fix-pr-reviews
 > (`.claude-pr-fix-state.json`) — defer to it; re-enter with `--loop --continue`.
 > If `status == "awaiting-db-gates"`, the P6.5 DB gate was deferred — surface
@@ -219,6 +219,7 @@ Repo-root JSON, gitignored (P0 adds the `.gitignore` entry), single active pipel
   "test_paths": [],
   "db_gate": null,
   "worker_routing": { "enabled": false, "dispatchable": false, "reason": "primary checkout", "route": "anthropic", "worktree": null },
+  "advisor_routing": { "backend": "anthropic", "enabled": false, "available": false },
   "review_passes": { "spec-review": 0, "plan-review": 0 },
   "repair_enabled": true,
   "repair": null
@@ -319,6 +320,22 @@ a dispatch that never happened, which is the exact silence this field exists to
 end. A state file written by a pre-change `/ship` has no `worker_routing` key;
 treat it as absent, not as `"anthropic"`, and re-probe at P4.
 
+`advisor_routing` records whether this session's backend is Anthropic's and
+whether the advisor bridge can compensate when it is not:
+`{ "backend": "anthropic"|"local", "enabled": <bool>, "available": <bool> }`.
+`backend` is `"local"` when `ANTHROPIC_BASE_URL` is set to a host other than
+`api.anthropic.com` — the same check the advisor-bridge status hook gates on —
+and `"anthropic"` otherwise, including when the variable is unset entirely.
+`enabled` is the bridge config's own `enabled` field (a missing or unreadable
+`~/.claude/advisor-bridge.json` reads as `false`). `available` is their
+conjunction, and it is the only field the Advisor calls section reads. P0
+writes it and nothing rewrites it: unlike `worker_routing`, whose route P4 must
+confirm from what it actually achieved, nothing that happens during a run
+changes either input. A state file written by a pre-change `/ship` has no
+`advisor_routing` key; a conductor that reaches an Advisor calls site without
+one probes once there (per that section) and writes the block with its next
+state write — never more than once.
+
 Rewrite it at every phase boundary (update `phase`, `focus_next`, append to
 `phase_log`). On a failure set `status:"blocked"` and append to `blockers`.
 
@@ -406,8 +423,31 @@ writes no log row, and the `phase_log` entry read "SDD executed all 8 tasks" wit
 no routing note at all. Being enabled and being dispatchable are separate facts;
 a route that is never written down is a route nobody can audit.
 
+**Advisor routing — read two facts, record always.** Alongside the worker
+probe, determine and record whether this session's backend is Anthropic's and
+whether the advisor bridge is switched on. Both answers come from the
+environment and one config read, and neither can change mid-run:
+
+```bash
+base="${ANTHROPIC_BASE_URL:-}"
+grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$HOME/.claude/advisor-bridge.json" 2>/dev/null
+```
+
+`backend` is `"local"` when `$base` is non-empty and its host is not
+`api.anthropic.com`, else `"anthropic"` (the same gate the advisor-bridge
+status hook uses, so ship and the hook can never disagree about which kind of
+session is running). `enabled` is `true` only when the grep matched — a
+missing config, an unreadable one, or `"enabled": false` all read as `false`,
+which is also what a bridge that was never installed answers. `available` is
+`backend == "local" && enabled == true`. Record all three as `advisor_routing`
+in the state write below. Like the worker probe this is an answer, not a
+precondition: every branch records and moves on, and on an Anthropic backend
+the whole field reads `{ "anthropic", false, false }` and the Advisor calls
+section stays inert for the entire run.
+
 Then write the initial state file (`phase:"spec-review"`, `branch`,
-`default_branch`, `spec`, `topic`, `focus_next`, `worker_routing`). **Rollback:**
+`default_branch`, `spec`, `topic`, `focus_next`, `worker_routing`,
+`advisor_routing`). **Rollback:**
 if the state-file write fails after the branch was created, run
 `git checkout "$DEFAULT_BRANCH" && git branch -D feat/<slug>`.
 Advance to P1.
@@ -976,6 +1016,17 @@ in the state file on disk, so it survives what the retry itself does not.
 This covers ONLY that row. `Max Iterations Reached`, `Human Review Needed`, and
 unrecognized output remain Tier 3 and block on the first occurrence.
 
+**On a local backend, the three Tier-3 review rows get one advisor call before
+their block is written** (see Advisor calls — site 2). Those rows are the one
+place in P6 where ship blocks on a judgment about review quality rather than a
+mechanical condition, and on `advisor_routing.backend == "local"` every review
+that produced them was written by the local model — an independent read of the
+same output is the cheapest thing that can stand behind the human's
+unblocking decision. The call appends the advisor's reply to the blocker
+verbatim and changes no row of the outcome table: the block happens either
+way, Tier 3 stays Tier 3, and the Tier-1 retry above gets no call because it
+is mechanical.
+
 ### P6.5 db-gates
 
 DB deploy gates (apply migration to prod, SQL/pgTAP harness, edge-fn deploy,
@@ -1134,7 +1185,11 @@ is `false`.
 
 Run BEFORE every dispatch. Any check failing means `status:"blocked"` — never a
 dispatch, never a retry of the check. A `null` `repair` block reads as
-`attempt: 0`, `budget_used: 0`, `history: []`.
+`attempt: 0`, `budget_used: 0`, `history: []`. On a local backend, a dispatch
+that passes all five checks for a `spec-review`/`plan-review` halt fires the
+Advisor calls section's site 1 immediately before it happens — that call is
+part of the dispatch path, not an extra, and it is bounded to once per run
+like the checks themselves.
 
 1. **Tier check.** The halt must appear in the Tier 2 table below. Any halt not
    named in Tier 1 or Tier 2 is Tier 3 (human) by default.
@@ -1223,6 +1278,15 @@ rewording a document until the CRITICAL's objection stops matching, and `ship-re
 scan cannot catch that — its rule 5 fires on a deleted section, not a weakened one. See
 `ship-repair` §4's model table for the full rationale.
 
+On a session whose backend is not Anthropic (`advisor_routing.backend ==
+"local"`), the `fable` and `sonnet` dispatches in this table are the local
+model wearing those names — one process serves one endpoint — so the row that
+exists to put a frontier model on the judgment-laden P1/P3 case is exactly the
+row that degrades hardest, silently. The Advisor calls section defines what a
+local-backend run does about it: one advisor call before a P1/P3 dispatch,
+which records an independent read for the human but restores nothing about the
+dispatch itself.
+
 ### Tier 3 — human, permanently
 
 P6.5 DB gate; P7 merge; the P4 zero-verification guard (both cases); P6 `Max
@@ -1242,6 +1306,85 @@ omission safe rather than silent.
 | `failed` | Next attempt if the decision allows — but the revert makes the failure re-present identically, so the ratchet normally makes `failed` terminal at that halt point. |
 | `refused` | `blocked` immediately, no further attempt. Surface the triggering rule **or precondition** verbatim — §2's dirty tree and §4a's moved HEAD are refusals no scan rule produced. The dispatch that returned `refused` HAS already spent a budget unit, charged at dispatch; only a pre-dispatch ratchet or cap block is free. |
 | unparseable or absent `REPAIR:` line | `blocked`. Ship never advances on a signal it cannot read — same rule as P6. |
+
+## Advisor calls (local-backend sessions)
+
+When `advisor_routing.available` is true, ONE call to the advisor bridge at
+each of the two sites below, and nowhere else in a ship run. On an Anthropic
+backend the section is inert — `available` is false by construction, so
+nothing below costs anything or runs at all.
+
+**Why the bound exists.** A local-backend session (`ANTHROPIC_BASE_URL`
+pointing at a non-Anthropic host) serves every "Opus"/"fable" subagent
+dispatch with the local model: the P1/P3 reviewer panels, the `RESOLVED:`
+verifiers, and Tier-2 repair agents all review and repair the local model's
+work in the local model's voice — a failure that reads as success, which is
+why `advisor_routing` records it in state rather than leaving each conductor
+to notice afresh. The advisor bridge is the one route back to an Anthropic
+model, but each call costs $0.20–0.40 of real money (the bridge has no rate
+cap of its own — read `cost_usd` in `~/.claude/advisor-bridge.log.jsonl` for
+the measurement, not this estimate), so this section is a whitelist of call
+sites, not a licence. It also overrides the generic SessionStart nudge for
+ship runs: the bridge's hook asks for advisor calls "before substantive work",
+and a conductor executing a prescriptive pipeline would either ignore it at
+the moments that matter or over-call at a dollar a time — inside a `/ship`
+run, the two sites below are the whole allowance.
+
+**Site 1 — immediately before a P1/P3 Tier-2 repair dispatch.** The
+repair-dispatch decision's five checks have all passed, the halt's phase is
+`spec-review` or `plan-review`, and the dispatch is about to happen. This is
+where a local run is weakest: Tier 2 exists to put a frontier model on the
+judgment-laden CRITICAL case, and on a local backend that dispatch is the
+local model. The advisor sees the same finding in the transcript and answers
+independently; its reply is the human's only second opinion on whether the
+CRITICAL was genuine or the repair that follows merely reworded a document
+until the objection stopped matching.
+
+**Site 2 — immediately before writing a P6 Tier-3 review block.** Only the
+three rows named in P6 (`Max Iterations Reached`, `Human Review Needed`,
+unrecognized output). Their blocks go to a human who must unblock on a
+judgment about review quality, produced by local-model reviews.
+
+**Mechanics, both sites.** If `advisor_routing` is absent from state (a run
+started by a pre-change `/ship`), run the P0 probe once here and write the
+block with the next state write — never more than once. If the block says
+`available: false`, stop: both sites are skipped and this section is done.
+Otherwise, before calling, scan `phase_log` for an entry
+starting `advisor: <site>` — present → the call was already made or attempted,
+skip it whatever the outcome was (a retry is money spent for advice already
+lost, and a compaction mid-call is exactly when the scan earns its keep).
+Absent → append the entry FIRST, then call:
+
+```
+Bash(command: "pwsh -NoProfile -File ~/.claude/scripts/advisor-bridge.ps1",
+     timeout: 300000)
+```
+
+The 300000 timeout is not optional — a real transcript overruns the 120 s
+default and comes back killed, which spends the money and loses the reply.
+Exit 0: at site 1 append the reply (truncated to its first 500 chars) to the
+same `phase_log` entry; at site 2 append the full reply verbatim to the
+blocker entry the block was about to write, because blockers reach the human
+unfiltered. Exit 1 or 2: the bridge refused or the reply failed its guards —
+an answer, not a halt. Record the exit in the `phase_log` entry and continue
+with no advice; never retry, never block, never treat an unavailable advisor
+as a precondition. The bridge is an enhancement, never a gate.
+
+**Advice cannot override anything.** Mechanical rules — the coverage gate, the
+CRITICAL arithmetic, ceilings, caps, budgets, the ratchet, the P6 outcome
+table — execute exactly as written whether or not advice exists. The advisor's
+reply is context for the human reading `phase_log` or `blockers`, and for no
+rule in this file. If a reply and a mechanical rule disagree, the rule wins
+without a reconciling call; the only thing worth one is a genuine conflict
+between the advisor and primary-source evidence in the transcript, which is
+the bridge skill's own guidance, not ship's.
+
+**The call is pre-authorized, not a Class-B escalation.** Class-B stops
+escalate on "spend money"; this section is that authorization, bounded to two
+calls per run, and a conductor who treated each call as a question would be
+re-asking what the state file already answered. It is not exempt from the
+cost bound: an advisor call outside the two sites is exactly the spend
+Class-B exists to catch.
 
 ## Class-B stops: questions from a delegated skill
 
