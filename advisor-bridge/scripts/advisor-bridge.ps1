@@ -619,6 +619,21 @@ $envelope = $null
 $exitCode = 0
 $source   = $null
 
+# One deadline shared across the stdin write, WaitForExit, and both drains -
+# NOT $timeoutSeconds handed fresh to each of the four in turn. Fresh budgets
+# at each stage sum to up to 4x $timeoutSeconds in the worst case (write +
+# WaitForExit + stdout-drain + stderr-drain each allowed to run the full
+# window), which can put the wrapper's own worst-case runtime past the spec's
+# 300s Bash-tool backstop at the 240s default - the wrapper must lose that
+# race, not the backstop, or it dies before it can write a log row. Every
+# .Wait(...) call below spends from this same clock instead of restarting it.
+$deadline = [datetime]::UtcNow.AddSeconds($timeoutSeconds)
+function Get-RemainingBudgetMs {
+    $ms = [int][Math]::Ceiling(($deadline - [datetime]::UtcNow).TotalMilliseconds)
+    if ($ms -lt 0) { return 0 }
+    return $ms
+}
+
 if ($EnvelopeFile) {
     # A deliverable test seam, outside the stdout/exit contract. It writes
     # source='envelope-file' into its log row so a canned row can never be read
@@ -674,7 +689,7 @@ else {
     $writeFailed = $false
     try {
         $writeTask = $proc.StandardInput.WriteAsync($rendered)
-        if (-not $writeTask.Wait($timeoutSeconds * 1000)) {
+        if (-not $writeTask.Wait((Get-RemainingBudgetMs))) {
             try { $proc.Kill($true) } catch { }
             $verdict = 'timeout'
         }
@@ -683,7 +698,7 @@ else {
     catch { $writeFailed = $true }
 
     if ($verdict -eq 'timeout') { }   # already killed above; skip the wait
-    elseif (-not $proc.WaitForExit($timeoutSeconds * 1000)) {
+    elseif (-not $proc.WaitForExit((Get-RemainingBudgetMs))) {
         # Kill($true) takes the whole process tree. `claude` on Windows launches
         # a node child, and killing only the parent leaves it holding the pipe.
         try { $proc.Kill($true) } catch { }
@@ -705,8 +720,13 @@ else {
         # and no exit code. Either failure mode falls through to an empty string,
         # which - like a genuinely silent child - classifies as no_envelope below:
         # fail-closed, not a hang.
-        $stdoutRaw = try { if ($stdoutTask.Wait($timeoutSeconds * 1000)) { $stdoutTask.Result } else { '' } } catch { '' }
-        $stderrRaw = try { if ($stderrTask.Wait($timeoutSeconds * 1000)) { $stderrTask.Result } else { '' } } catch { '' }
+        #
+        # Get-RemainingBudgetMs, not $timeoutSeconds * 1000 fresh again: this is
+        # the SAME deadline the write and WaitForExit above already spent from, so
+        # a slow write or a slow exit leaves correspondingly less for the drain -
+        # the whole call is bounded by one $timeoutSeconds total, not up to 4x it.
+        $stdoutRaw = try { if ($stdoutTask.Wait((Get-RemainingBudgetMs))) { $stdoutTask.Result } else { '' } } catch { '' }
+        $stderrRaw = try { if ($stderrTask.Wait((Get-RemainingBudgetMs))) { $stderrTask.Result } else { '' } } catch { '' }
         # A drain that timed out or faulted means the process tree may still be
         # holding pipes open (or is otherwise not fully gone) even though the
         # tracked $proc handle exited. Kill($true) on an already-exited process is

@@ -118,8 +118,9 @@ reorders them loses the property.
 12. Classify the child's outcome, in this precedence: **timeout** beats a
     nonzero exit (a killed child also exits nonzero, and `timeout` is the more
     specific fact); then `child_error` (`is_error`, or a nonzero exit); then
-    `no_envelope` (nothing on stdout parses as a result envelope). All three
-    exit 2.
+    `no_envelope` (nothing on stdout parses as a result envelope, **or the
+    envelope parsed but its `result` is absent/empty/whitespace-only**). All
+    three exit 2.
 13. **Post-run model guard** on the envelope → exit 2 if it trips. `model_guard`
     beats `child_error` wherever both could apply, for the same reason: a reply
     from the wrong model is what the caller must not act on.
@@ -466,10 +467,16 @@ One row per run appended to `~/.claude/advisor-bridge.log.jsonl`: `ts`,
 `duration_ms`, `verdict`.
 
 `verdict` is one of `ok`, `timeout`, `model_guard`, `child_error`,
-`no_envelope`. On any path where no envelope came back — `timeout`,
-`no_envelope`, and `child_error` when the child died before writing —
-`input_tokens`, `output_tokens` and `cost_usd` are `null` and `duration_ms` is
-the measured wall time. Writing zeros there would make a killed call
+`no_envelope`. `input_tokens`, `output_tokens` and `cost_usd` are keyed on
+whether an envelope with a `modelUsage` object actually came back, not on
+`verdict`: a `timeout`, or a `child_error` from the child dying before it
+wrote anything, means no envelope was ever parsed, so those three fields are
+`null`. But `no_envelope` can also mean the envelope parsed fine and carried
+a real `modelUsage` while its `result` was blank, or `child_error` can carry
+a parsed envelope alongside a nonzero exit or `is_error` — both were really
+billed, and those rows carry the genuine token/cost figures, not nulls.
+`duration_ms` is always the measured wall time regardless. Writing zeros (or
+nulling a genuinely billed call) would make a killed or discarded call
 indistinguishable from a free one in the log the cost calibration reads.
 
 | Exit | Meaning |
@@ -496,7 +503,7 @@ locally, costs nothing, and names a remedy:
 | Pre-spawn guard tripped | `model_guard` |
 | Child killed at the timeout | `timeout` |
 | Envelope reports `is_error`, or the child exited nonzero | `child_error` |
-| No parseable result envelope on stdout | `no_envelope` |
+| No parseable result envelope on stdout, **or one parsed with an absent/empty/whitespace-only `result`** | `no_envelope` |
 | Post-run model guard tripped | `model_guard` |
 
 Missing or expired Anthropic credentials land in `child_error`, not exit 1:

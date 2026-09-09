@@ -17,7 +17,12 @@ BeforeAll {
         param([string]$SessionFixture = 'basic.jsonl')
         $h = Join-Path ([System.IO.Path]::GetTempPath()) ("ab-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $h -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $h 'advisor-bridge.json') -Value '{"enabled": true}'
+        # timeoutSec: 20, not the 240s production default - a short belt on top
+        # of the PATH-shadow hard guard above, so that even if the guard were
+        # ever bypassed or a future test forgot to check it, a spawn that
+        # escapes to the real CLI is bounded to 20s, not 240s, before it fails
+        # loudly on its assertions.
+        Set-Content -LiteralPath (Join-Path $h 'advisor-bridge.json') -Value '{"enabled": true, "timeoutSec": 20}'
         Set-Content -LiteralPath (Join-Path $h 'advisor-bridge-persona.md') -Value 'be terse'
         $proj = Join-Path $h 'projects' 'C--fixture'
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
@@ -127,6 +132,22 @@ class Stub {
     $compileOut = & $csc /nologo "/out:$script:StubExe" $src 2>&1
     if (-not (Test-Path -LiteralPath $script:StubExe)) {
         throw "failed to compile timeout/spawn test stub: $($compileOut -join "`n")"
+    }
+
+    # HARD GUARD. Get-ClaudePath (advisor-bridge.ps1) falls back to
+    # $HOME\.local\bin\claude.exe when PATH resolution finds nothing, and that
+    # fallback is not reachable by a PATH prepend at all. So a failed prepend
+    # in Invoke-RealSpawn or the raw-ProcessStartInfo timeout/orphan harnesses
+    # below is not a test failure - it silently routes the spawn to the real,
+    # PAID CLI at the 240s default timeout. Compiling the stub only proves it
+    # was PRODUCED, not that PATH resolution actually finds it; this proves
+    # resolution, in the exact child-process shape (a fresh pwsh with the
+    # prepend applied) every spawn test below uses.
+    $script:Resolved = & pwsh -NoProfile -Command "
+        `$env:PATH = '$script:StubDir;' + `$env:PATH
+        (Get-Command claude -ErrorAction SilentlyContinue).Source"
+    if ($script:Resolved -ne $script:StubExe) {
+        throw "stub shadowing failed: 'claude' resolved to '$script:Resolved', not the stub at '$script:StubExe'. Refusing to run the spawn tests - they would invoke the real, paid CLI."
     }
 
     function Set-StubMode {
@@ -454,11 +475,22 @@ Describe 'spawn path envelope acquisition' {
         # (WaitForExit) succeeded, only the post-exit drain had to be bounded.
         $row.verdict     | Should -Be 'no_envelope'
         $row.duration_ms | Should -BeGreaterThan 1500
-        # The discriminator: an unbounded GetAwaiter().GetResult() here blocks
-        # for ping's ~11s lifetime; a bounded Wait(timeoutSeconds*1000) returns
-        # at ~2s. 8000ms comfortably separates the two without being so tight
+        # The Finding-1 discriminator: an unbounded GetAwaiter().GetResult()
+        # here blocks for ping's ~11s lifetime; a bounded drain returns at
+        # ~2s. 8000ms comfortably separates the two without being so tight
         # that CI jitter trips it.
         $row.duration_ms | Should -BeLessThan 8000
+        # The Blocking-2 discriminator: stdout and stderr must drain off ONE
+        # shared remaining-budget deadline, not each get a fresh
+        # $timeoutSeconds*1000 window of their own. Per-stage-fresh budgets
+        # sum to up to 4x timeoutSeconds in this exact shape (write +
+        # WaitForExit negligible here, then stdout times out at a full ~2s,
+        # then stderr gets ANOTHER fresh ~2s) - about 4s total. A shared
+        # deadline instead leaves stderr almost nothing once stdout has
+        # already spent the budget, landing near timeoutSeconds itself
+        # (~2-2.3s here). 3500ms sits between the two without the jitter risk
+        # of pinning it to the ~2s figure exactly.
+        $row.duration_ms | Should -BeLessThan 3500
 
         # The drain-timeout Kill($true) must reach the grandchild too, exactly
         # as the spawn-timeout Kill($true) does in the 'timeout' Describe -
