@@ -74,4 +74,27 @@ Describe 'session locator' {
         $r.Code | Should -Be 1
         $r.Text | Should -Not -Match 'victims-real-session'
     }
+    # All five tests above assert exit code 1. An error in the RESOLVED-path
+    # expression itself - the wrong element of $found picked, .FullName typoed,
+    # an escaping bug that happens to still fail to match - would pass every
+    # one of them, because none ever exercises the branch that returns a path
+    # rather than a "no transcript" or "matches N" failure. This is the
+    # positive control: a single real match must resolve at exit 0, and it is
+    # pinned by content, not just exit code - a GUID marker unique to this
+    # transcript must survive locate-then-render, which only happens if the
+    # locator handed the renderer THIS file rather than failing closed or
+    # reading some other one.
+    It 'resolves a single matching transcript and renders its content at exit 0' {
+        $h = New-Enabled-Home
+        $marker = 'LOCATOR-HAPPY-PATH-MARKER-' + [guid]::NewGuid().ToString('N')
+        $proj = Join-Path $h 'projects' 'C--only-repo'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $line = (@{ type = 'user'; message = @{ role = 'user'; content = $marker } } |
+                 ConvertTo-Json -Compress)
+        Set-Content -LiteralPath (Join-Path $proj 'happy-session.jsonl') -Value $line
+        $r = Invoke-Locate -BridgeHome $h -ConfigDir $h -SessionId 'happy-session'
+        $r.Code | Should -Be 0
+        $json = $r.Text | ConvertFrom-Json
+        $json.render | Should -Match $marker
+    }
 }

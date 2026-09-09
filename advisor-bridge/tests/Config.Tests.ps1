@@ -3,7 +3,8 @@
 $ErrorActionPreference = 'Stop'
 
 BeforeAll {
-    $script:Script = Join-Path $PSScriptRoot '..' 'scripts' 'advisor-bridge.ps1'
+    $script:Script   = Join-Path $PSScriptRoot '..' 'scripts' 'advisor-bridge.ps1'
+    $script:Fixtures = Join-Path $PSScriptRoot 'fixtures'
 
     # The parameter is -BridgeHome, NOT -Home. `$HOME` is a PowerShell automatic
     # variable with Options `ReadOnly, AllScope`, and AllScope propagates it into
@@ -111,6 +112,38 @@ Describe 'enabled gate' {
         $r = Invoke-Bridge -BridgeHome $h
         $r.Code | Should -Be 1
         $r.Text | Should -Match 'disabled or unreadable config'
+    }
+}
+
+Describe 'enabled gate lets a valid config through' {
+    # Every numeric test above already uses `enabled: true`, but each asserts
+    # only a NEGATIVE text match (`Should -Not -Match 'wide'` /
+    # `'Cannot convert'`). A gate that is falsely CLOSED - one that fails
+    # every config, valid or not - satisfies both of those negatives just as
+    # well as a correctly-open gate: the refusal text
+    # ("disabled or unreadable config") matches neither pattern. Nothing above
+    # this Describe block would fail if `-not $cfgRaw.enabled` were replaced
+    # with a tautology like `$true`. This test is the positive control: a
+    # genuinely valid `enabled: true` config, with a persona and a real
+    # transcript in place, must reach `-DryRun` output at exit 0 - which is
+    # the first point in the whole pipeline where success becomes observable
+    # on stdout at all.
+    It 'reaches -DryRun output at exit 0 on a valid enabled config' {
+        $h = Join-Path ([System.IO.Path]::GetTempPath()) ("ab-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $h -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $h 'advisor-bridge.json') -Value '{"enabled": true}'
+        Set-Content -LiteralPath (Join-Path $h 'advisor-bridge-persona.md') -Value 'be terse'
+        $proj = Join-Path $h 'projects' 'C--fixture'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Copy-Item (Join-Path $script:Fixtures 'basic.jsonl') (Join-Path $proj 'fix-session.jsonl')
+        $out = & pwsh -NoProfile -Command "
+            `$env:CLAUDE_CONFIG_DIR = '$h'
+            `$env:CLAUDE_CODE_SESSION_ID = 'fix-session'
+            & '$script:Script' -ClaudeHome '$h' -DryRun
+            exit `$LASTEXITCODE" 2>&1
+        $LASTEXITCODE | Should -Be 0
+        $json = ($out -join "`n") | ConvertFrom-Json
+        $json.turns_rendered | Should -Be 2
     }
 }
 
