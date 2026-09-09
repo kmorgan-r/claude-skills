@@ -80,9 +80,14 @@ Describe 'pre-spawn guard' {
     It 'refuses the injection seam outside a dry run' {
         # Exit 1, and no log row: the seam is rejected before anything is
         # attempted, so it is a wrapper refusal, not an untrustworthy result.
+        # timeoutSec: 5, not the 240s production default - the same belt
+        # Guard.Tests.ps1's New-FixtureHome carries: if a refactor ever moved
+        # -InjectEnvKey handling inside the -DryRun block so it were ignored
+        # rather than refused, this bounds the resulting real spawn to 5s
+        # instead of 240s before the assertions below fail loudly.
         $h = Join-Path ([System.IO.Path]::GetTempPath()) ("ab-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $h -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $h 'advisor-bridge.json') -Value '{"enabled": true}'
+        Set-Content -LiteralPath (Join-Path $h 'advisor-bridge.json') -Value '{"enabled": true, "timeoutSec": 5}'
         Set-Content -LiteralPath (Join-Path $h 'advisor-bridge-persona.md') -Value 'be terse'
         $proj = Join-Path $h 'projects' 'C--fixture'
         New-Item -ItemType Directory -Path $proj -Force | Out-Null

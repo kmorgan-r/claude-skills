@@ -61,6 +61,6 @@ Describe 'hook gating' {
         # "advisor-bridge-status.py", which a bare 'advisor-bridge' pattern
         # would match for the wrong reason.
         $out | Should -Match 'You have an advisor'
-        $out | Should -Match 'timeout'
+        $out | Should -Match 'timeout:\s*300000'
     }
 }
