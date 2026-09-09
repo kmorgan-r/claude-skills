@@ -215,12 +215,19 @@ if ($allTurns.Count -eq 0) {
     Fail "no user or assistant turns survived the filters in $transcriptPath`n  Nothing to advise on."
 }
 
+# Computed once, not inside New-Header: the budget block below can call
+# New-Header (via Build/Join-Render) dozens of times while searching for a
+# fitting elision count, and `git rev-parse` is a ~90ms process spawn - at
+# hundreds of Build calls that alone dominates render latency in front of a
+# paid interactive call. New-Header reads this script-scope variable instead
+# of shelling out itself; its own parameter list and output are unchanged.
+$gitBranch = try { (& git rev-parse --abbrev-ref HEAD 2>$null) } catch { $null }
+if (-not $gitBranch) { $gitBranch = '(not a git repo)' }
+
 function New-Header([int]$total, [int]$elided, [int]$skippedLines) {
-    $branch = try { (& git rev-parse --abbrev-ref HEAD 2>$null) } catch { $null }
-    if (-not $branch) { $branch = '(not a git repo)' }
     @(
         "cwd: $((Get-Location).Path)"
-        "branch: $branch"
+        "branch: $gitBranch"
         "caller model: $($env:ANTHROPIC_DEFAULT_OPUS_MODEL ?? '(unknown)')"
         "turns: $total"
         "elided: $elided"
@@ -294,14 +301,46 @@ function Build([hashtable]$truncate, [int]$elidedCount) {
 
 $truncate = @{}
 
-# Step 3: drop middle turns oldest-first, one at a time, stopping the instant
-# the render fits - a transcript that already fits under $charBudget elides
-# nothing at all, and $elided ends at 0.
+# Step 3: drop middle turns oldest-first, stopping at the MINIMUM elision
+# count that fits - a transcript that already fits under $charBudget elides
+# nothing at all, and $elided ends at 0. Render length is monotonically
+# non-increasing in $elided (each step removes one turn body and, once,
+# adds a short marker), so the minimum fitting count can be found by binary
+# search over [0, $midCount] instead of a linear scan: a linear scan calls
+# Build once per elision considered, each Build re-joining a shrinking body
+# list, which is O(midCount) work per call and O(midCount^2) total - at 800
+# middle turns that was 82s dominated by ~90ms-per-call git spawns (fixed
+# above) plus tens of seconds of pure string-rejoin cost. Binary search cuts
+# the call count to ~log2(midCount), and still lands on the exact same
+# $elided the linear scan would have found, because it is searching for the
+# same leftmost-fitting point in a monotonic sequence, not merely a
+# sufficient one.
 $elided   = 0
 $rendered = Build $truncate $elided
-while ($rendered.Length -gt $charBudget -and $elided -lt $midCount) {
-    $elided++
-    $rendered = Build $truncate $elided
+if ($rendered.Length -gt $charBudget -and $midCount -gt 0) {
+    $atFloor = Build $truncate $midCount
+    if ($atFloor.Length -gt $charBudget) {
+        # Even eliding every middle turn doesn't fit - land at the full
+        # floor state and fall through to steps 4-6, exactly as a linear
+        # scan that never found a fit before reaching $midCount would.
+        $elided   = $midCount
+        $rendered = $atFloor
+    } else {
+        $lo = 0
+        $hi = $midCount
+        while ($lo -lt $hi) {
+            # [Math]::Floor, not a bare [int] cast: PowerShell's [int] cast on
+            # a double uses round-half-to-even, not truncation - [int]1.5 is
+            # 2, not 1. With $lo=1, $hi=2 that makes $mid equal to $hi rather
+            # than strictly between $lo and $hi, so a fitting Build($mid)
+            # leaves $hi unchanged and the loop never terminates. Floor
+            # guarantees $lo -le $mid -lt $hi whenever $lo -lt $hi.
+            $mid = [int][Math]::Floor(($lo + $hi) / 2.0)
+            if ((Build $truncate $mid).Length -le $charBudget) { $hi = $mid } else { $lo = $mid + 1 }
+        }
+        $elided   = $lo
+        $rendered = Build $truncate $elided
+    }
 }
 
 # Step 4: truncate the tail window oldest-first, down to the first user message

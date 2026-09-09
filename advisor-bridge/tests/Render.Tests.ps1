@@ -154,15 +154,21 @@ Describe 'budget enforcement' {
     # (or step 5) already fires, so the first message is gone from the render
     # in a CORRECT implementation too. A budget where step 4 fires but step 6
     # does not is the only place order is observable - empirically, that band
-    # for long.jsonl is charBudget in [3243, 6884]: below 3243 step 6 starts
-    # truncating the first message even in the correct cut-last order, and at
-    # or above 6885 the floor state (first message + 12 tail turns, all
-    # elided down to that) already fits, so no truncation step runs at all.
-    # 6000 sits in the middle of that band with roughly 900 chars of headroom
-    # on the high side and 2750 on the low side. A first-cut-first
-    # implementation loses FIRST-MESSAGE-MARKER-END here even though
-    # [truncated] is present, because it burns the first message down before
-    # ever reaching the tail window.
+    # for long.jsonl was measured as charBudget in [3243, 6884] on the machine
+    # and checkout this was derived on: below 3243 step 6 starts truncating
+    # the first message even in the correct cut-last order, and at or above
+    # 6885 the floor state (first message + 12 tail turns, all elided down to
+    # that) already fits, so no truncation step runs at all. These exact
+    # numbers are NOT portable - New-Header embeds cwd and the git branch name
+    # in every render, so both edges shift by however much a different
+    # checkout path or branch name changes the header's length. 6000 sits in
+    # the middle of that band with roughly 900 chars of headroom on the high
+    # side and 2750 on the low side, which is margin enough to absorb a
+    # realistic header-length difference on another machine or branch without
+    # re-deriving the band. A first-cut-first implementation loses
+    # FIRST-MESSAGE-MARKER-END here even though [truncated] is present,
+    # because it burns the first message down before ever reaching the tail
+    # window.
     It 'cuts the first user message LAST, not first, when the tail window alone forces truncation' {
         $r = Render-Fixture 'long.jsonl' -Config @{ charBudget = 6000 }
         $r.render | Should -Match '\[truncated\]'
