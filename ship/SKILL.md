@@ -665,10 +665,18 @@ P0 does. Then:
 
 **Cutting the implementation worktree.**
 ```bash
-WT="$(dirname "$PWD")/ship-wt/$(basename "$PWD")"   # absolute, sibling of the primary tree
+ROOT="$(pwd -W 2>/dev/null || pwd)"                  # NATIVE path, not MSYS /c/...
+WT="$(dirname "$ROOT")/ship-wt/$(basename "$ROOT")"  # absolute, sibling of the primary tree
 mkdir -p "$(dirname "$WT")"
 git worktree add --detach "$WT" HEAD
 ```
+`pwd -W` is load-bearing, not decoration: `$PWD` in Git Bash is `/c/Users/…`,
+the wrapper is PowerShell, and `Test-Path -LiteralPath '/c/Users/…'` is `False`
+— so a `-Cwd` built from `$PWD` fails preflight with `cwd not found` and every
+task falls back to Anthropic. That is this bug again wearing a different reason
+code. `git` accepts either form, which is exactly why the mistake would survive
+worktree creation and only surface at dispatch.
+
 `--detach`, never the branch: `feat/<slug>` is checked out in THIS tree and git
 refuses a second checkout of it, and First action re-checks `git branch
 --show-current` against state `branch` on every invoke — so the conductor cannot
@@ -709,19 +717,25 @@ tier; never promote a worker-shaped task to a larger model because the worker wa
 missing.
 
 **Dispatching into it**, per task, in this order:
-1. `git -C "$WT" reset --hard HEAD` — HEAD as it stands in THIS tree. Tasks that
-   ran on Anthropic committed here, and the worker must start from the real tip.
-2. Record `WT_BASE=$(git -C "$WT" rev-parse HEAD)`, write the brief, and dispatch
-   per `ollama-workers`' Dispatch contract with `-Cwd "$WT"`. The brief's
-   `Work from:` line must name `$WT` too — a brief naming the primary tree while
-   `-Cwd` names the worktree sends a worker looking for files it cannot see.
+1. `TIP=$(git rev-parse HEAD)` — evaluated HERE, in the conductor's tree — then
+   `git -C "$WT" reset --hard "$TIP"`. **Never a bare `HEAD` under `-C`**: `-C`
+   rebinds `HEAD` to the worktree's own detached commit, so `reset --hard HEAD`
+   there discards uncommitted edits and re-syncs nothing. Tasks that ran on
+   Anthropic committed in this tree, and the worker must start from the real tip.
+2. Write the brief and dispatch per `ollama-workers`' Dispatch contract with
+   `-Cwd "$WT"`. The brief's `Work from:` line must name `$WT` too — a brief
+   naming the primary tree while `-Cwd` names the worktree sends a worker
+   looking for files it cannot see.
 3. On a `done` verdict: `git merge --ff-only $(git -C "$WT" rev-parse HEAD)`. It
-   is always a fast-forward, because the worktree started at this tree's tip and
-   only added commits. If it is not, or if the worktree HEAD never moved off
-   `$WT_BASE`, the task produced nothing usable — treat it as a failed task on
+   is always a fast-forward, because step 1 put the worktree on `$TIP` and the
+   worker only added commits. If it is not, or if the worktree HEAD never moved
+   off `$TIP`, the task produced nothing usable — treat it as a failed task on
    SDD's normal fix path in this tree, not as a routing decision.
-4. On an `escalate` verdict (exit 2): do NOT merge. Partial commits are exactly
-   what an escalation may have left behind. `git -C "$WT" reset --hard HEAD` and
+4. On an `escalate` verdict (exit 2): do NOT merge, and discard what it left —
+   `git -C "$WT" reset --hard "$TIP"`, the tip from step 1 and again never a bare
+   `HEAD`. Partial commits are exactly what an escalation leaves behind, and
+   leaving them means the NEXT task's worker builds on top of them and step 3
+   fast-forwards them into the branch as if they had been reviewed. Then
    re-dispatch the task to an Anthropic implementer in this tree — the ladder has
    one rung, ollama → Anthropic, never a larger ollama model.
 
