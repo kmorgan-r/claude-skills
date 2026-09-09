@@ -3,14 +3,17 @@ $ErrorActionPreference = 'Stop'
 
 # advisor-bridge/tests/fixtures/build.ps1 — run once, output committed.
 #
-# Synthesizes the seven fixtures used by Tasks 3-7 from the RECORDED SHAPES in
+# Synthesizes the eight fixtures used by Tasks 3-7 from the RECORDED SHAPES in
 # SCHEMA.md. Nothing in this script reads, copies, or samples a real transcript.
 # Every session id, path, marker string, and filler sentence below is invented.
 #
 # $side is deliberately UNTYPED and three-state: $true, $false, or $null meaning
 # "omit the key entirely". The omitted-key record is the only thing that proves
-# the renderer's rule is `-ne $true` rather than `-eq $false`, and a [bool]
-# parameter cannot express it - $null would coerce to $false and write the key.
+# the renderer keeps a record unless isSidechain is exactly `$true` (implemented
+# as `-eq $true` guarded by `continue`, not `-eq $false` and not `-ne $true`
+# written directly as the keep condition - see the renderer's own comment for
+# why), and a [bool] parameter cannot express the omitted-key case - $null
+# would coerce to $false and write the key.
 #
 # $content is likewise untyped so a fixture can carry a bare STRING as
 # message.content, not only a block array. Claude Code writes plain-string
@@ -137,5 +140,19 @@ $empty = @(
     (Rec 'attachment' @((Text 'Third invented attachment-only record.')))
 )
 $empty | Set-Content -Path (Join-Path $fixturesDir 'empty.jsonl') -Encoding utf8NoBOM
+
+# ---------------------------------------------------------------------------
+# leading-assistant.jsonl — an assistant record at record 0, with no user
+# turn before it (e.g. an injected compact summary), followed by one ordinary
+# user/assistant exchange. Proves $firstUserIdx is subtracted from
+# $turnsRendered so leading assistant-only turns are not silently dropped
+# from the count.
+# ---------------------------------------------------------------------------
+$leadingAssistant = @(
+    (Rec 'assistant' @(Text 'Leading assistant turn with no user turn before it - e.g. an injected compact summary at record 0.'))
+    (Rec 'user'      @(Text 'First real user turn.'))
+    (Rec 'assistant' @(Text 'Reply to the first user turn.'))
+)
+$leadingAssistant | Set-Content -Path (Join-Path $fixturesDir 'leading-assistant.jsonl') -Encoding utf8NoBOM
 
 Write-Host "Fixtures written to $fixturesDir"

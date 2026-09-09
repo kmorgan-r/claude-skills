@@ -67,7 +67,7 @@ another, do not switch silently. Make one reconciling call naming the conflict.
 |---|---|---|
 | 0 | Advice on stdout | Read it |
 | 1 | The wrapper refused before spawning — disabled, no session id, no transcript, missing persona, empty render | Read the message; it names the remedy |
-| 2 | The call was attempted and its result is not trustworthy — timeout, child error, or a guard tripped | Do NOT retry blindly; a model-guard trip means something other than the intended advisor answered |
+| 2 | The result is not trustworthy — either the pre-spawn environment guard refused before anything was spawned, or the call was attempted and a timeout, child error, or the post-run guard tripped | Do NOT retry blindly; a model-guard trip means something other than the intended advisor answered |
 
 A guard trip discards the reply rather than printing it. That is the point: the
 failure this bridge exists to prevent — the local model answering in the

@@ -189,8 +189,16 @@ never there.
 Keep records where `type` is `user` or `assistant` **and** `isSidechain` is not
 `true`. Drop everything else.
 
-`-ne $true`, not `-eq $false`: a record that omits the field entirely is a main-
-agent record and must be kept, and `isSidechain -eq $false` would drop it.
+Implement the drop side as `if ($rec.isSidechain -eq $true) { continue }`, not
+`if ($rec.isSidechain -ne $true) { keep }`. `-eq $false` is ruled out as the
+drop condition because a record that omits the field entirely is a main-agent
+record and must be kept, and `isSidechain -eq $false` would drop it. Writing
+the keep side directly as `-ne $true` has its own hazard: PowerShell's `-ne`,
+like `-eq`, filters rather than compares when the left-hand side is an array,
+so an array-valued `isSidechain` would turn `-ne $true` into an empty, falsy
+array and wrongly drop the record. `-eq $true` guarded by `continue` hits the
+same array case but fails open instead: the `continue` is skipped and the
+record is kept.
 
 This filter is doing more work than it appears. In a measured two-turn Ollama
 session the file was 261 KB, of which `attachment` records — hook output,
@@ -257,8 +265,13 @@ the easy mistake.
 Then add only: `PATH`, `PATHEXT`, `COMSPEC`, `USERPROFILE`, `HOME`, `TEMP`,
 `SystemRoot`, `APPDATA`, `LOCALAPPDATA`, and `CLAUDE_EFFORT=xhigh`.
 
-`PATHEXT` and `COMSPEC` are on the list because `claude` on Windows is commonly
-a `.cmd` shim, and a shim launched with `UseShellExecute = $false` needs both.
+`PATHEXT` and `COMSPEC` are on the list as a defence-in-depth hedge, not
+because the implementation's own spawn can be a `.cmd`/`.bat` shim today —
+its resolution step refuses that shape outright, falling back to a
+same-directory `.exe` or failing closed, rather than launching it. They stay
+on the whitelist in case that guard is ever weakened or bypassed by a future
+change, at no cost today; removing them would only remove a hedge, not add
+safety.
 
 A whitelist, not a blacklist of `ANTHROPIC_*` vars to unset. A blacklist is one
 Ollama release away from missing a newly-exported variable, and the symptom of
@@ -517,9 +530,10 @@ this result" as the post-run guard.
 
 **Timeout.** The script kills the child at `timeoutSec` (default 240) and exits
 2. The kill must take the **process tree**: `claude` on Windows launches a node
-child, and killing only the parent leaves it holding the pipe. Redirect files
-are removed in a `finally`, matching the create/remove pairing at
-`ollama-worker.ps1:386,410`, so a timeout does not leak temp files.
+child, and killing only the parent leaves it holding the pipe. There are no
+redirect files to clean up here: stdout and stderr are drained with
+`ReadToEndAsync()` against in-memory pipes, not files on disk, so a timeout
+leaks no temp files by construction rather than by a `finally` removing them.
 
 Without its own timeout the only limit is the caller's Bash-tool timeout, which
 kills the wrapper too — no exit code, no log row, and no way to tell a hung call
@@ -729,7 +743,7 @@ them:
 
 - Attachment filter: `attachment` records dropped, `user`/`assistant` kept.
 - Sidechain filter: `isSidechain: true` dropped; **a record with no
-  `isSidechain` field at all is KEPT** (the `-ne $true` rule).
+  `isSidechain` field at all is KEPT** (kept unless `isSidechain -eq $true`).
 - Per-block caps: `thinking` at 600, `tool_use` input at 800, `tool_result` at
   `maxToolResultChars`, asserted both mid-transcript and **inside the last 12
   turns**. The cap applies everywhere, and only the tail-window case proves it.
@@ -781,14 +795,21 @@ leaked.
 
 **Model guard** — `-EnvelopeFile` with a canned envelope whose `modelUsage`
 names a non-configured model: assert exit 2, `verdict: "model_guard"`, a log row
-written, and **nothing printed to stdout**. Then a canned envelope with *two*
-models including the right one: assert it also trips (set equality, not
-membership). Then a canned envelope with `modelUsage` absent entirely: assert it
-trips rather than passing on a `$null` comparison.
+written, and **nothing printed to stdout**. Then a canned envelope pairing the
+configured model with a second, real *non-haiku* Anthropic model — the shape a
+fallback or a retry against a different model produces: assert it also trips
+(membership alone is not enough). A two-key envelope of `<model> +
+claude-haiku-<snapshot>` is **not** a valid trip fixture for this case: `###
+Guards` above and **Captured shape** found that shape is what a NORMAL,
+correctly-routed call produces, so it must pass, not trip. Then a canned
+envelope with `modelUsage` absent entirely: assert it trips rather than
+passing on a `$null` comparison.
 
 **Timeout** — `-TimeoutSec 2` against a stub that sleeps 10: assert exit 2,
-`verdict: "timeout"`, a log row with `null` token/cost fields and a real
-`duration_ms`, no orphaned child process, and no leftover temp files.
+`verdict: "timeout"`, a log row with `null` token/cost fields, a real
+`duration_ms`, and no orphaned child process. (No temp-file cleanup to assert
+here: stdout/stderr are drained as in-memory async pipes, not redirected to
+files.)
 
 **Log row** — assert the appended JSONL line parses and carries all twelve
 documented fields on both the success and the timeout paths.

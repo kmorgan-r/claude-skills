@@ -116,13 +116,17 @@ if (-not $claudeExe) {
 # The persona is arbitrary user-editable markdown and editing it is this
 # project's documented iteration loop, so `&`, `|`, `^`, `>` or `%VAR%` in a
 # persona would become live shell syntax on the command line of a paid
-# process. `npm install -g` commonly puts a .cmd shim ahead of any real .exe
-# on PATH, so this is not a theoretical shape.
+# process.
 #
-# A same-directory sibling .exe is a resolution, not a guess - it is the
-# real binary the shim wraps, sitting right next to it. Anything past that
-# (searching other directories, trying other names) would be inventing a
-# resolution scheme the Global Constraints forbid; fail closed instead.
+# Under the default PATHEXT order (.COM;.EXE;.BAT;.CMD;...), Get-Command
+# already prefers a same-directory .exe over a .cmd/.bat, and an npm-style
+# shim directory has no sibling .exe at all - so this branch is not reachable
+# through either of those two shapes. It is a defence for a NON-default
+# PATHEXT ordering (.CMD moved ahead of .EXE, or .EXE dropped from PATHEXT
+# entirely), the one case where Get-Command could still hand back a shim with
+# a real .exe sitting right next to it. Anything past that (searching other
+# directories, trying other names) would be inventing a resolution scheme the
+# Global Constraints forbid; fail closed instead.
 if ($claudeExe -match '\.(cmd|bat)$') {
     $siblingExe = [System.IO.Path]::ChangeExtension($claudeExe, '.exe')
     if (Test-Path -LiteralPath $siblingExe) {
@@ -366,18 +370,24 @@ $truncate = @{}
 
 # Step 3: drop middle turns oldest-first, stopping at the MINIMUM elision
 # count that fits - a transcript that already fits under $charBudget elides
-# nothing at all, and $elided ends at 0. Render length is monotonically
-# non-increasing in $elided (each step removes one turn body and, once,
-# adds a short marker), so the minimum fitting count can be found by binary
-# search over [0, $midCount] instead of a linear scan: a linear scan calls
-# Build once per elision considered, each Build re-joining a shrinking body
-# list, which is O(midCount) work per call and O(midCount^2) total - at 800
-# middle turns that was 82s dominated by ~90ms-per-call git spawns (fixed
-# above) plus tens of seconds of pure string-rejoin cost. Binary search cuts
-# the call count to ~log2(midCount), and still lands on the exact same
-# $elided the linear scan would have found, because it is searching for the
-# same leftmost-fitting point in a monotonic sequence, not merely a
-# sufficient one.
+# nothing at all, and $elided ends at 0. The fits-under-budget predicate is
+# monotonic (once true, stays true) across [1, $midCount]: from $elided=1
+# onward every step removes one turn body with nothing added back, so render
+# length strictly decreases. It is NOT monotonic across the 0->1 step itself
+# - that step also adds the "[N turns elided]" marker for the first time,
+# which can outweigh the body it removes - but binary search only reaches
+# this branch once Build(0) is already confirmed over budget, so that edge
+# is never what it is deciding between. So the minimum fitting count can be
+# found by binary search over [0, $midCount] instead of a linear scan: a
+# linear scan calls Build once per elision considered, each Build re-joining
+# a shrinking body list, which is O(midCount) work per call and
+# O(midCount^2) total - at 800 middle turns that was 82s dominated by
+# ~90ms-per-call git spawns (fixed above) plus tens of seconds of pure
+# string-rejoin cost. Binary search cuts the call count to ~log2(midCount),
+# and still lands on the exact same $elided the linear scan would have
+# found, because it is searching for the same leftmost-fitting point in a
+# predicate that is monotonic on [1, $midCount], not merely a sufficient
+# one.
 $elided   = 0
 $rendered = Build $truncate $elided
 if ($rendered.Length -gt $charBudget -and $midCount -gt 0) {
@@ -459,8 +469,12 @@ $charsSent     = $rendered.Length
 # Ollama release away from missing a newly-exported variable, and the symptom of
 # that miss is GLM answering in the advisor's voice - which reads as success.
 #
-# PATHEXT and COMSPEC are on the list because `claude` on Windows is commonly a
-# .cmd shim, and a shim launched with UseShellExecute = $false needs both.
+# PATHEXT and COMSPEC are on the list as a defence-in-depth hedge, not because
+# this script's own spawn can be a .cmd/.bat shim today - the resolution guard
+# above already refuses that shape outright (falls back to a same-directory
+# .exe, or fails closed) rather than launching it. They stay on the whitelist
+# in case that guard is ever weakened or bypassed by a future change, at no
+# cost today; removing them would only remove a hedge, not add safety.
 $ENV_WHITELIST = @('PATH','PATHEXT','COMSPEC','USERPROFILE','HOME','TEMP',
                    'SystemRoot','APPDATA','LOCALAPPDATA','CLAUDE_EFFORT')
 
