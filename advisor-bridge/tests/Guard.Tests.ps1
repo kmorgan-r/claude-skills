@@ -42,6 +42,124 @@ BeforeAll {
             Home = $h
         }
     }
+
+    # Compiled once here (script scope, not the 'timeout' Describe's own scope)
+    # so both the timeout test and the spawn-path coverage below - which needs
+    # the exact same "real .exe, not a .cmd/.bat" stub for the same
+    # Get-ClaudePath reason documented in the 'timeout' Describe - can use it
+    # without compiling twice.
+    $script:StubDir = Join-Path ([System.IO.Path]::GetTempPath()) "ab-bin-$([guid]::NewGuid())"
+    New-Item -ItemType Directory -Path $script:StubDir -Force | Out-Null
+    $csc = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    if (-not (Test-Path -LiteralPath $csc)) {
+        $csc = Join-Path $env:SystemRoot 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+    }
+    if (-not (Test-Path -LiteralPath $csc)) {
+        throw "csc.exe not found - cannot build the timeout/spawn test stub executable"
+    }
+    $src = Join-Path $script:StubDir 'stub.cs'
+    Set-Content -LiteralPath $src -Value @'
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Reflection;
+
+class Stub {
+    // Mode is read from a "mode.txt" file dropped next to this exe, not an
+    // argument or env var: advisor-bridge.ps1 builds the child's own
+    // ArgumentList and Environment (the whitelist-then-clear pattern) itself,
+    // so the test cannot inject either one through the real spawn path
+    // without changing production code. A file beside the exe is invisible to
+    // both.
+    static int Main() {
+        string dir  = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        string path = Path.Combine(dir, "mode.txt");
+        string mode = File.Exists(path) ? File.ReadAllText(path).Trim() : "hang";
+
+        switch (mode) {
+            case "orphan":
+                // Start a grandchild holding an inherited duplicate of this
+                // process's stdio handles, then exit immediately WITHOUT
+                // waiting - mirrors claude.exe exiting while its node child
+                // still holds the pipe. Exercises the DRAIN bound, not the
+                // WaitForExit(timeoutSeconds) bound "hang" below exercises.
+                StartPing(wait: false);
+                return 0;
+
+            case "envelope":
+                // Drain stdin fully first so the parent's WriteAsync always
+                // completes - this mode is about the ENVELOPE PARSE on a real
+                // spawn, not the stdin-write race "noreadstdin" exercises.
+                Console.In.ReadToEnd();
+                Console.Out.Write("{\"type\":\"result\",\"is_error\":false,\"result\":\"SECRET-ADVICE-BODY\",\"modelUsage\":{\"claude-fable-5-1\":{\"outputTokens\":42}}}\n");
+                Console.Out.Flush();
+                return 0;
+
+            case "nonzero":
+                Console.In.ReadToEnd();
+                return 1;
+
+            case "noreadstdin":
+                // Exit immediately without ever reading stdin, to force the
+                // parent's WriteAsync to fault on a broken pipe once a render
+                // larger than the OS pipe buffer is already pending. Needs a
+                // session fixture whose rendered size clears that buffer -
+                // see Guard.Tests.ps1's use of long.jsonl for this mode.
+                return 0;
+
+            default: // "hang": the original timeout-test shape - block until
+                     // the grandchild itself exits, so WaitForExit(timeoutSeconds)
+                     // is what has to time out, not the drain.
+                StartPing(wait: true);
+                return 0;
+        }
+    }
+
+    static void StartPing(bool wait) {
+        var psi = new ProcessStartInfo("ping", "-n 12 127.0.0.1");
+        psi.UseShellExecute = false;
+        var p = Process.Start(psi);
+        if (wait) { p.WaitForExit(); }
+    }
+}
+'@
+    $script:StubExe = Join-Path $script:StubDir 'claude.exe'
+    $compileOut = & $csc /nologo "/out:$script:StubExe" $src 2>&1
+    if (-not (Test-Path -LiteralPath $script:StubExe)) {
+        throw "failed to compile timeout/spawn test stub: $($compileOut -join "`n")"
+    }
+
+    function Set-StubMode {
+        param([string]$Mode)
+        Set-Content -LiteralPath (Join-Path $script:StubDir 'mode.txt') -Value $Mode
+    }
+
+    function Invoke-RealSpawn {
+        # Drives the ACTUAL spawn path (no -EnvelopeFile) against the compiled
+        # stub on PATH, standing in for `claude`. Safe to capture with
+        # `2>&1` for the non-orphan modes used here: none of them leaves a
+        # grandchild alive after the child exits, so there is no descendant
+        # holding a duplicate of this capture's own pipe open past the
+        # child's own exit - the hazard documented at length in the 'timeout'
+        # Describe below, which is why THAT test uses a raw, unredirected
+        # ProcessStartInfo instead of this helper.
+        param([string]$Mode, [string]$SessionFixture = 'basic.jsonl', [string[]]$Extra = @())
+        $h = New-FixtureHome -SessionFixture $SessionFixture
+        Set-StubMode $Mode
+        $out = & pwsh -NoProfile -Command "
+            `$env:PATH = '$script:StubDir;' + `$env:PATH
+            `$env:CLAUDE_CONFIG_DIR = '$h'
+            `$env:CLAUDE_CODE_SESSION_ID = 'fix-session'
+            & '$script:Script' -ClaudeHome '$h' $($Extra -join ' ')
+            exit `$LASTEXITCODE" 2>&1
+        $log = Join-Path $h 'advisor-bridge.log.jsonl'
+        [pscustomobject]@{
+            Code = $LASTEXITCODE
+            Text = ($out -join "`n")
+            Rows = if (Test-Path $log) { @(Get-Content $log | ForEach-Object { $_ | ConvertFrom-Json }) } else { @() }
+            Home = $h
+        }
+    }
 }
 
 Describe 'post-run model guard' {
@@ -76,6 +194,23 @@ Describe 'post-run model guard' {
         $r.Code | Should -Be 2
         $r.Rows[-1].verdict | Should -Be 'model_guard'
     }
+    It 'trips when the configured model is present but produced no output' {
+        # Presence alone is not proof of work: fable's own entry carries
+        # outputTokens: 0 while haiku carries 800 - haiku answered "in whole
+        # or in part" and it would ship under fable's name without this check.
+        $r = Invoke-WithEnvelope 'envelope-zero-output.json'
+        $r.Code | Should -Be 2
+        $r.Text | Should -Not -Match 'SECRET-ADVICE-BODY'
+        $r.Rows[-1].verdict | Should -Be 'model_guard'
+    }
+    It 'does not exempt a key merely shaped like the haiku prefix' {
+        # claude-haiku-evil-proxy-glm has the 13-char 'claude-haiku-' prefix
+        # but no version digit after it - the loose '^claude-haiku-' pattern
+        # (case-insensitive, unbounded suffix) would wrongly exempt it.
+        $r = Invoke-WithEnvelope 'envelope-fake-haiku.json'
+        $r.Code | Should -Be 2
+        $r.Rows[-1].verdict | Should -Be 'model_guard'
+    }
     It 'passes the right model through and marks the row as canned' {
         # envelope-ok.json carries the REAL shape observed in Task 7's live
         # capture: the configured model plus a claude-haiku-* housekeeping
@@ -107,6 +242,17 @@ Describe 'the other terminal verdicts' {
     It 'reports no_envelope when nothing parses as a result envelope' {
         $r = Invoke-WithEnvelope 'envelope-malformed.json'
         $r.Code | Should -Be 2
+        $r.Rows[-1].verdict | Should -Be 'no_envelope'
+    }
+    It 'reports no_envelope when result is empty, not ok with a blank reply' {
+        # A clean parse with is_error:false and a valid modelUsage is not
+        # enough - an empty result is not a reply, and exit 0 is documented as
+        # "advice returned". Left unchecked this exits 0 with zero bytes on
+        # stdout while logging verdict 'ok', which reports a successful
+        # billed call for one that returned nothing to act on.
+        $r = Invoke-WithEnvelope 'envelope-empty-result.json'
+        $r.Code | Should -Be 2
+        $r.Text | Should -Not -Match 'SECRET-ADVICE-BODY'
         $r.Rows[-1].verdict | Should -Be 'no_envelope'
     }
 }
@@ -159,47 +305,15 @@ Describe 'turnsRendered and elided count leading non-user turns correctly' {
 }
 
 Describe 'timeout' {
-    BeforeAll {
-        # A real .exe, not a .cmd/.bat: Task 6's Get-ClaudePath refuses a shell
-        # shim outright (BatBadBut / CVE-2024-1874 guard - see Env.Tests.ps1
-        # "executable resolution") and falls back to it only when a sibling
-        # .exe exists next to it, which none does here. A .cmd stub would never
-        # reach the spawn path this test exists to exercise: it would exit 1
-        # "shell shim" before any timeout logic runs at all. Compiled with
-        # csc.exe, which ships with every Windows 10/11 install via the .NET
-        # Framework, so the suite stays offline and fetches nothing.
-        $script:StubDir = Join-Path ([System.IO.Path]::GetTempPath()) "ab-bin-$([guid]::NewGuid())"
-        New-Item -ItemType Directory -Path $script:StubDir -Force | Out-Null
-        $csc = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-        if (-not (Test-Path -LiteralPath $csc)) {
-            $csc = Join-Path $env:SystemRoot 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
-        }
-        if (-not (Test-Path -LiteralPath $csc)) {
-            throw "csc.exe not found - cannot build the timeout test's stub executable"
-        }
-        $src = Join-Path $script:StubDir 'stub.cs'
-        Set-Content -LiteralPath $src -Value @'
-using System.Diagnostics;
-class Stub {
-    static void Main() {
-        // A real grandchild, started after this stub launches - mirroring
-        // claude.exe's own node child on Windows, which is the process the
-        // orphan check below must prove Kill($true) actually reaches.
-        var psi = new ProcessStartInfo("ping", "-n 12 127.0.0.1");
-        psi.UseShellExecute = false;
-        var p = Process.Start(psi);
-        p.WaitForExit();
-    }
-}
-'@
-        $script:StubExe = Join-Path $script:StubDir 'claude.exe'
-        $compileOut = & $csc /nologo "/out:$script:StubExe" $src 2>&1
-        if (-not (Test-Path -LiteralPath $script:StubExe)) {
-            throw "failed to compile timeout stub: $($compileOut -join "`n")"
-        }
-    }
+    # Stub compilation lives in the top-level BeforeAll now (shared with the
+    # 'spawn path envelope acquisition' Describe below); the reasoning for why
+    # it must be a real .exe, not a .cmd/.bat, is there.
 
     It 'kills a slow child, exits 2, logs null cost and a real duration' {
+        # Explicit, not relied-on-as-default: pin the shared stub to "hang"
+        # regardless of what an earlier test in this run left in mode.txt, so
+        # this test's behavior does not depend on file order.
+        Set-StubMode 'hang'
         $h = New-FixtureHome
 
         # Not `& pwsh ... 2>&1`. .NET (the stub included) always starts child
@@ -258,6 +372,97 @@ class Stub {
         # Kill() leaves that grandchild running and holding the pipe, and every
         # assertion above still passes. This is the only check that catches it.
         # The stub's grandchild is `ping`, started after the run began.
+        Start-Sleep -Milliseconds 500
+        @(Get-Process -Name 'PING' -ErrorAction SilentlyContinue |
+            Where-Object { $_.StartTime -gt $start }).Count | Should -Be 0
+    }
+}
+
+Describe 'spawn path envelope acquisition' {
+    # The -EnvelopeFile seam above bypasses the real spawn path entirely: the
+    # -split / last-line-starting-with-'{' selection and its ConvertFrom-Json
+    # are only ever executed here, by driving the compiled stub as `claude`
+    # with no -EnvelopeFile at all.
+    It 'parses a real envelope off spawned stdout and runs it through the same guard as the seam' {
+        $r = Invoke-RealSpawn -Mode 'envelope'
+        $r.Code | Should -Be 0
+        $r.Text | Should -Match 'SECRET-ADVICE-BODY'
+        $r.Rows[-1].verdict | Should -Be 'ok'
+        # Not 'envelope-file': this row came from an actual child process, and
+        # the seam's own test above already pins that canned rows are always
+        # tagged so they can never be mistaken for a billed one.
+        $r.Rows[-1].source | Should -Not -Be 'envelope-file'
+    }
+
+    It 'reports child_error on a nonzero exit from a real spawn' {
+        $r = Invoke-RealSpawn -Mode 'nonzero'
+        $r.Code | Should -Be 2
+        $r.Text | Should -Not -Match 'SECRET-ADVICE-BODY'
+        $r.Rows[-1].verdict | Should -Be 'child_error'
+    }
+
+    It 'reports child_error when the child exits without ever reading stdin' {
+        # noreadstdin only forces a genuine broken-pipe fault (rather than a
+        # write that silently completes into the pipe buffer) once the render
+        # exceeds the OS pipe buffer - long.jsonl renders to ~20KB (checked via
+        # -DryRun's chars_sent), comfortably past the ~4-64KB anonymous-pipe
+        # buffer this needs to clear.
+        $r = Invoke-RealSpawn -Mode 'noreadstdin' -SessionFixture 'long.jsonl' -Extra @('-TimeoutSec', '15')
+        $r.Code | Should -Be 2
+        $r.Rows[-1].verdict | Should -Be 'child_error'
+    }
+
+    It 'bounds the stdout/stderr drain and reaps a grandchild left holding the pipe after the child exits' {
+        # This is Finding 1's own regression test. "orphan" mode is NOT "hang"
+        # mode: the stub here starts ping and returns immediately WITHOUT
+        # waiting for it, so $proc.WaitForExit(timeoutSeconds) succeeds almost
+        # instantly - claude.exe itself really did exit - and it is the
+        # UNBOUNDED stdout/stderr drain afterward that must be caught, not the
+        # spawn-level timeout the 'timeout' Describe above already covers.
+        #
+        # Same `2>&1`-false-pass hazard as the 'timeout' Describe: ping
+        # inherits a duplicate of any redirected pipe, so a raw, unredirected
+        # ProcessStartInfo + bare WaitForExit() is required here too - see the
+        # long comment on that test for the full mechanism.
+        Set-StubMode 'orphan'
+        $h = New-FixtureHome
+
+        $outerPsi = [System.Diagnostics.ProcessStartInfo]::new('pwsh')
+        $outerPsi.UseShellExecute = $false
+        $outerPsi.CreateNoWindow  = $true
+        foreach ($a in @('-NoProfile', '-File', $script:Script, '-ClaudeHome', $h, '-TimeoutSec', '2')) {
+            [void]$outerPsi.ArgumentList.Add($a)
+        }
+        $outerPsi.Environment.Clear()
+        foreach ($k in @('PATH','PATHEXT','COMSPEC','USERPROFILE','HOME','TEMP','SystemRoot','APPDATA','LOCALAPPDATA')) {
+            $v = [Environment]::GetEnvironmentVariable($k)
+            if ($null -ne $v) { $outerPsi.Environment[$k] = $v }
+        }
+        $outerPsi.Environment['PATH']                   = "$($script:StubDir);$($outerPsi.Environment['PATH'])"
+        $outerPsi.Environment['CLAUDE_CONFIG_DIR']      = $h
+        $outerPsi.Environment['CLAUDE_CODE_SESSION_ID'] = 'fix-session'
+
+        $start  = Get-Date
+        $outer  = [System.Diagnostics.Process]::Start($outerPsi)
+        $exited = $outer.WaitForExit(20000)
+
+        $exited | Should -BeTrue -Because 'a bounded drain must let the wrapper exit near its own timeout, not hang for pings ~11s lifetime'
+        $outer.ExitCode | Should -Be 2
+        $row = (Get-Content (Join-Path $h 'advisor-bridge.log.jsonl') | Select-Object -Last 1) | ConvertFrom-Json
+        # Both drains came back empty (nothing was ever written to stdout), so
+        # this classifies as no_envelope, not timeout: the spawn itself
+        # (WaitForExit) succeeded, only the post-exit drain had to be bounded.
+        $row.verdict     | Should -Be 'no_envelope'
+        $row.duration_ms | Should -BeGreaterThan 1500
+        # The discriminator: an unbounded GetAwaiter().GetResult() here blocks
+        # for ping's ~11s lifetime; a bounded Wait(timeoutSeconds*1000) returns
+        # at ~2s. 8000ms comfortably separates the two without being so tight
+        # that CI jitter trips it.
+        $row.duration_ms | Should -BeLessThan 8000
+
+        # The drain-timeout Kill($true) must reach the grandchild too, exactly
+        # as the spawn-timeout Kill($true) does in the 'timeout' Describe -
+        # otherwise this fix would trade a hung wrapper for an orphaned ping.
         Start-Sleep -Milliseconds 500
         @(Get-Process -Name 'PING' -ErrorAction SilentlyContinue |
             Where-Object { $_.StartTime -gt $start }).Count | Should -Be 0

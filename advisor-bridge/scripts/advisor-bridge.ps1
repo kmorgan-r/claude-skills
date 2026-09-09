@@ -641,6 +641,14 @@ if ($EnvelopeFile) {
     # unconditionally would reclassify both timeout paths.
     if ($null -eq $envelope)              { $verdict = 'no_envelope' }
     elseif ($envelope.is_error -eq $true) { $verdict = 'child_error' }
+    # An envelope that parsed cleanly with is_error:false but an absent or
+    # empty/whitespace result is not a reply - it is nothing to act on. Left
+    # unchecked this exits 0 with zero bytes on stdout and logs verdict 'ok',
+    # which reports a successful billed call to the cost column for a call that
+    # returned no advice at all. Spec's exit-0 contract is "advice returned";
+    # this is the same "absent field must not silently pass" shape as the
+    # $null -eq $out check in the guard below, applied one field earlier.
+    elseif ([string]::IsNullOrWhiteSpace([string]$envelope.result)) { $verdict = 'no_envelope' }
 }
 else {
     $proc = [System.Diagnostics.Process]::Start($psi)
@@ -683,20 +691,30 @@ else {
     }
     else {
         $exitCode  = $proc.ExitCode
-        # FLAGGED, NOT FIXED: this GetResult() has no timeout of its own. Task 7's
-        # own timeout test demonstrated - not merely theorized - that a Windows
-        # child can leave a grandchild alive holding a duplicate handle to this
-        # process's end of the pipe (claude.exe -> node is the production shape;
-        # the test's compiled stub -> ping reproduced it directly), which keeps a
-        # redirected stream from reaching EOF until that grandchild exits on its
-        # own. Here $proc.WaitForExit() has ALREADY returned true, i.e. claude.exe
-        # itself exited cleanly - but if it left such a descendant behind, this
-        # line could still block past $timeoutSeconds with no further guard. The
-        # 8.3s real capture in the task-7 report drained without incident, so this
-        # is not reproduced against a genuine `claude` process, but the mechanism
-        # is proven, not assumed. Left for the reviewer rather than fixed here.
-        $stdoutRaw = $stdoutTask.GetAwaiter().GetResult()
-        $stderrRaw = $stderrTask.GetAwaiter().GetResult()
+        # $proc.WaitForExit() waits on the process handle only - it does not wait
+        # for the redirected streams to reach EOF. A Windows child can leave a
+        # grandchild alive holding a duplicate handle to this process's end of the
+        # pipe (claude.exe -> node is the production shape; the test's compiled
+        # stub -> ping reproduces it directly), which keeps ReadToEndAsync from
+        # completing until that grandchild exits on its own - potentially long
+        # past $timeoutSeconds, with claude.exe itself already having exited
+        # cleanly. Bound the drain the same way the spawn and stdin-write already
+        # are, and fault-guard it: a task can also complete faulted (not just slow),
+        # and Task.Wait/.Result then throws AggregateException, which an unguarded
+        # call here would let past $ErrorActionPreference = 'Stop' with no log row
+        # and no exit code. Either failure mode falls through to an empty string,
+        # which - like a genuinely silent child - classifies as no_envelope below:
+        # fail-closed, not a hang.
+        $stdoutRaw = try { if ($stdoutTask.Wait($timeoutSeconds * 1000)) { $stdoutTask.Result } else { '' } } catch { '' }
+        $stderrRaw = try { if ($stderrTask.Wait($timeoutSeconds * 1000)) { $stderrTask.Result } else { '' } } catch { '' }
+        # A drain that timed out or faulted means the process tree may still be
+        # holding pipes open (or is otherwise not fully gone) even though the
+        # tracked $proc handle exited. Kill($true) on an already-exited process is
+        # a harmless no-op for $proc itself; its purpose here is reaching any
+        # descendant left behind, so it does not outlive the wrapper's own exit.
+        if (-not $stdoutTask.IsCompletedSuccessfully -or -not $stderrTask.IsCompletedSuccessfully) {
+            try { $proc.Kill($true) } catch { }
+        }
         if ($stderrRaw) { [Console]::Error.Write($stderrRaw) }
 
         $line = $stdoutRaw -split "`n" | Where-Object { $_.TrimStart().StartsWith('{') } | Select-Object -Last 1
@@ -713,6 +731,13 @@ else {
         elseif ($envelope.is_error -eq $true) { $verdict = 'child_error' }
         elseif ($exitCode -ne 0)              { $verdict = 'child_error' }
         elseif ($null -eq $envelope)          { $verdict = 'no_envelope' }
+        # Same absent/empty-result check as the -EnvelopeFile seam above, kept in
+        # sync so that seam classifies exactly as this path does. Note the
+        # asymmetry with is_error/exitCode ahead of it is intended, not a
+        # seam divergence: a child that exits nonzero or reports is_error is a
+        # more specific failure than "the result field was blank", so those
+        # verdicts still take precedence over no_envelope here, same as above.
+        elseif ([string]::IsNullOrWhiteSpace([string]$envelope.result)) { $verdict = 'no_envelope' }
     }
 }
 $sw.Stop()
@@ -762,8 +787,30 @@ if ($envelope -and $verdict -in 'ok', 'child_error') {
     # (the sole key was never compared against $model at all). The explicit
     # `$used -notcontains $model` clause below is what actually catches it.
     $others      = @($used | Where-Object { $_ -ne $model })
-    $unexplained = @($others | Where-Object { $_ -notmatch '^claude-haiku-' })
-    if ($used -notcontains $model -or $unexplained.Count -gt 0) {
+    # Case-sensitive, and requires a version digit after the prefix: -notmatch is
+    # case-insensitive and an unbounded '^claude-haiku-' suffix would exempt any
+    # key merely shaped like the prefix - claude-haiku-evil-proxy-glm,
+    # CLAUDE-HAIKU-x - as if it were the real housekeeping call. -cnotmatch with
+    # \d after the prefix accepts only real snapshot ids (claude-haiku-4-5-...).
+    $unexplained = @($others | Where-Object { $_ -cnotmatch '^claude-haiku-\d' })
+
+    # Presence of the configured model's key is not proof it did the work - an
+    # entry with outputTokens 0 (or absent) while a haiku key carries real
+    # content means haiku answered "in whole or in part" and it shipped under
+    # the configured model's name, exactly the failure this guard exists to
+    # catch. $entry is $null when $model is not a key at all; the -contains
+    # check above already covers that shape, so this only refines the case
+    # where the key exists but is empty. -as [long] on a missing/non-numeric
+    # field yields $null, not 0 - and $null must trip, not pass silently, same
+    # as every other "absent means unproven, not innocent" check in this
+    # script. Use a plain > 0 threshold, not "at least as many as every other
+    # key": a legitimately terse reply can be shorter than haiku's ~11-token
+    # auto-title, and a comparative rule would false-trip that.
+    $entry = $null
+    if ($used -contains $model) { $entry = $envelope.modelUsage.PSObject.Properties[$model].Value }
+    $out = $entry.outputTokens -as [long]
+
+    if ($used -notcontains $model -or $unexplained.Count -gt 0 -or $null -eq $out -or $out -le 0) {
         $verdict = 'model_guard'
     }
 }
