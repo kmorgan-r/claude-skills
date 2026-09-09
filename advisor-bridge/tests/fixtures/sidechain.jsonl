@@ -1,0 +1,3 @@
+{"type":"user","isSidechain":true,"message":{"role":"user","content":[{"type":"text","text":"SIDECHAIN-MARKER: invented content of a sidechain-tagged turn a correct renderer must drop."}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"This invented user turn has no isSidechain key at all and must be kept."}]}}
+{"type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"This invented user turn has isSidechain explicitly false and must be kept."}]}}

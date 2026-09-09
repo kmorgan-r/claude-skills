@@ -1,0 +1,7 @@
+{
+  "enabled": false,
+  "model": "claude-fable-5-1",
+  "charBudget": 80000,
+  "maxToolResultChars": 2000,
+  "timeoutSec": 240
+}

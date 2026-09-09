@@ -13,15 +13,28 @@ backup if anything is lost. Run with -DryRun to see the plan without touching
 anything.
 #>
 [CmdletBinding()]
-param([switch]$DryRun)
+param([switch]$DryRun, [string]$ClaudeHome)
 
 $ErrorActionPreference = 'Stop'
 
 $src        = $PSScriptRoot
-$claudeHome = Join-Path $HOME '.claude'
+$claudeHome = if ($ClaudeHome) { $ClaudeHome } else { Join-Path $HOME '.claude' }
 $settings   = Join-Path $claudeHome 'settings.json'
 $state      = Join-Path $claudeHome 'ollama-workers.json'
 $overlay    = Join-Path $claudeHome 'ollama-settings.json'
+
+# Collected before any write; the verification below asserts each one survived.
+$existingCommands = @()
+if (Test-Path -LiteralPath $settings) {
+    try {
+        $pre = Get-Content -Raw -LiteralPath $settings | ConvertFrom-Json -AsHashtable
+        if ($pre.hooks -and $pre.hooks.ContainsKey('SessionStart')) {
+            $existingCommands = @(@($pre.hooks.SessionStart) | ForEach-Object { $_.hooks } |
+                ForEach-Object { $_.command } | Where-Object { $_ })
+        }
+    }
+    catch { throw "settings.json is not valid JSON: $settings" }
+}
 
 function Step([string]$message) { Write-Host "  $message" }
 
@@ -122,16 +135,34 @@ else {
                     $a = $after[$key]  | ConvertTo-Json -Depth 100 -Compress
                     if ($b -ne $a) { $lost.Add("changed '$key'") }
                 }
-                foreach ($cat in @($before.hooks.Keys)) {
-                    $b = $before.hooks[$cat] | ConvertTo-Json -Depth 100 -Compress
-                    $a = $after.hooks[$cat]  | ConvertTo-Json -Depth 100 -Compress
-                    # SessionStart is the one we appended to, so it must differ.
-                    if ($cat -eq 'SessionStart') { continue }
-                    if ($b -ne $a) { $lost.Add("changed hook '$cat'") }
+                # Guarded: a settings.json with no `hooks` key at all is ordinary -
+                # a file that only sets `model` is enough. Then $before.hooks is
+                # $null, @($null.Keys) yields a one-element array holding $null, and
+                # $before.hooks[$null] is a terminating error under
+                # $ErrorActionPreference = 'Stop', thrown AFTER the rewrite has
+                # landed and BEFORE the rollback below.
+                if ($before.hooks) {
+                    foreach ($cat in @($before.hooks.Keys)) {
+                        $b = $before.hooks[$cat] | ConvertTo-Json -Depth 100 -Compress
+                        $a = $after.hooks[$cat]  | ConvertTo-Json -Depth 100 -Compress
+                        # SessionStart is the one we appended to, so it must differ.
+                        if ($cat -eq 'SessionStart') { continue }
+                        if ($b -ne $a) { $lost.Add("changed hook '$cat'") }
+                    }
                 }
-                $written = @($after.hooks.SessionStart) | ForEach-Object { $_.hooks } |
-                    Where-Object { $_.command -like '*ollama-workers-status*' }
-                if (-not $written) { $lost.Add('SessionStart entry was not written') }
+                # Every pre-existing entry must survive, not just our own.
+                # advisor-bridge also appends here now, and whichever installer
+                # runs second is the one that can destroy the other's entry.
+                # Checking only for our own string would verify clean on a file
+                # that lost theirs.
+                $afterCommands = @(@($after.hooks.SessionStart) | ForEach-Object { $_.hooks } |
+                    ForEach-Object { $_.command } | Where-Object { $_ })
+                foreach ($cmd in $existingCommands) {
+                    if ($afterCommands -notcontains $cmd) { $lost.Add("dropped SessionStart entry '$cmd'") }
+                }
+                if (-not ($afterCommands | Where-Object { $_ -like '*ollama-workers-status*' })) {
+                    $lost.Add('SessionStart entry was not written')
+                }
             }
 
             if ($lost.Count) {

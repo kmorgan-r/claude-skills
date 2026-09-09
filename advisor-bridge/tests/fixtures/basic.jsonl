@@ -1,0 +1,3 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"This is an ordinary invented user turn for the basic fixture."}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"This is an ordinary invented assistant reply for the basic fixture."}]}}
+{"type":"attachment","message":{"role":"attachment","content":[{"type":"text","text":"ATTACHMENT-MARKER: invented hook-style payload a correct renderer must never emit."}]}}

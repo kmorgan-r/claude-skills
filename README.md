@@ -16,6 +16,7 @@ follows at runtime) plus any bundled scripts, references, and evals.
 | [`reviewing-plans`](./reviewing-plans) | Reviews a written implementation plan before execution: dispatches 2–5 domain-specific reviewer agents in parallel, consolidates findings, and applies approved fixes to the plan file. |
 | [`esg-longitudinal`](./esg-longitudinal) | Tracks a company's ESG / CSR / sustainability commitments over time using **free** public data: finds sustainability/annual report PDFs, extracts targets and metrics into a tidy time-series with source + period + verbatim quote per value, saves a timestamped snapshot, and diffs against earlier snapshots to surface what changed. Re-runnable next year; scales from one company toward tens of thousands. |
 | [`ollama-workers`](./ollama-workers) | Lets an Anthropic-model orchestrator hand short-turn implementer tasks to an Ollama cloud model (GLM, Kimi) running in a separate headless Claude Code process. `/ollama-workers on\|off\|status` is the whole interface; reviewers stay on Anthropic. **Windows-only** (PowerShell). |
+| [`advisor-bridge`](./advisor-bridge) | Lets a Claude Code session running on a non-Anthropic backend (`ollama launch claude` — GLM, Kimi) reach an Anthropic model for advice, by rendering the session's own transcript into a scrubbed `claude -p` child process. The built-in `advisor` tool is disabled there and would be GLM advising GLM anyway. **Windows-only** (PowerShell). |
 
 ## Install
 
@@ -209,3 +210,37 @@ cp -r find-cold-leads ~/.claude/skills/
   distinguishes "the worker was never usable in this repo" from "no task was a good
   fit" — a task that is never dispatched writes nothing otherwise. Calibrate `maxTurns`
   and the routing rubric from the run rows rather than from published benchmarks.
+### advisor-bridge
+- **The inverse of [`ollama-workers`](./ollama-workers).** That package spawns a child
+  *away* from Anthropic; this one spawns a child *back to* it. Same reason in both
+  cases: one Claude Code process serves exactly one endpoint, so reaching a second
+  model means a second process.
+- **Needs** Windows with PowerShell 7 (`pwsh`), the `claude` CLI on PATH with an
+  Anthropic login, and Python 3 for the SessionStart hook. Run
+  `./advisor-bridge/install.ps1` (`-DryRun` first) — a plain `cp -r` installs the skill
+  but not the engine script, the persona, the config seed, or the hook.
+- **Off by default, and invisible when off.** State lives in
+  `~/.claude/advisor-bridge.json` seeded `enabled: false`. The hook reads that config
+  *before* it checks the backend, so a disabled install costs no context; and the
+  wrapper enforces the same gate itself, exiting 1 before launching anything, so a call
+  on stale context after a compact cannot spend money.
+- **Two fail-closed guards.** Before spawning, the child's environment key set must
+  equal the whitelist exactly — not merely lack `ANTHROPIC_*`, which
+  `CLAUDE_CODE_SUBAGENT_MODEL` walks straight through. After the call, the configured
+  model must appear in the envelope's `modelUsage` and show it actually produced
+  output; any other key present must itself be Claude Code's own `claude-haiku-*`
+  housekeeping call (a real, correctly-routed reply carries one of those alongside the
+  configured model) — anything else discards the reply and exits 2. Without the second
+  guard the failure this package exists to prevent — the local model answering in the
+  advisor's voice — returns silently, formatted as advice.
+- **Costs $0.20–0.40 per call, every call.** Prompt caching matches an exact prefix and
+  the rendered transcript is one user message that differs every time, so only the
+  ~1.4 K persona amortizes. Read the `cost_usd` column of
+  `~/.claude/advisor-bridge.log.jsonl` rather than that estimate; rows carrying
+  `"source": "envelope-file"` are canned test runs and cost nothing.
+- **Tests:** `Invoke-Pester advisor-bridge/tests -Output Detailed` (needs Pester 5;
+  the Windows-bundled Pester 3 will not run them). Offline, deterministic, spends
+  nothing. The one paid end-to-end check is a documented manual procedure at
+  `advisor-bridge/tests/manual/e2e.md`, deliberately not a `*.Tests.ps1` file so no
+  automated glob or CI gate can bill it.
+- Invoke `/advisor-bridge on` once, then call it from an Ollama-backed session.

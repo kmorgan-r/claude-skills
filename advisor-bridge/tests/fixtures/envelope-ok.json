@@ -1,0 +1,12 @@
+{"type":"result","is_error":false,"result":"SECRET-ADVICE-BODY",
+ "modelUsage":{
+   "claude-fable-5-1":{"inputTokens":10,"outputTokens":60,"cacheReadInputTokens":0,
+     "cacheCreationInputTokens":1300,"webSearchRequests":0,"costUSD":0.03,
+     "contextWindow":1000000,"maxOutputTokens":64000,"thinkingTokens":50,
+     "canonicalModel":"claude-fable-5-1","provider":"firstParty","costBasis":"list"},
+   "claude-haiku-4-5-20251001":{"inputTokens":900,"outputTokens":10,"cacheReadInputTokens":0,
+     "cacheCreationInputTokens":0,"webSearchRequests":0,"costUSD":0.001,
+     "contextWindow":200000,"maxOutputTokens":32000,"thinkingTokens":0,
+     "canonicalModel":"claude-haiku-4-5","provider":"firstParty","costBasis":"list"}
+ },
+ "duration_ms":6000}
