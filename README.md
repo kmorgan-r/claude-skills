@@ -102,6 +102,11 @@ cp -r find-cold-leads ~/.claude/skills/
 - **P4 exit gate** runs the `lint` and `check:types` npm scripts *when the repo
   defines them* (absent scripts are skipped, not treated as failures) plus the
   change's own test files — so it works across repos without those scripts.
+- **Composes with [`ollama-workers`](./ollama-workers)** when it is installed and on:
+  P0 probes the directory and records the answer in state, and P4 cuts a short
+  sibling worktree to dispatch implementers into — the wrapper refuses a primary
+  checkout, which is all `/ship` ever runs in. Not installed or off is fine and
+  costs nothing; either way the route is written down rather than assumed.
 - Invoke `/ship` once; it runs phases P0–P7 hands-off.
 
 ### ship-fleet

@@ -20,7 +20,7 @@ any `/clear` or auto-compact via a state file.
 > Preserved during auto-compaction. After ANY compaction, immediately:
 > 1. Read `.claude-ship-state.json` (repo root).
 > 2. Resume at `phase` using `focus_next`.
-> 3. Preserve: `topic`, `branch`, `phase`, `status`, `pr`, `plan`, `blockers`, `db_gate`, `review_passes`, `repair`, `repair_enabled`.
+> 3. Preserve: `topic`, `branch`, `phase`, `status`, `pr`, `plan`, `blockers`, `db_gate`, `review_passes`, `repair`, `repair_enabled`, `worker_routing`.
 > If `phase == "fix-pr-reviews"`, the loop internals belong to fix-pr-reviews
 > (`.claude-pr-fix-state.json`) — defer to it; re-enter with `--loop --continue`.
 > If `status == "awaiting-db-gates"`, the P6.5 DB gate was deferred — surface
@@ -218,6 +218,7 @@ Repo-root JSON, gitignored (P0 adds the `.gitignore` entry), single active pipel
   "blockers": [],
   "test_paths": [],
   "db_gate": null,
+  "worker_routing": { "enabled": false, "dispatchable": false, "reason": "primary checkout", "route": "anthropic", "worktree": null },
   "review_passes": { "spec-review": 0, "plan-review": 0 },
   "repair_enabled": true,
   "repair": null
@@ -302,6 +303,22 @@ can re-surface the orphan-rollback obligation. It survives compaction so a defer
 gate (or pending deploy) is re-surfaced and acked on a later invoke instead of
 silently closing out.
 
+`worker_routing` records the `ollama-workers` probe and what P4 did about it. P0
+writes it and P4 rewrites it; unlike `db_gate` it is never `null`, because P0
+always probes and "not installed" is an answer. `enabled`, `dispatchable` and
+`reason` are the probe's own fields verbatim (`reason` is `""` when
+dispatchable). `route` is what implementer dispatches actually do: `"worker"`
+(this directory already dispatches — a `ship-fleet` instance is the ordinary
+case), `"worktree"` (P4 must cut one, and `worktree` holds its absolute path —
+non-`null` means one already exists, so a P4 re-entered after compaction reuses it
+instead of re-cutting, which is why this field is preserved and not recomputed),
+`"anthropic"` (no worker; every implementer is an Anthropic subagent). P0 can
+only record an intent, so P4 rewrites the block from what it actually achieved —
+a `"worktree"` route left in state by P0 and never confirmed by P4 would assert
+a dispatch that never happened, which is the exact silence this field exists to
+end. A state file written by a pre-change `/ship` has no `worker_routing` key;
+treat it as absent, not as `"anthropic"`, and re-probe at P4.
+
 Rewrite it at every phase boundary (update `phase`, `focus_next`, append to
 `phase_log`). On a failure set `status:"blocked"` and append to `blockers`.
 
@@ -364,9 +381,34 @@ git add .gitignore
 # Only commit if .gitignore actually changed (both entries may already exist):
 git diff --cached --quiet || git commit -m "chore: ignore ship/fix-pr-reviews state files"
 ```
+**Implementer routing — probe once, record always.** Before the state write, ask
+the `ollama-workers` wrapper whether a worker dispatch from this directory could
+ever get past preflight:
+```bash
+pwsh -NoProfile -File "$HOME/.claude/scripts/ollama-worker.ps1" -Probe
+```
+It prints one JSON line — `enabled`, `dispatchable`, `reason`, `remedy`, `model`.
+**Exit 1 is an answer, not a P0 precondition failure**: it means "a dispatch from
+here would be refused", which is what every ordinary primary checkout answers, so
+do NOT stop on it. A missing `pwsh`, a missing wrapper (`ollama-workers` is
+optional and Windows-only; ship runs across repos) or unparseable output are also
+answers — record `enabled:false`, `dispatchable:false`, `reason:"ollama-workers
+not installed"`, `route:"anthropic"` and move on.
+
+Write the answer into state `worker_routing` and append a `phase_log` entry
+naming `enabled`, `dispatchable`, `reason` and the route P4 will take: `worker`
+when already dispatchable, `worktree` when `enabled` and not (P4 cuts one — see
+P4), `anthropic` when workers are off or absent. Recording it IS the step. `/ship`
+runs in a primary checkout by construction, where the wrapper's worktree guard
+refuses every dispatch, so a pipeline with workers enabled sent all eight of its
+implementer tasks to Anthropic and said nothing anywhere — a skipped dispatch
+writes no log row, and the `phase_log` entry read "SDD executed all 8 tasks" with
+no routing note at all. Being enabled and being dispatchable are separate facts;
+a route that is never written down is a route nobody can audit.
+
 Then write the initial state file (`phase:"spec-review"`, `branch`,
-`default_branch`, `spec`, `topic`, `focus_next`). **Rollback:** if the state-file
-write fails after the branch was created, run
+`default_branch`, `spec`, `topic`, `focus_next`, `worker_routing`). **Rollback:**
+if the state-file write fails after the branch was created, run
 `git checkout "$DEFAULT_BRANCH" && git branch -D feat/<slug>`.
 Advance to P1.
 
@@ -610,9 +652,172 @@ Otherwise advance to P4.
 
 ### P4 implementation
 
+**Settle implementer routing before invoking anything.** Read `worker_routing`
+from state; an absent key (a pre-change state file) means re-probe now exactly as
+P0 does. Then:
+
+- `route:"anthropic"` → nothing to arrange. Every implementer is an Anthropic
+  subagent at the tier `subagent-driven-development`'s Model Selection prescribes.
+- `route:"worker"` → this directory is already a linked worktree (a `ship-fleet`
+  instance is the ordinary case). Worker dispatches pass `-Cwd` = this directory.
+- `route:"worktree"` → workers are enabled and this directory can never dispatch.
+  Cut one below instead of accepting the downgrade — unless `worker_routing.worktree`
+  is already set, which means a previous P4 block cut it and this is a resume: run
+  the resume guard first and reuse it. `ollama-workers` is explicit that a plan
+  executed from a primary checkout should move to a worktree, not quietly route
+  every task to Anthropic.
+
+**Resume guard — read `worker_routing.worktree` before cutting anything.** P4 is
+re-entered from the top on every resume (First action reads state and lands in the
+phase it names), so the cut below runs more than once and has to be idempotent. It
+is not. `git worktree add` on the path of a live worktree dies with `fatal:
+'<path>' already exists` (exit 128), and **`--force` does not override it** — that
+flag covers a branch already checked out and a *missing but registered* path, not a
+directory that is present. There is no recovery at the git level, so the guard is
+state, not error handling. When `worktree` is set, do NOT run the cut; verify what
+state names and reuse it:
+
+```bash
+WT="<worker_routing.worktree>"                       # verbatim from state
+git -C "$WT" rev-parse --git-dir >/dev/null 2>&1 && echo REUSE || echo RECUT
+```
+
+- `REUSE` → the worktree is live. Skip both the cut and the Step 2 setup below
+  (`node_modules` is untracked, so it survived), and go straight to the confirming
+  probe. Then **Dispatching into it**: step 1's `reset --hard "$TIP"` re-syncs the
+  worktree to the branch tip, picking up every task that landed before the
+  interruption. That is the whole re-sync a resume needs.
+- `RECUT` → state names a worktree git can no longer resolve: a `git worktree
+  remove` that half-ran, or a directory deleted by hand. Clear BOTH halves before
+  cutting, because either one alone still fails the add —
+
+  ```bash
+  case "$WT" in */ship-wt/*) ;; *) echo "refusing rm outside ship-wt" >&2; exit 1;; esac
+  git worktree prune          # registration without a directory:
+                              #   fatal: '<path>' is a missing but already registered worktree
+  rm -rf "$WT"                # directory without a registration:
+                              #   fatal: '<path>' already exists
+  ```
+
+  then set `worker_routing.worktree` to `null` and cut fresh below. The `rm -rf` is
+  reached only after `rev-parse --git-dir` already FAILED on `$WT`, so it cannot
+  target a live repository — any working tree, this one included, answers that
+  probe. The `case` guard is belt-and-braces on a path read out of a JSON file:
+  every path this skill cuts lives under `ship-wt/`.
+
+With `worktree` still `null` this is a first entry: cut it.
+
+**Cutting the implementation worktree.**
+```bash
+ROOT="$(pwd -W 2>/dev/null || pwd)"                  # NATIVE path, not MSYS /c/...
+WT="$(dirname "$ROOT")/ship-wt/$(basename "$ROOT")"  # absolute, sibling of the primary tree
+mkdir -p "$(dirname "$WT")"
+git worktree add --detach "$WT" HEAD
+```
+`pwd -W` is load-bearing, not decoration: `$PWD` in Git Bash is `/c/Users/…`,
+the wrapper is PowerShell, and `Test-Path -LiteralPath '/c/Users/…'` is `False`
+— so a `-Cwd` built from `$PWD` fails preflight with `cwd not found` and every
+task falls back to Anthropic. That is this bug again wearing a different reason
+code. `git` accepts either form, which is exactly why the mistake would survive
+worktree creation and only surface at dispatch.
+
+`--detach`, never the branch: `feat/<slug>` is checked out in THIS tree and git
+refuses a second checkout of it, and First action re-checks `git branch
+--show-current` against state `branch` on every invoke — so the conductor cannot
+hand the branch over even if git allowed it. The worktree is a disposable copy of
+the branch tip that workers commit into; the branch itself never leaves this tree.
+
+The path follows `ship-fleet`: a SHORT sibling directory, never `.worktrees/`
+inside the repo. Deep artifact paths (`docs/superpowers/specs/<date>-<slug>-…`)
+under a long tree path overflow Windows' 260-char MAX_PATH, which is why fleet's
+instance directories are `issue-<N>` and not the slug. One `/ship` pipeline owns
+one branch, so `<primary-dirname>` alone disambiguates — sibling clones
+(`…-backend2`, `…-backend3`) get their own and cannot collide.
+
+Then run `superpowers:using-git-worktrees` **Step 2 only** (project setup — `npm
+install`, `cargo build`, whatever the manifest calls for) in `$WT`. This is not a
+tidiness step: a fresh worktree has no `node_modules`, the implementer brief
+requires tests to pass before committing, so every worker would fail its tests
+and return `escalate` — relabelling a routing problem as a worker-quality one,
+which is worse than the silence. Do NOT run that skill's Steps 0/1: its consent
+question is a Class-B stop in a hands-off pipeline, and a native worktree tool
+(`EnterWorktree`) would move the conductor's own cwd and trip the branch check.
+Raw `git worktree add` here is deliberate.
+
+Then **confirm it with `-Probe -Cwd "$WT"` and route on that answer, not on having
+created the directory** — the same one preflight a dispatch runs, so a probe
+cannot promise what a dispatch would refuse, and it also catches workers toggled
+off between P0 and P4. Rewrite `worker_routing` (`dispatchable`, `reason`,
+`route`, `worktree`) from the confirmed result, and **state the routing in one
+line at the first implementer dispatch** — which is what `ollama-workers` asks of
+every caller.
+
+If the worktree cannot be made or set up — `git worktree add` fails, the install
+fails, the confirming probe still says no — the Anthropic fallback stands: rewrite
+`worker_routing` to `route:"anthropic"` with `reason` set to the failure, say it
+in that one line, and continue. That is a routing fact and NOT an escalation.
+Nothing failed and no evidence was earned, so tasks go to their ordinary Anthropic
+tier; never promote a worker-shaped task to a larger model because the worker was
+missing.
+
+`fatal: '<path>' already exists` is NOT one of those failures and must never reach
+this fallback. It means the cut ran on a path that was already there — which the
+resume guard exists to prevent, so seeing it means the guard was skipped. Go back
+and run it: the message alone does not say whether that path is a live worktree or
+a leftover directory, and `rev-parse --git-dir` is the only thing that separates
+`REUSE` from `RECUT`. Do not downgrade a whole pipeline to Anthropic over a
+redundant `git worktree add`.
+
+**Dispatching into it**, per task, in this order:
+1. `TIP=$(git rev-parse HEAD)` — evaluated HERE, in the conductor's tree — then
+   `git -C "$WT" reset --hard "$TIP"`. **Never a bare `HEAD` under `-C`**: `-C`
+   rebinds `HEAD` to the worktree's own detached commit, so `reset --hard HEAD`
+   there discards uncommitted edits and re-syncs nothing. Tasks that ran on
+   Anthropic committed in this tree, and the worker must start from the real tip.
+2. Write the brief and dispatch per `ollama-workers`' Dispatch contract with
+   `-Cwd "$WT"`. The brief's `Work from:` line must name `$WT` too — a brief
+   naming the primary tree while `-Cwd` names the worktree sends a worker
+   looking for files it cannot see.
+3. On a `done` verdict: `git merge --ff-only $(git -C "$WT" rev-parse HEAD)`. It
+   is always a fast-forward, because step 1 put the worktree on `$TIP` and the
+   worker only added commits. If it is not, or if the worktree HEAD never moved
+   off `$TIP`, the task produced nothing usable — treat it as a failed task on
+   SDD's normal fix path in this tree, not as a routing decision.
+4. On an `escalate` verdict (exit 2): do NOT merge, and discard what it left —
+   `git -C "$WT" reset --hard "$TIP"`, the tip from step 1 and again never a bare
+   `HEAD`. Partial commits are exactly what an escalation leaves behind, and
+   leaving them means the NEXT task's worker builds on top of them and step 3
+   fast-forwards them into the branch as if they had been reviewed. Then
+   re-dispatch the task to an Anthropic implementer in this tree — the ladder has
+   one rung, ollama → Anthropic, never a larger ollama model.
+
+Step 3 is what makes the work visible: the review package the task reviewer reads
+is generated from THIS tree's `BASE..HEAD`, so a worker commit that has not been
+fast-forwarded is invisible to the reviewer and to the exit gate below alike.
+
+Everything else stays where it already is. Task reviewers, scoped re-reviews, the
+final code review (**opus**, not sonnet), fix rounds 4–5, and P3's plan-document
+reviewer never go to the worker, and neither does any task outside
+`ollama-workers`' "Which tasks go to the worker" rubric — short-turn mechanical
+work, 1–2 files, exact functions named. That skill is the single source for both
+lists and this hook does not restate them.
+
+**Remove the worktree on advance to P5** (`git worktree remove --force "$WT"`) and
+clear `worker_routing.worktree` in the same write — a path left in state after the
+directory is gone sends the next resume down the guard's `RECUT` branch for no
+reason. Not earlier: an interrupted P4 resumes into the same worktree, which is
+what the resume guard above reuses, step 1's `reset --hard` being the whole
+re-sync.
+
 Invoke `subagent-driven-development` via the Skill tool on the `plan` (its Task
-subagents keep your context lean; subagents self-verify per task via TDD). When
-it completes, run the **exit gate** — NOT the full test suite. ship runs across
+subagents keep your context lean; subagents self-verify per task via TDD). Its
+Setup step asks `using-git-worktrees` for an isolated workspace — that question is
+already answered: the conductor works in place on `feat/<slug>` (First action's
+branch check requires it), and the implementation worktree, when there is one, is
+the worker's sandbox and not a new home for this session. Do not cut a second one
+and do not move.
+
+When it completes, run the **exit gate** — NOT the full test suite. ship runs across
 repos, so a quality script may be absent; `npm run <missing>` exits 1 with
 `Missing script:`, which must NOT be misrecorded as a lint failure. Run only the
 scripts that exist (`npm pkg get` returns `{}` for an absent key); skip absent

@@ -91,8 +91,11 @@ checkout or a plain directory. Create one before the first dispatch -
 `superpowers:using-git-worktrees`, or `git worktree add <path> <branch>` - and
 pass that path. This is a step to take, not a reason to skip the worker: a plan
 executed from a primary checkout should move to a worktree, not quietly route
-every task to Anthropic. Check it without dispatching with
-`ollama-worker.ps1 -Probe -Cwd <path>`.
+every task to Anthropic. `/ship` is the caller that rule was written for - it
+runs in a primary checkout by construction, so its P4 cuts a detached worktree
+at the branch tip, dispatches with that as `-Cwd`, and fast-forwards each
+finished task back into the branch the conductor still holds. Check any
+directory without dispatching with `ollama-worker.ps1 -Probe -Cwd <path>`.
 
 When enabled, replace an Anthropic **implementer** dispatch with:
 
