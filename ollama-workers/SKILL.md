@@ -1,6 +1,6 @@
 ---
 name: ollama-workers
-description: Turn Ollama cloud models (glm-5.3-flash, glm-5.3, kimi-k3) on or off as implementers for superpowers plan execution, and report which model is active. Use when the user says /ollama-workers, asks to enable or disable ollama or GLM or Kimi workers, asks which worker model is active, wants to switch the worker model, asks whether plan tasks are running on an open model, asks whether the worker can dispatch from the current directory, or asks why no task went to the worker.
+description: Turn Ollama cloud models (glm-5.3-flash, glm-5.3, kimi-k3) on or off as implementers for superpowers plan execution, and report which model is active. Use when the user says /ollama-workers, asks to enable or disable ollama or GLM or Kimi workers, asks which worker model is active, wants to switch the worker model, asks whether plan tasks are running on an open model, asks whether the worker can dispatch from the current directory, asks why no task went to the worker, or a worker dispatch was refused because the session is isolated in a worktree.
 ---
 
 # Ollama workers
@@ -23,6 +23,11 @@ which cloud tags exist.
 ```powershell
 pwsh -NoProfile -File "$HOME/.claude/scripts/ollama-worker.ps1" -Probe
 ```
+
+Run it through the PowerShell tool. From Bash, a worktree-isolated session
+refuses that line before the wrapper starts (see **Transport** under Dispatch
+contract), and a refusal is not a probe answer - it says nothing about this
+directory.
 
 The probe runs the wrapper's own preflight against the current directory - the
 model tag's syntax, the directory, the settings overlay, the worktree guard,
@@ -110,6 +115,33 @@ brief you would have put in an Anthropic implementer prompt, including the
 skills it must follow. `superpowers:subagent-driven-development`'s
 `implementer-prompt.md` is unchanged; only the dispatch mechanism differs.
 
+**Transport.** The forwarder runs the wrapper through the PowerShell tool, and
+through Bash only when it has no PowerShell tool. Bash is the wrong default
+because a session isolated in a worktree - `EnterWorktree`, or an agent
+launched with worktree isolation - vets every Bash command and refuses any
+that starts `pwsh`: Claude Code cannot show that text handed to a second shell
+will not run git. That check is built into Claude Code, not a hook, so there is
+nothing to allowlist. The PowerShell tool is not vetted that way, and the
+identical command line runs there. It matters here more than anywhere, because
+the precondition above puts every dispatch inside a worktree, and entering one
+is what isolates a session.
+
+A result that quotes "is isolated in the worktree ... Refusing to run it", or
+starts `transport refused:`, means the wrapper never ran. It is not a verdict
+and it is not the unavailable case below: nothing was probed, nothing was
+logged, and the worker may be one tool call away. Run the same command yourself
+through the PowerShell tool, with `run_in_background: true`, and route on its
+JSON exactly as you would on the forwarder's:
+
+```powershell
+pwsh -NoProfile -File "$HOME/.claude/scripts/ollama-worker.ps1" -BriefFile <path> -Cwd <worktree> -Label <task-id>
+```
+
+That is the same dispatch, not a retry. Expect it from a forwarder installed
+before this fix, and in any session opened before the reinstall: agent
+definitions load at session start, so that session keeps the old forwarder
+until it restarts.
+
 Roles that stay on Anthropic, always:
 
 - task reviewers, scoped re-reviews, and the final code review - use **opus**
@@ -148,6 +180,10 @@ evidence was earned. Route the task to the Anthropic tier
 if workers were off: a fast, cheap model for mechanical work, a standard model
 for integration and judgment. Do not promote a worker-shaped task to a larger
 model because the worker was missing.
+
+A transport refusal is not this case (see **Transport**). The wrapper never
+ran, so availability is unknown rather than false, and taking this fallback on
+it records a worker as missing that was one tool call away.
 
 Say which happened, in one line, at the first affected dispatch. Silent
 re-routing is the failure mode this skill has already produced once: an

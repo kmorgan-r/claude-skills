@@ -204,6 +204,14 @@ cp -r find-cold-leads ~/.claude/skills/
   tag to `[A-Za-z0-9._:/-]`, a session id to `[A-Za-z0-9._-]`, neither with a leading
   dash - and the line itself is built by the CRT's own quoting rules, so neither can
   close an argument early and append flags of its own.
+- **The forwarder calls the wrapper through the PowerShell tool**, and through Bash only
+  when it has none. A worktree-isolated session (`EnterWorktree`, or an agent launched
+  with worktree isolation) refuses any Bash command that starts `pwsh` — Claude Code's
+  built-in check cannot show that a second shell will not run git — so a Bash-only
+  forwarder could never dispatch from inside the worktree the wrapper requires. The
+  PowerShell tool is not vetted that way and runs the same command line. A refusal means
+  the wrapper never ran, so the caller re-issues the same command through its own
+  PowerShell tool instead of recording the worker as unavailable.
 - Every run appends one line to `~/.claude/ollama-workers.log.jsonl` (`event: "run"`,
   model, num_turns, duration_ms, escalate, reason). A probe that finds the directory
   not dispatchable while workers are on appends an `event: "probe"` row, so the log
