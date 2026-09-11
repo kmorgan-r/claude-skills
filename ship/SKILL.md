@@ -697,7 +697,10 @@ from state; an absent key (a pre-change state file) means re-probe now exactly a
 P0 does. Then:
 
 - `route:"anthropic"` → nothing to arrange. Every implementer is an Anthropic
-  subagent at the tier `subagent-driven-development`'s Model Selection prescribes.
+  subagent at the tier `subagent-driven-development`'s Model Selection prescribes,
+  and every implementer dispatch prompt carries a line
+  `ROUTING-EXCEPTION: <worker_routing.reason>` — with workers on and routing
+  enforced, the `ollama-workers` gate denies an implementer dispatch without one.
 - `route:"worker"` → this directory is already a linked worktree (a `ship-fleet`
   instance is the ordinary case). Worker dispatches pass `-Cwd` = this directory.
 - `route:"worktree"` → workers are enabled and this directory can never dispatch.
@@ -808,7 +811,7 @@ a leftover directory, and `rev-parse --git-dir` is the only thing that separates
 `REUSE` from `RECUT`. Do not downgrade a whole pipeline to Anthropic over a
 redundant `git worktree add`.
 
-**Dispatching into it**, per task, in this order:
+**Dispatching into it**, per task and per fix round, in this order:
 1. `TIP=$(git rev-parse HEAD)` — evaluated HERE, in the conductor's tree — then
    `git -C "$WT" reset --hard "$TIP"`. **Never a bare `HEAD` under `-C`**: `-C`
    rebinds `HEAD` to the worktree's own detached commit, so `reset --hard HEAD`
@@ -817,19 +820,36 @@ redundant `git worktree add`.
 2. Write the brief and dispatch per `ollama-workers`' Dispatch contract with
    `-Cwd "$WT"`. The brief's `Work from:` line must name `$WT` too — a brief
    naming the primary tree while `-Cwd` names the worktree sends a worker
-   looking for files it cannot see.
-3. On a `done` verdict: `git merge --ff-only $(git -C "$WT" rev-parse HEAD)`. It
+   looking for files it cannot see. For fix rounds 1–3 of a task the worker
+   implemented, the dispatch is a new forwarder with `-Resume <session_id>` from
+   that task's last verdict and a brief holding only the open findings —
+   `ollama-workers`' **Fix rounds**. Step 1 still runs first; the tip already
+   holds the worker's fast-forwarded commits, so the resumed session finds the
+   tree it left.
+3. On a `done` verdict: first confirm the verdict's `run_id` has an
+   `"event":"run"` row in `~/.claude/ollama-workers.log.jsonl` (`ollama-workers`'
+   **Accepting a verdict**). No row means the worker never ran — a forwarder once
+   did a task itself and was credited to the worker — so handle it as step 4's
+   `is_error` row. Then `git merge --ff-only $(git -C "$WT" rev-parse HEAD)`. It
    is always a fast-forward, because step 1 put the worktree on `$TIP` and the
    worker only added commits. If it is not, or if the worktree HEAD never moved
    off `$TIP`, the task produced nothing usable — treat it as a failed task on
    SDD's normal fix path in this tree, not as a routing decision.
-4. On an `escalate` verdict (exit 2): do NOT merge, and discard what it left —
-   `git -C "$WT" reset --hard "$TIP"`, the tip from step 1 and again never a bare
-   `HEAD`. Partial commits are exactly what an escalation leaves behind, and
-   leaving them means the NEXT task's worker builds on top of them and step 3
-   fast-forwards them into the branch as if they had been reviewed. Then
-   re-dispatch the task to an Anthropic implementer in this tree — the ladder has
-   one rung, ollama → Anthropic, never a larger ollama model.
+4. On an `escalate` verdict (exit 2), or a reply with no verdict at all: do NOT
+   merge, and discard what it left — `git -C "$WT" reset --hard "$TIP"`, the tip
+   from step 1 and again never a bare `HEAD`. Partial commits are exactly what an
+   escalation or a kill leaves behind, and leaving them means the NEXT task's
+   worker builds on top of them and step 3 fast-forwards them into the branch as
+   if they had been reviewed. Then route on the verdict's `reason`:
+
+   | `reason` | Next dispatch |
+   |---|---|
+   | `killed_by_harness` | The same brief to the worker once more, fresh — no `-Resume`, because the killed session remembers edits the reset just discarded. A second kill of the same task goes to an Anthropic implementer in this tree with `ROUTING-EXCEPTION: worker killed twice`. A kill is the machine (Claude Code stopping a background command, usually for low memory), not evidence about the model. |
+   | anything else — `turns_*`, `is_error`, `exit_*`, `no_result_json_*`, `invalid_result_json_*`, no verdict | An Anthropic implementer in this tree with `ROUTING-EXCEPTION: worker escalated (<reason>)`. The ladder has one rung, ollama → Anthropic, never a larger ollama model. |
+
+   Record every kill in `phase_log` with its `run_id`, including one the retry
+   recovered: a kill the pipeline absorbed still says the machine is
+   over-subscribed, and nothing else will say it.
 
 Step 3 is what makes the work visible: the review package the task reviewer reads
 is generated from THIS tree's `BASE..HEAD`, so a worker commit that has not been
@@ -837,10 +857,24 @@ fast-forwarded is invisible to the reviewer and to the exit gate below alike.
 
 Everything else stays where it already is. Task reviewers, scoped re-reviews, the
 final code review (**opus**, not sonnet), fix rounds 4–5, and P3's plan-document
-reviewer never go to the worker, and neither does any task outside
-`ollama-workers`' "Which tasks go to the worker" rubric — short-turn mechanical
-work, 1–2 files, exact functions named. That skill is the single source for both
-lists and this hook does not restate them.
+reviewer never go to the worker. Every other implementer task does, unless it is
+one of the exceptions in `ollama-workers`' "Which tasks go to the worker" — the
+hazard list, tools the worker lacks, design judgment, a task the worker has
+failed twice — named in the dispatch prompt as `ROUTING-EXCEPTION: <reason>`.
+That skill is the single source for both lists and this hook does not restate
+them.
+
+**The conductor writes no source code in P4.** Every change to a tracked source
+or test file — a review finding's fix, the code consequence of a ruling, a
+comment-only correction, resolving a merge conflict in source — goes through an
+implementer dispatch routed like any task above, and then through review. SDD
+already forbids controller fixes ("Resume the implementer"), and nothing in this
+skill authorizes them; conductors made them anyway, which put Opus on
+implementation and skipped the review a dispatched fix gets. The conductor still
+edits what is its own: the plan and spec (amendments), the SDD ledger and report
+files, `.claude-ship-state.json`, and the PR body. `ship-repair` is unchanged —
+it is a separate, bounded, audited pass with its own contract — and so is P6,
+where `fix-pr-reviews` applies review-bot fixes in-session by design.
 
 **Remove the worktree on advance to P5** (`git worktree remove --force "$WT"`) and
 clear `worker_routing.worktree` in the same write — a path left in state after the

@@ -8,6 +8,10 @@ orchestrator that knows the rule and routes around it produces no error and no
 log line at all. Announcing ON there, with no caveat and an instruction to
 dispatch, is what made that silence reachable. The probe is the wrapper's own
 preflight (`-Probe`), so this message cannot drift from what a dispatch does.
+
+When `enforceRouting` is on it also says so, with the tag syntax, so an
+orchestrator learns the rule before its first dispatch is denied rather than
+from the denial.
 """
 import json
 import os
@@ -15,22 +19,34 @@ import shutil
 import subprocess
 import sys
 
-HOME = os.path.expanduser("~")
-STATE_PATH = os.path.join(HOME, ".claude", "ollama-workers.json")
-WRAPPER = os.path.join(HOME, ".claude", "scripts", "ollama-worker.ps1")
+# OLLAMA_WORKERS_HOME is for the tests, as in the wrapper: the probe below
+# inherits it, so a test run neither reads the real state nor logs a probe row.
+CLAUDE_HOME = os.environ.get("OLLAMA_WORKERS_HOME") or os.path.join(os.path.expanduser("~"), ".claude")
+STATE_PATH = os.path.join(CLAUDE_HOME, "ollama-workers.json")
+WRAPPER = os.path.join(CLAUDE_HOME, "scripts", "ollama-worker.ps1")
 
 ROUTING = (
-    "dispatch short-turn mechanical implementer tasks to the ollama-worker agent "
-    "instead of an Anthropic implementer; keep every reviewer, the plan-document "
+    "dispatch implementer tasks to the ollama-worker agent by default. An "
+    "Anthropic implementer is an exception the ollama-workers skill names (the "
+    "hazard list, tools the worker lacks, design judgment, fix rounds 4-5, a task "
+    "the worker has failed twice), and its dispatch prompt states it on a line "
+    "`ROUTING-EXCEPTION: <reason>`. Keep every reviewer, the plan-document "
     "reviewer, and fix rounds 4-5 on Anthropic (opus for reviews). Read the "
     "ollama-workers skill for the dispatch contract, the routing rubric, and the "
     "escalation ladder before the first dispatch."
 )
 
 FALLBACK = (
-    "If you cannot dispatch into a worktree, route worker-shaped tasks to the "
+    "If you cannot dispatch into a worktree, route implementer tasks to the "
     "Anthropic tier superpowers:subagent-driven-development Model Selection "
-    "prescribes for them and say so, rather than leaving the routing unstated."
+    "prescribes for them, with `ROUTING-EXCEPTION: no dispatchable worktree` in "
+    "each dispatch prompt, and say so rather than leaving the routing unstated."
+)
+
+ENFORCED = (
+    "Routing is ENFORCED: a PreToolUse gate denies an implementer dispatch to any "
+    "agent other than ollama-worker unless its prompt has a line "
+    "`ROUTING-EXCEPTION: <reason>`."
 )
 
 
@@ -84,6 +100,7 @@ if not state.get("enabled"):
 
 model = state.get("model", "glm-5.3-flash:cloud")
 max_turns = state.get("maxTurns", 25)
+enforced = f" {ENFORCED}" if state.get("enforceRouting") is True else ""
 
 try:
     payload = json.load(sys.stdin)
@@ -98,10 +115,10 @@ if isinstance(result, str):
     print(
         f"{header} Dispatchability of this directory could not be checked "
         f"({result}) - treat the first dispatch as the check. When executing a "
-        f"superpowers plan, {ROUTING}"
+        f"superpowers plan, {ROUTING}{enforced}"
     )
 elif result.get("dispatchable"):
-    print(f"{header} When executing a superpowers plan, {ROUTING}")
+    print(f"{header} When executing a superpowers plan, {ROUTING}{enforced}")
 else:
     # Named as a step to take, not a dead end: the orchestrator dispatches into
     # a worktree it creates, so "primary checkout" is a precondition it can
@@ -126,6 +143,6 @@ else:
         parts.append(remedy.rstrip(".") + ".")
     parts.append(FALLBACK)
     parts.append(
-        f"When executing a superpowers plan from a dispatchable worktree, {ROUTING}"
+        f"When executing a superpowers plan from a dispatchable worktree, {ROUTING}{enforced}"
     )
     print(" ".join(parts))

@@ -1,5 +1,6 @@
 {
   "enabled": false,
   "model": "glm-5.3-flash:cloud",
-  "maxTurns": 25
+  "maxTurns": 25,
+  "enforceRouting": false
 }
