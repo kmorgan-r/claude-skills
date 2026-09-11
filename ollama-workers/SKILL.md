@@ -163,9 +163,8 @@ pwsh -NoProfile -File "$HOME/.claude/scripts/ollama-worker.ps1" -BriefFile <path
 ```
 
 That is the same dispatch, not a retry. Expect it from a forwarder installed
-before this fix, and in any session opened before the reinstall: agent
-definitions load at session start, so that session keeps the old forwarder
-until it restarts.
+before this fix. Reinstalling fixes running sessions too: a session opened
+before the reinstall picked up the new forwarder on its next dispatch.
 
 When you run the wrapper yourself, you are the forwarder, so its rules are
 yours. Do not end your turn while it runs - Claude Code terminates a background
