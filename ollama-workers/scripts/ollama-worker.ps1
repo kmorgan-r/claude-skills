@@ -45,7 +45,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$claudeHome = Join-Path $HOME '.claude'
+# OLLAMA_WORKERS_HOME exists for the tests: without it every test run reads the
+# real state file and appends rows to the real run log, which is then read for
+# calibration as if they were dispatches.
+$claudeHome = if ($env:OLLAMA_WORKERS_HOME) { $env:OLLAMA_WORKERS_HOME } else { Join-Path $HOME '.claude' }
 $statePath  = Join-Path $claudeHome 'ollama-workers.json'
 $overlay    = Join-Path $claudeHome 'ollama-settings.json'
 $logPath    = Join-Path $claudeHome 'ollama-workers.log.jsonl'
@@ -59,8 +62,15 @@ function Fail([string]$message, [int]$code = 1) {
 }
 
 function Write-LogRow([System.Collections.IDictionary]$row) {
-    try { Add-Content -LiteralPath $logPath -Value ($row | ConvertTo-Json -Depth 4 -Compress) }
-    catch { [Console]::Error.WriteLine("ollama-worker: could not append to $logPath") }
+    $line = $row | ConvertTo-Json -Depth 4 -Compress
+    # Retried, not just caught: dozens of sessions append here concurrently, and a
+    # dropped start or run row reads later as a run that never happened or a kill
+    # that never happened.
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try { Add-Content -LiteralPath $logPath -Value $line -ErrorAction Stop; return }
+        catch { if ($attempt -lt 3) { Start-Sleep -Milliseconds (50 * $attempt) } }
+    }
+    [Console]::Error.WriteLine("ollama-worker: could not append to $logPath")
 }
 
 function Get-OllamaPath {
@@ -383,6 +393,27 @@ if ($DryRun) {
     exit 0
 }
 
+# The start row is written before the launch because the run row cannot be
+# relied on: it is written after the child exits, so anything that kills this
+# process tree first - Claude Code stops background commands when the machine
+# runs low on memory, and when the agent that launched them ends its turn -
+# leaves no run row, no verdict and no exit 2. Measured: 7 of 29 real worker
+# runs had no row at all. A start row with no run row sharing its run_id is a
+# killed run. The same id goes to stderr now, so a caller holding only the
+# killed command's output can still name the run.
+$runId = [guid]::NewGuid().ToString()
+Write-LogRow ([ordered]@{
+    ts          = (Get-Date).ToUniversalTime().ToString('o')
+    event       = 'start'
+    run_id      = $runId
+    label       = $Label
+    cwd         = $Cwd
+    model       = $Model
+    resumed     = [bool]$Resume
+    wrapper_pid = $PID
+})
+[Console]::Error.WriteLine("ollama-worker: run_id=$runId started (label '$Label', model $Model)")
+
 $stdoutFile = [System.IO.Path]::GetTempFileName()
 $stderrFile = [System.IO.Path]::GetTempFileName()
 $hadConfigDir = Test-Path Env:\CLAUDE_CONFIG_DIR
@@ -434,6 +465,7 @@ if ($null -eq $r) {
     $verdict  = [ordered]@{
         ok = $false; escalate = $true; reason = $reason; model = $Model
         session_id = $null; num_turns = 0; duration_ms = 0; result = $null
+        run_id = $runId
     }
 }
 else {
@@ -458,14 +490,18 @@ else {
         num_turns   = $turns
         duration_ms = $ms
         result      = $r.result
+        run_id      = $runId
     }
 }
 
-$verdict | ConvertTo-Json -Depth 6 -Compress
-
+# Logged BEFORE the verdict is printed. A caller may treat "a run row with this
+# verdict's run_id exists" as proof the wrapper really ran (a forwarder that did
+# the task itself returns no such row), and it may check the moment the verdict
+# appears - so the row has to be on disk first.
 $logEntry = [ordered]@{
     ts          = (Get-Date).ToUniversalTime().ToString('o')
     event       = 'run'
+    run_id      = $runId
     label       = $Label
     cwd         = $Cwd
     model       = $Model
@@ -477,5 +513,7 @@ $logEntry = [ordered]@{
     reason      = $verdict.reason
 }
 Write-LogRow $logEntry
+
+$verdict | ConvertTo-Json -Depth 6 -Compress
 
 if ($escalate) { exit 2 } else { exit 0 }
