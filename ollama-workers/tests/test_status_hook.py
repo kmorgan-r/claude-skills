@@ -20,6 +20,7 @@ HOOK = os.path.join(PKG, "hooks", "ollama-workers-status.py")
 class StatusHook(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="ow-status-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         os.makedirs(os.path.join(self.home, "scripts"))
         shutil.copy(os.path.join(PKG, "scripts", "ollama-worker.ps1"), os.path.join(self.home, "scripts"))
         with open(os.path.join(self.home, "ollama-settings.json"), "w") as fh:

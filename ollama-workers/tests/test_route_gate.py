@@ -8,6 +8,7 @@ the real ~/.claude/ollama-workers.log.jsonl.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,7 @@ EXPLORE = "Find every caller of match_documents and report file:line."
 class RouteGate(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="ow-gate-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.log = os.path.join(self.home, "ollama-workers.log.jsonl")
 
     def state(self, **kw):

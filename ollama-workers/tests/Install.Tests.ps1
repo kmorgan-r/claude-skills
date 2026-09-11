@@ -21,9 +21,12 @@ BeforeAll {
 }
 '@
 
+    $script:Homes = [System.Collections.Generic.List[string]]::new()
+
     function New-FakeClaudeHome([string]$settings) {
         $h = Join-Path ([System.IO.Path]::GetTempPath()) ("ow-inst-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $h -Force | Out-Null
+        $script:Homes.Add($h)
         if ($settings) { $settings | Set-Content -LiteralPath (Join-Path $h 'settings.json') }
         $h
     }
@@ -31,6 +34,15 @@ BeforeAll {
     function Get-Commands($h, [string]$event) {
         $j = Get-Content -Raw -LiteralPath (Join-Path $h 'settings.json') | ConvertFrom-Json -AsHashtable
         @(@($j.hooks[$event]) | ForEach-Object { $_.hooks } | ForEach-Object { $_.command } | Where-Object { $_ })
+    }
+}
+
+AfterAll {
+    foreach ($h in $script:Homes) {
+        # A junction left behind would make Remove-Item -Recurse follow it into the package.
+        $j = Join-Path $h 'skills' 'ollama-workers'
+        if (Test-Path -LiteralPath $j) { cmd /c rmdir $j | Out-Null }
+        Remove-Item -Recurse -Force -LiteralPath $h -ErrorAction SilentlyContinue
     }
 }
 
