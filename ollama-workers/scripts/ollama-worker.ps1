@@ -28,8 +28,19 @@ dispatching, which made a whole class of misconfiguration silent: an
 orchestrator that read the worktree rule and correctly routed around it
 produced no error, no log line, and no signal that the feature was inert.
 
-Exit codes: 0 done (probe: dispatchable), 2 escalate to an Anthropic
-implementer, 1 wrapper error (probe: not dispatchable).
+Every dispatch is bounded three ways: --max-turns on the headless run, a wall
+clock limit (timeoutMinutes) after which the whole worker process tree is
+killed, and a cap on how many workers run at once (maxConcurrent). See the
+comments at each for the evidence behind them.
+
+-Await answers "has the dispatch whose background output is in this file
+finished?" for a forwarder that launched the wrapper in the background. It
+waits at most -PollSeconds and always ends by the wrapper's own time limit plus
+-GraceSeconds, whatever state the wrapper is in.
+
+Exit codes: 0 done (probe: dispatchable; await: finished or waiting), 2
+escalate to an Anthropic implementer, 1 wrapper error (probe: not dispatchable;
+await: no verdict).
 #>
 [CmdletBinding()]
 param(
@@ -38,14 +49,21 @@ param(
     [string]$Resume,
     [string]$Model,
     [int]$MaxTurns,
+    [double]$TimeoutMinutes,
     [string]$Label,
     [switch]$DryRun,
-    [switch]$Probe
+    [switch]$Probe,
+    [string]$Await,
+    [int]$PollSeconds = 240,
+    [int]$GraceSeconds = 180
 )
 
 $ErrorActionPreference = 'Stop'
 
-$claudeHome = Join-Path $HOME '.claude'
+# OLLAMA_WORKERS_HOME exists for the tests: without it every test run reads the
+# real state file and appends rows to the real run log, which is then read for
+# calibration as if they were dispatches.
+$claudeHome = if ($env:OLLAMA_WORKERS_HOME) { $env:OLLAMA_WORKERS_HOME } else { Join-Path $HOME '.claude' }
 $statePath  = Join-Path $claudeHome 'ollama-workers.json'
 $overlay    = Join-Path $claudeHome 'ollama-settings.json'
 $logPath    = Join-Path $claudeHome 'ollama-workers.log.jsonl'
@@ -59,8 +77,15 @@ function Fail([string]$message, [int]$code = 1) {
 }
 
 function Write-LogRow([System.Collections.IDictionary]$row) {
-    try { Add-Content -LiteralPath $logPath -Value ($row | ConvertTo-Json -Depth 4 -Compress) }
-    catch { [Console]::Error.WriteLine("ollama-worker: could not append to $logPath") }
+    $line = $row | ConvertTo-Json -Depth 4 -Compress
+    # Retried, not just caught: sessions append here concurrently, and a dropped
+    # start or run row reads later as a run that never happened or a kill that
+    # never happened.
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try { Add-Content -LiteralPath $logPath -Value $line -ErrorAction Stop; return }
+        catch { if ($attempt -lt 3) { Start-Sleep -Milliseconds (50 * $attempt) } }
+    }
+    [Console]::Error.WriteLine("ollama-worker: could not append to $logPath")
 }
 
 function Get-OllamaPath {
@@ -109,9 +134,9 @@ function Test-LinkedWorktree([string]$path) {
 }
 
 # Required for a dispatch, but not [Parameter(Mandatory)] and not checked under
-# -Probe: a mandatory parameter prompts, and this script is only ever run
-# headless, where a prompt hangs until timeout. A probe has no brief.
-if (-not $Probe) {
+# -Probe or -Await: a mandatory parameter prompts, and this script is only ever
+# run headless, where a prompt hangs until timeout. Neither has a brief.
+if (-not $Probe -and -not $Await) {
     if (-not $BriefFile) { Fail '-BriefFile is required' }
     if (-not (Test-Path -LiteralPath $BriefFile)) { Fail "brief file not found: $BriefFile" }
 }
@@ -129,8 +154,28 @@ if (Test-Path -LiteralPath $statePath) {
 if (-not $Model) { $Model = if ($state.model) { $state.model } else { 'glm-5.3-flash:cloud' } }
 if (-not $PSBoundParameters.ContainsKey('MaxTurns')) {
     $stateTurns = $state.maxTurns -as [int]
-    $MaxTurns = if ($stateTurns) { $stateTurns } else { 25 }
+    $MaxTurns = if ($stateTurns) { $stateTurns } else { 100 }
 }
+
+# 25 minutes: the longest successful run in ~/.claude/ollama-workers.log.jsonl
+# (58 of them, 2026-09-08 to 09-14) took 19.5 minutes by duration_ms, p95 8.2,
+# median 2.2, and wall time from start row to run row never exceeded
+# duration_ms by more than 0.6 minutes. The limit kills nothing that has ever
+# succeeded. [double], so the tests can use a few seconds.
+if (-not $PSBoundParameters.ContainsKey('TimeoutMinutes')) {
+    $stateTimeout = $state.timeoutMinutes -as [double]
+    $TimeoutMinutes = if ($stateTimeout -gt 0) { $stateTimeout } else { 25 }
+}
+if ($TimeoutMinutes -le 0) { $TimeoutMinutes = 25 }
+$timeoutLabel = $TimeoutMinutes.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+$timeoutSeconds = [int][math]::Ceiling($TimeoutMinutes * 60)
+
+# 1 by default: each worker is a pwsh wrapper plus a full headless Claude Code
+# process on a machine where background tasks were already being killed for low
+# memory. Zero, negative or non-numeric falls back to 1 rather than to "no
+# workers", because `enabled` is the off switch.
+$stateConcurrent = $state.maxConcurrent -as [int]
+$MaxConcurrent = if ($stateConcurrent -gt 0) { $stateConcurrent } else { 1 }
 $modelSyntaxOk = $Model -match '^[A-Za-z0-9][A-Za-z0-9._:/-]*$'
 
 # The dispatch preflight, in one place, returning the first blocker instead of
@@ -272,6 +317,8 @@ if ($Probe) {
         model           = $Model
         model_syntax_ok = [bool]$modelSyntaxOk
         max_turns       = $MaxTurns
+        timeout_minutes = $TimeoutMinutes
+        max_concurrent  = $MaxConcurrent
     } | ConvertTo-Json -Depth 4 -Compress
 
     # The availability row calibration was missing. A skipped dispatch writes
@@ -295,6 +342,151 @@ if ($Probe) {
     }
 
     if ($pf.ok) { exit 0 } else { exit 1 }
+}
+
+# -Await: the forwarder's wait, bounded here rather than in its prompt.
+#
+# The forwarder launches the wrapper as a background command and has to hand its
+# caller one verdict. Ending its turn and being woken when the command finishes
+# does keep the command alive (verified 2026-09-17), but the caller receives the
+# forwarder's first reply - "launched" - as an interim result, not the verdict.
+# So the forwarder waits in the foreground, and each wait is one call to this.
+#
+# The old forwarder looped "until STATE: finished" with no upper bound, and a
+# wrapper blocked for 8h10m got polled 35 times. Every exit from this block is
+# decided from facts the wrapper wrote, not from how often the model has asked:
+#
+# - a verdict line in the output: finished.
+# - the wrapper named in the start line is gone with no verdict: finished, with
+#   a synthesized escalate verdict, because a wrapper killed from outside (low
+#   memory, a user interrupt) prints nothing. Liveness is the PID plus a start
+#   time no later than the start line's, so a reused PID reads as gone.
+# - past the start line's timeout plus -GraceSeconds: the wrapper failed to
+#   enforce its own limit. Kill it - its job object takes the worker tree with
+#   it - and return an escalate verdict, so the caller never re-dispatches the
+#   task while a worker is still editing the same worktree.
+# - no start line and the harness recorded an exit: the wrapper refused before
+#   launching (workers off, bad -Cwd). There is no verdict to return.
+#
+# -PollSeconds defaults to 240 so each wait returns inside the forwarder's
+# 5-minute prompt cache; 9-minute polls re-sent the whole context on every wake.
+# Deliberately above the enabled gate: turning workers off must not strand a
+# forwarder whose worker is already running.
+if ($Await) {
+    function Read-AwaitText {
+        if (Test-Path -LiteralPath $Await) { Get-Content -Raw -LiteralPath $Await -ErrorAction SilentlyContinue } else { '' }
+    }
+    function Get-VerdictLine([string]$text) {
+        @("$text" -split '\r?\n' | Where-Object { $_.TrimStart().StartsWith('{"ok"') }) | Select-Object -Last 1
+    }
+    function Write-Finished([string]$verdictLine, [string]$text) {
+        'STATE: finished'
+        $verdictLine.Trim()
+        "$text" -split '\r?\n' | Where-Object { $_ -like 'ollama-worker:*' -and $_ -notmatch ' started \(' }
+        exit 0
+    }
+    function Test-WrapperAlive([int]$wrapperPid, [datetime]$at) {
+        $p = Get-Process -Id $wrapperPid -ErrorAction SilentlyContinue
+        if (-not $p) { return $false }
+        # Unreadable start time means a process this user does not own, which
+        # the wrapper never is - and a PID that fails the check is never killed.
+        try { return $p.StartTime.ToUniversalTime() -le $at.AddSeconds(2) }
+        catch { return $false }
+    }
+    # A run row for a wrapper that cannot write its own, unless it managed to.
+    # Without it a killed run is visible only as a start row with no partner.
+    function Complete-Run([hashtable]$s, [string]$reason) {
+        $rows = @()
+        if (Test-Path -LiteralPath $logPath) {
+            $rows = @(Get-Content -LiteralPath $logPath | ForEach-Object {
+                try { $_ | ConvertFrom-Json -AsHashtable } catch { $null }
+            } | Where-Object { $_ -and $_.run_id -eq $s.runId })
+        }
+        $existing = $rows | Where-Object { $_.event -eq 'run' } | Select-Object -Last 1
+        if ($existing) {
+            # The wrapper finished and logged, but its verdict line never reached
+            # the output file. Report what it logged.
+            $v = [ordered]@{
+                ok = (-not $existing.escalate); escalate = [bool]$existing.escalate; reason = $existing.reason
+                model = $existing.model; session_id = $existing.session_id; num_turns = $existing.num_turns
+                duration_ms = $existing.duration_ms; result = $null; run_id = $s.runId
+            }
+        }
+        else {
+            $v = [ordered]@{
+                ok = $false; escalate = $true; reason = $reason; model = $s.model
+                session_id = $null; num_turns = 0; duration_ms = 0; result = $null; run_id = $s.runId
+            }
+            $startRow = $rows | Where-Object { $_.event -eq 'start' } | Select-Object -First 1
+            Write-LogRow ([ordered]@{
+                ts          = (Get-Date).ToUniversalTime().ToString('o')
+                event       = 'run'
+                run_id      = $s.runId
+                label       = $s.label
+                cwd         = if ($startRow) { $startRow.cwd } else { $null }
+                model       = $s.model
+                resumed     = if ($startRow) { [bool]$startRow.resumed } else { $false }
+                session_id  = $null
+                num_turns   = 0
+                duration_ms = 0
+                escalate    = $true
+                reason      = $reason
+                recorded_by = 'await'
+            })
+        }
+        return ($v | ConvertTo-Json -Depth 4 -Compress)
+    }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $startPattern = "ollama-worker: run_id=(?<id>[A-Za-z0-9-]+) started \(label '(?<label>.*?)', model (?<model>\S+), wrapper_pid (?<pid>\d+), timeout_s (?<t>\d+), at (?<at>[^)\s]+)\)"
+    while ($true) {
+        $text = Read-AwaitText
+        $line = Get-VerdictLine $text
+        if ($line) { Write-Finished $line $text }
+
+        $m = [regex]::Match("$text", $startPattern)
+        $exited = [regex]::Match("$text", '\[exited with code (?<c>-?\d+)\]')
+        if (-not $m.Success) {
+            $age = if (Test-Path -LiteralPath $Await) { ((Get-Date) - (Get-Item -LiteralPath $Await).CreationTime).TotalSeconds } else { 0 }
+            if ($exited.Success -or $age -gt 120) {
+                'STATE: no verdict'
+                "$text".Trim()
+                exit 1
+            }
+        }
+        else {
+            $s = @{
+                runId = $m.Groups['id'].Value; label = $m.Groups['label'].Value; model = $m.Groups['model'].Value
+                pid = [int]$m.Groups['pid'].Value; timeoutS = [int]$m.Groups['t'].Value
+                at = [datetime]::Parse($m.Groups['at'].Value, [System.Globalization.CultureInfo]::InvariantCulture,
+                    [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+            }
+            if (-not (Test-WrapperAlive $s.pid $s.at)) {
+                # The harness copies output to the file after the process ends,
+                # so a verdict can land a moment after the PID is gone.
+                for ($i = 0; $i -lt 10; $i++) {
+                    Start-Sleep -Milliseconds 500
+                    $text = Read-AwaitText
+                    $line = Get-VerdictLine $text
+                    if ($line) { Write-Finished $line $text }
+                }
+                $exited = [regex]::Match("$text", '\[exited with code (?<c>-?\d+)\]')
+                $reason = if ($exited.Success) { "wrapper_exit_$($exited.Groups['c'].Value)" } else { 'wrapper_died' }
+                Write-Finished (Complete-Run $s $reason) $text
+            }
+            if ((Get-Date).ToUniversalTime() -gt $s.at.AddSeconds($s.timeoutS + $GraceSeconds)) {
+                & taskkill /F /T /PID $s.pid 2>&1 | Out-Null
+                $text = Read-AwaitText
+                $line = Get-VerdictLine $text
+                if ($line) { Write-Finished $line $text }
+                Write-Finished (Complete-Run $s 'wrapper_overdue') $text
+            }
+        }
+
+        $left = $PollSeconds - $sw.Elapsed.TotalSeconds
+        if ($left -le 0) { 'STATE: waiting'; exit 0 }
+        Start-Sleep -Milliseconds ([int][math]::Min(5000, [math]::Max(100, $left * 1000)))
+    }
 }
 
 # The off switch is enforced here, not only in the status hook and the skill's
@@ -336,7 +528,17 @@ if (-not (Test-Path -LiteralPath $pluginLink)) {
     }
 }
 
-$claudeArgs = @('--settings', $overlay, '-p', '--output-format', 'json', '--dangerously-skip-permissions')
+# --max-turns is a hard stop, so it guards against a runaway loop and nothing
+# else; the time limit is the bound that matters. It is not a fit filter: the
+# 14 runs the old after-the-fact check escalated at 27 to 86 turns all ended
+# DONE or DONE_WITH_CONCERNS with a commit, in 1.2 to 17.3 minutes, and were
+# redone by Anthropic only because of the count. A hard stop at 25 would cut
+# those same runs off half-done, so the default is 100, above the 86 seen.
+# Verified 2026-09-17 on Claude Code 2.1.274 through ollama 0.34.0: `ollama
+# launch claude ... -- --max-turns 1` passes the flag through, and a capped run
+# ends with type "result", subtype "error_max_turns", is_error true, exit 1,
+# and num_turns one ABOVE the cap (2 for a cap of 1).
+$claudeArgs = @('--settings', $overlay, '-p', '--output-format', 'json', '--max-turns', "$MaxTurns", '--dangerously-skip-permissions')
 if ($Resume) { $claudeArgs += @('--resume', $Resume) }
 $argList = @('launch', 'claude', '--model', $Model, '--') + $claudeArgs
 
@@ -378,26 +580,230 @@ if ($DryRun) {
         configDir = $workerCfg
         model     = $Model
         maxTurns  = $MaxTurns
+        timeoutMinutes = $TimeoutMinutes
+        maxConcurrent  = $MaxConcurrent
         brief     = $BriefFile
     } | ConvertTo-Json -Depth 4
     exit 0
 }
 
+# Concurrency cap: one named mutex per slot, held until this process exits.
+#
+# A crashed wrapper must not keep a slot, and counting from the log cannot see
+# one: a wrapper killed from outside writes a start row and never a run row
+# (hero-task-11). The kernel releases a mutex when its owner dies - verified
+# 2026-09-17, a slot held by a process killed with Stop-Process was free the
+# next instant - so there is no lock file to go stale and no PID to be reused.
+# A named semaphore would not do: its count is not given back when a holder
+# dies. And a live wrapper really is a live worker, because the job object
+# below kills the worker tree when the wrapper goes, however it goes.
+#
+# The name carries a hash of $claudeHome, so the tests' OLLAMA_WORKERS_HOME
+# never competes with real workers for a slot. Local\ is this logon session,
+# which is every Claude Code session on the desktop.
+#
+# Refused rather than queued: a queue is one more place to wait without bound.
+# The refusal is logged as event "refused", not "run", so it stays out of turn
+# and escalation statistics - nothing ran.
+$homeKey = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData(
+    [System.Text.Encoding]::UTF8.GetBytes($claudeHome.ToLowerInvariant()))).Substring(0, 16)
+$slot = $null
+for ($i = 0; $i -lt $MaxConcurrent -and -not $slot; $i++) {
+    $m = [System.Threading.Mutex]::new($false, "Local\ollama-worker-$homeKey-slot-$i")
+    try {
+        if ($m.WaitOne(0)) { $slot = $m } else { $m.Dispose() }
+    }
+    catch {
+        # Abandoned: another process still had the mutex open when its holder
+        # died. The slot is ours now.
+        $e = $_.Exception
+        while ($e -and $e -isnot [System.Threading.AbandonedMutexException]) { $e = $e.InnerException }
+        if ($e) { $slot = $m } else { throw }
+    }
+}
+if (-not $slot) {
+    Write-LogRow ([ordered]@{
+        ts             = (Get-Date).ToUniversalTime().ToString('o')
+        event          = 'refused'
+        label          = $Label
+        cwd            = $Cwd
+        model          = $Model
+        reason         = 'concurrency_cap'
+        max_concurrent = $MaxConcurrent
+    })
+    [ordered]@{
+        ok = $false; escalate = $true; reason = 'concurrency_cap'; model = $Model
+        session_id = $null; num_turns = 0; duration_ms = 0; result = $null; run_id = $null
+    } | ConvertTo-Json -Depth 4 -Compress
+    exit 2
+}
+
+# The start row is written before the launch because the run row cannot be
+# relied on: anything that kills this process first - Claude Code stops
+# background commands when the machine runs low on memory, a user interrupts -
+# leaves no run row and no verdict. A start row with no run row sharing its
+# run_id is a killed run. The same facts go to stderr: -Await parses that line
+# to find this process and its deadline, so its format is a contract.
+$runId = [guid]::NewGuid().ToString()
+$startedAt = (Get-Date).ToUniversalTime().ToString('o')
+Write-LogRow ([ordered]@{
+    ts              = $startedAt
+    event           = 'start'
+    run_id          = $runId
+    label           = $Label
+    cwd             = $Cwd
+    model           = $Model
+    resumed         = [bool]$Resume
+    wrapper_pid     = $PID
+    max_turns       = $MaxTurns
+    timeout_minutes = $TimeoutMinutes
+})
+[Console]::Error.WriteLine("ollama-worker: run_id=$runId started (label '$Label', model $Model, wrapper_pid $PID, timeout_s $timeoutSeconds, at $startedAt)")
+
 $stdoutFile = [System.IO.Path]::GetTempFileName()
 $stderrFile = [System.IO.Path]::GetTempFileName()
-$hadConfigDir = Test-Path Env:\CLAUDE_CONFIG_DIR
-$prevConfigDir = if ($hadConfigDir) { $env:CLAUDE_CONFIG_DIR } else { $null }
-$env:CLAUDE_CONFIG_DIR = $workerCfg
+$exitCode = $null
+$timedOut = $false
+$leftover = $null
+$wrapperError = $null
+$clock = [System.Diagnostics.Stopwatch]::StartNew()
 
+# Everything from here to the verdict is inside one try, so any failure still
+# ends in a verdict and a run row rather than a bare non-zero exit.
 try {
-    $proc = Start-Process -FilePath $ollama -ArgumentList $quoted -WorkingDirectory $Cwd `
-        -RedirectStandardInput $BriefFile -RedirectStandardOutput $stdoutFile `
-        -RedirectStandardError $stderrFile -NoNewWindow -PassThru -Wait
-    $exitCode = $proc.ExitCode
+    # The worker's whole process tree goes in a job object, and the wait is on
+    # the launcher alone.
+    #
+    # hero-task-11 (2026-09-12) is why. The worker ended its turn at 17:47:19Z
+    # and wrote a complete result envelope to stdout, yet the wrapper returned
+    # only when a user interrupt killed it at 01:42. `Start-Process -Wait`
+    # waits for every descendant, not just the process it started - verified on
+    # pwsh 7.6.6: a parent that exited at once, leaving a 25-second grandchild,
+    # returned after 26.1s - and that worker had started a static server from a
+    # throwaway puppeteer probe (spawn with shell: true), plus a prerender
+    # build. Which process outlived it is not recorded; the wait semantics are.
+    #
+    # Killing the launcher is not enough either. Verified with a real `ollama
+    # launch claude`: after Stop-Process on ollama.exe, claude.exe and its bash
+    # children kept running, and `taskkill /T` on the launcher PID then found
+    # nothing, because the tree is walked through parent PIDs and the parent
+    # was gone. TerminateJobObject killed all of them. KILL_ON_JOB_CLOSE does the
+    # same when this wrapper dies without reaching the end, so a harness kill of
+    # the wrapper no longer leaves a worker running with nobody waiting on it.
+    #
+    # Compiled here, after -Probe and -DryRun have exited, so they do not pay
+    # for it.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class OllamaWorkerJob {
+    [StructLayout(LayoutKind.Sequential)]
+    struct BasicLimit {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct IoCounters { public ulong R, W, O, RB, WB, OB; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct ExtendedLimit {
+        public BasicLimit Basic;
+        public IoCounters Io;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct BasicAccounting {
+        public long TotalUserTime, TotalKernelTime, ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateJobObjectW(IntPtr attributes, string name);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimit info, uint length);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool QueryInformationJobObject(IntPtr job, int infoClass, out BasicAccounting info, uint length, IntPtr returned);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+    // The handle is never closed explicitly: process exit closes it, and
+    // KILL_ON_JOB_CLOSE then ends whatever is still in the job. It is not
+    // inheritable, so no child can hold the job open after this process dies.
+    public static IntPtr Create() {
+        IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw new System.ComponentModel.Win32Exception();
+        var info = new ExtendedLimit();
+        info.Basic.LimitFlags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if (!SetInformationJobObject(job, 9, ref info, (uint)Marshal.SizeOf(typeof(ExtendedLimit))))
+            throw new System.ComponentModel.Win32Exception();
+        return job;
+    }
+    public static bool TryAssign(IntPtr job, IntPtr process) { return AssignProcessToJobObject(job, process); }
+    public static int Active(IntPtr job) {
+        BasicAccounting a;
+        if (!QueryInformationJobObject(job, 1, out a, (uint)Marshal.SizeOf(typeof(BasicAccounting)), IntPtr.Zero)) return -1;
+        return (int)a.ActiveProcesses;
+    }
+    public static bool Terminate(IntPtr job) { return TerminateJobObject(job, 1); }
 }
-finally {
-    if ($hadConfigDir) { $env:CLAUDE_CONFIG_DIR = $prevConfigDir }
-    else { Remove-Item Env:\CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
+'@
+    $job = [OllamaWorkerJob]::Create()
+
+    $hadConfigDir = Test-Path Env:\CLAUDE_CONFIG_DIR
+    $prevConfigDir = if ($hadConfigDir) { $env:CLAUDE_CONFIG_DIR } else { $null }
+    $env:CLAUDE_CONFIG_DIR = $workerCfg
+    try {
+        $proc = Start-Process -FilePath $ollama -ArgumentList $quoted -WorkingDirectory $Cwd `
+            -RedirectStandardInput $BriefFile -RedirectStandardOutput $stdoutFile `
+            -RedirectStandardError $stderrFile -NoNewWindow -PassThru
+    }
+    finally {
+        if ($hadConfigDir) { $env:CLAUDE_CONFIG_DIR = $prevConfigDir }
+        else { Remove-Item Env:\CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
+    }
+
+    # Assigned right after the start, so children the launcher spawns later are
+    # born in the job. That is timing, not a guarantee: with a real launcher
+    # (2026-09-17) claude.exe and its shells all landed in the job, but a child
+    # spawned before this line would not. On timeout taskkill /T below still
+    # reaches it; after a normal exit it would be neither counted nor killed.
+    $inJob = [OllamaWorkerJob]::TryAssign($job, $proc.Handle)
+    if (-not $inJob) {
+        [Console]::Error.WriteLine("ollama-worker: could not put the worker in a job object; a timeout falls back to taskkill /T")
+    }
+
+    $timeoutMs = [int][math]::Min([int]::MaxValue, [math]::Ceiling($TimeoutMinutes * 60000))
+    $timedOut = -not $proc.WaitForExit($timeoutMs)
+
+    if ($timedOut) {
+        # The tree is still connected while the launcher lives, so /T reaches
+        # anything that escaped the job; the job reaches what /T cannot.
+        & taskkill /F /T /PID $proc.Id 2>&1 | Out-Null
+    }
+    else {
+        $exitCode = $proc.ExitCode
+    }
+    if ($inJob) {
+        # After a normal exit this counts what the worker left running - a dev
+        # server, a watch-mode test - and kills it.
+        $leftover = [OllamaWorkerJob]::Active($job)
+        [void][OllamaWorkerJob]::Terminate($job)
+    }
+}
+catch {
+    $wrapperError = $_.Exception.Message
 }
 
 # The launcher prints warnings of its own; keep them on stderr so the caller
@@ -417,7 +823,7 @@ Remove-Item -LiteralPath $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
 # type check covers the other shape failure: if the envelope is ever
 # pretty-printed, the last line starting with '{' is a fragment, not the result.
 $r = $null
-if ($resultLine) {
+if ($resultLine -and -not $timedOut -and -not $wrapperError) {
     try { $r = $resultLine | ConvertFrom-Json }
     catch { $r = $null }
     if ($r.type -ne 'result') { $r = $null }
@@ -427,13 +833,16 @@ $escalate = $false
 $reason   = ''
 $verdict  = [ordered]@{}
 
-if ($null -eq $r) {
+if ($wrapperError -or $timedOut -or $null -eq $r) {
     $escalate = $true
-    $reason   = if ($resultLine) { "invalid_result_json_exit_$exitCode" }
-                else             { "no_result_json_exit_$exitCode" }
+    $reason   = if ($wrapperError) { 'wrapper_error' }
+                elseif ($timedOut) { "timeout_${timeoutLabel}m" }
+                elseif ($resultLine) { "invalid_result_json_exit_$exitCode" }
+                else { "no_result_json_exit_$exitCode" }
     $verdict  = [ordered]@{
         ok = $false; escalate = $true; reason = $reason; model = $Model
-        session_id = $null; num_turns = 0; duration_ms = 0; result = $null
+        session_id = $null; num_turns = 0; duration_ms = [int]$clock.ElapsedMilliseconds
+        result = $wrapperError; run_id = $runId
     }
 }
 else {
@@ -445,8 +854,12 @@ else {
     $ms = $r.duration_ms -as [int]
     if ($null -eq $ms) { $ms = 0 }
 
-    if ($r.is_error)         { $escalate = $true; $reason = 'is_error' }
-    elseif ($exitCode -ne 0) { $escalate = $true; $reason = "exit_$exitCode" }
+    # The cap first: a capped run is also is_error and exits 1, and either of
+    # those reasons would hide why it stopped. The num_turns comparison stays as
+    # a second layer for a CLI that ignores --max-turns.
+    if ($r.subtype -eq 'error_max_turns') { $escalate = $true; $reason = "max_turns_$MaxTurns" }
+    elseif ($r.is_error)          { $escalate = $true; $reason = 'is_error' }
+    elseif ($exitCode -ne 0)      { $escalate = $true; $reason = "exit_$exitCode" }
     elseif ($turns -gt $MaxTurns) { $escalate = $true; $reason = "turns_${turns}_over_${MaxTurns}" }
 
     $verdict = [ordered]@{
@@ -458,24 +871,29 @@ else {
         num_turns   = $turns
         duration_ms = $ms
         result      = $r.result
+        run_id      = $runId
     }
 }
 
-$verdict | ConvertTo-Json -Depth 6 -Compress
+# Logged BEFORE the verdict is printed, so a caller that sees the verdict can
+# rely on the row being on disk.
+Write-LogRow ([ordered]@{
+    ts                 = (Get-Date).ToUniversalTime().ToString('o')
+    event              = 'run'
+    run_id             = $runId
+    label              = $Label
+    cwd                = $Cwd
+    model              = $Model
+    resumed            = [bool]$Resume
+    session_id         = $verdict.session_id
+    num_turns          = $verdict.num_turns
+    duration_ms        = $verdict.duration_ms
+    wall_ms            = [int]$clock.ElapsedMilliseconds
+    leftover_processes = $leftover
+    escalate           = $verdict.escalate
+    reason             = $verdict.reason
+})
 
-$logEntry = [ordered]@{
-    ts          = (Get-Date).ToUniversalTime().ToString('o')
-    event       = 'run'
-    label       = $Label
-    cwd         = $Cwd
-    model       = $Model
-    resumed     = [bool]$Resume
-    session_id  = $verdict.session_id
-    num_turns   = $verdict.num_turns
-    duration_ms = $verdict.duration_ms
-    escalate    = $verdict.escalate
-    reason      = $verdict.reason
-}
-Write-LogRow $logEntry
+$verdict | ConvertTo-Json -Depth 6 -Compress
 
 if ($escalate) { exit 2 } else { exit 0 }
