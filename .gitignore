@@ -22,3 +22,6 @@ Thumbs.db
 # Ship / fix-pr-reviews pipeline state (per-run scratch)
 .claude-ship-state.json
 .claude-pr-fix-state.json
+
+# Superpowers session artifacts (brainstorm companion, scratch)
+.superpowers/
