@@ -166,6 +166,14 @@ Describe 'settings' {
         $probe.max_concurrent | Should -Be 1
     }
 
+    It 'defaults maxTurns to 100 when state omits it' {
+        @{ enabled = $true; model = 'fake-model:cloud' } | ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $script:Home_ 'ollama-workers.json')
+        $plan = & pwsh -NoProfile -File $script:Wrapper -BriefFile $script:Brief -Cwd $script:Wt -DryRun | ConvertFrom-Json
+        $plan.maxTurns | Should -Be 100
+        $plan.args[[array]::IndexOf([string[]]$plan.args, '--max-turns') + 1] | Should -Be '100'
+    }
+
     It 'reads timeoutMinutes and maxConcurrent from state' {
         Set-State @{ timeoutMinutes = 40; maxConcurrent = 3 }
         $plan = & pwsh -NoProfile -File $script:Wrapper -BriefFile $script:Brief -Cwd $script:Wt -DryRun | ConvertFrom-Json

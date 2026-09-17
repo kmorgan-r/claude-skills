@@ -1,10 +1,10 @@
 # Report: bound the ollama worker
 
 **Written:** 2026-09-17. **Branch:** `fix/ollama-worker-bounds` off `origin/main` (`f18f853`),
-worktree `~/cs-wt/ow-bounds`. Not pushed, no PR. Answers `docs/superpowers/handoffs/kickoff-ollama-worker-bounds.md`, which
+worktree `~/cs-wt/ow-bounds`, PR #37. Answers `docs/superpowers/handoffs/kickoff-ollama-worker-bounds.md`, which
 is untracked in `~/claude-skills-main` and not part of this branch.
 
-## Headline: two findings contradict the kickoff
+## Headline: three findings contradict the kickoff
 
 1. **hero-task-11 did not hang in the model.** The worker finished its task. The wrapper hung
    because `Start-Process -Wait` waits for every descendant process, and the worker left one
@@ -12,6 +12,12 @@ is untracked in `~/claude-skills-main` and not part of this branch.
 2. **`taskkill /T` is not enough to kill a worker.** Once the `ollama` launcher has exited,
    `taskkill /T` on its PID finds nothing, while `claude.exe` and its shells keep running. The
    wrapper now puts the worker tree in a Windows job object.
+3. **The 14 turn-cap "overruns" were not failures.** Every one ended `DONE` or
+   `DONE_WITH_CONCERNS` with a commit (27-86 turns, 1.2-17.3 minutes). They were escalated only by
+   the old after-the-fact `num_turns > 25` check and redone by Anthropic. A hard `--max-turns 25`
+   would cut the same runs off half-done, so the default cap is 100 (above the 86 seen), a guard
+   against runaway loops only; `timeoutMinutes` is the bound that matters. Whether those runs'
+   work passed review is not recorded.
 
 ## Research
 
@@ -108,7 +114,8 @@ From `~/.claude/ollama-workers.log.jsonl` (462 rows: 334 probe, 53 start, 75 run
 - 52 runs have both start and run rows: wall time exceeded `duration_ms` by at most 0.6 minutes
   (usually 0.0-0.1). Longest wall time 13.7 minutes in that subset.
 - The only unpaired start row is hero-task-11.
-- The 14 turn-cap overruns ran 1.2-17.3 minutes; `--max-turns` now stops those earlier.
+- The 14 turn-cap overruns ran 1.2-17.3 minutes and all finished with a commit (headline 3), so
+  they sit inside the 25-minute limit too.
 
 25 minutes is above every success and leaves about 28% headroom over the longest.
 
@@ -133,7 +140,7 @@ found nothing. No change to `ship/`.
 | File | Change | Why |
 |---|---|---|
 | `ollama-workers/scripts/ollama-worker.ps1` | `OLLAMA_WORKERS_HOME` seam, retrying `Write-LogRow`, start row + `run_id` (from `bc1bfe88`) | tests must not touch the real state or log; a killed run shows as an unpaired start row |
-| | `--max-turns $MaxTurns`; `subtype: error_max_turns` maps to `max_turns_<n>` before `is_error`; post-run turn check kept | R1 |
+| | `--max-turns $MaxTurns`, default raised from 25 to 100; `subtype: error_max_turns` maps to `max_turns_<n>` before `is_error`; post-run turn check kept | R1; headline 3 |
 | | `-PassThru` + `WaitForExit(timeout)` on the launcher; worker tree in a job object with `KILL_ON_JOB_CLOSE`; job terminated after every run; `taskkill /T` too on timeout | R2, R4 |
 | | `timeoutMinutes` (default 25, `[double]`), reason `timeout_<n>m` | R6 |
 | | `maxConcurrent` (default 1), mutex slots, refuse with `concurrency_cap`, log `event: "refused"` | R5; refused rows stay out of run statistics |
@@ -143,11 +150,12 @@ found nothing. No change to `ship/`.
 | `ollama-workers/agents/ollama-worker.md` | PowerShell only; background launch; at most 10 `-Await` checks; `forwarder_check_cap`; never does the task | change 3 |
 | `ollama-workers/tests/Wrapper.Tests.ps1` | new, 21 Pester tests with a fake `ollama` | change 6 |
 | `ollama-workers/SKILL.md` | state keys; opt-in line; bounds; reason table; `concurrency_cap` routed as unavailable; `-Await` in the transport fallback; calibration rows; replaced "no `--max-turns`" note; keep `timeoutMinutes` <= 35 | docs were false after the change |
-| `ollama-workers/ollama-workers.example.json` | adds `timeoutMinutes: 25`, `maxConcurrent: 1` | fresh installs |
+| `ollama-workers/ollama-workers.example.json` | `maxTurns: 100`; adds `timeoutMinutes: 25`, `maxConcurrent: 1` | fresh installs |
+| `ollama-workers/hooks/ollama-workers-status.py` | displayed `maxTurns` default 25 -> 100 | matches the wrapper |
 | `README.md` | ollama-workers section: bounds, PowerShell-only forwarder, log rows | docs were false |
 | `advisor-bridge/scripts/advisor-bridge.ps1` | two comments cite `ollama-worker.ps1` line numbers; bumped to the new lines | they pointed at the wrong code |
 
-Not changed: `install.ps1`, the status hook, `ship/`.
+Not changed: `install.ps1`, `ship/`.
 
 ## Tests
 
@@ -155,6 +163,8 @@ Not changed: `install.ps1`, the status hook, `ship/`.
 Invoke-Pester (Pester 5.9.1) ollama-workers/tests/Wrapper.Tests.ps1
 passed=21 failed=0 in 80s     (first green run)
 passed=21 failed=0 in 74s     (rerun after the follow-up commit's edits)
+passed=22 failed=0 in 79s     (after raising the maxTurns default; the new test failed first
+                               with "Expected 100, but got 25")
 ```
 
 Before the implementation the same file ran 1 passed, 20 failed. Most of those failed on the
@@ -185,8 +195,7 @@ The wrapper was restored after the mutation run (checked by content comparison).
 
 ## What the human still has to do
 
-1. **Review** `ceee6fc` and the follow-up commit on `fix/ollama-worker-bounds`, then push and open
-   the PR if it looks right.
+1. **Review** PR #37 (`fix/ollama-worker-bounds`) and merge it if it looks right.
 2. **Deploy after merge, not from the branch.** `install.ps1` copies `SKILL.md` into
    `~/.claude/skills/ollama-workers/`, which is a junction into `~/claude-skills-main`, so running
    it from this worktree would write the branch's `SKILL.md` into your main checkout next to your
@@ -194,13 +203,15 @@ The wrapper was restored after the mutation run (checked by content comparison).
    `~/claude-skills-main`, run `./ollama-workers/install.ps1 -DryRun`, then without `-DryRun`.
    Installed vs branch today:
    - `agents/ollama-worker.md`: 35 insertions, 39 deletions
-   - `scripts/ollama-worker.ps1`: 440 insertions, 64 deletions
-   - `hooks/ollama-workers-status.py`: 10 insertions, 27 deletions (removes #35's "by default"
+   - `scripts/ollama-worker.ps1`: 445 insertions, 65 deletions
+   - `hooks/ollama-workers-status.py`: 11 insertions, 28 deletions (removes #35's "by default"
      and `ROUTING-EXCEPTION` text)
-   - `skills/ollama-workers/SKILL.md`: 82 insertions, 27 deletions
+   - `skills/ollama-workers/SKILL.md`: 89 insertions, 27 deletions
 3. **Start a new session after installing.** Agent definitions load at session start.
-4. `ollama-workers.json` is seeded only when absent, so yours keeps three keys. The defaults
-   (25 minutes, 1 worker) apply; add the keys only to change them.
+4. **Change `maxTurns` in your `~/.claude/ollama-workers.json` from 25 to 100.** The installer
+   seeds that file only when it is absent, and an explicit 25 overrides the new default, so a hard
+   stop at 25 would cut off the kind of run headline 3 describes. `timeoutMinutes` and
+   `maxConcurrent` are absent from your file, so their defaults (25 minutes, 1 worker) apply.
 5. **Safe to turn back on?** Yes, with conditions: opt-in only, `maxConcurrent: 1`, installed
    copies re-synced, a fresh session. Run one small real dispatch first and check its `start` and
    `run` rows. Then watch the first 5-10 run rows for `leftover_processes > 0`, `wall_ms` far

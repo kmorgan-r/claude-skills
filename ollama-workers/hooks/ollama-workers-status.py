@@ -83,7 +83,7 @@ if not state.get("enabled"):
     sys.exit(0)
 
 model = state.get("model", "glm-5.3-flash:cloud")
-max_turns = state.get("maxTurns", 25)
+max_turns = state.get("maxTurns", 100)
 
 try:
     payload = json.load(sys.stdin)

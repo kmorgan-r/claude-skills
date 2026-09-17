@@ -154,7 +154,7 @@ if (Test-Path -LiteralPath $statePath) {
 if (-not $Model) { $Model = if ($state.model) { $state.model } else { 'glm-5.3-flash:cloud' } }
 if (-not $PSBoundParameters.ContainsKey('MaxTurns')) {
     $stateTurns = $state.maxTurns -as [int]
-    $MaxTurns = if ($stateTurns) { $stateTurns } else { 25 }
+    $MaxTurns = if ($stateTurns) { $stateTurns } else { 100 }
 }
 
 # 25 minutes: the longest successful run in ~/.claude/ollama-workers.log.jsonl
@@ -528,12 +528,16 @@ if (-not (Test-Path -LiteralPath $pluginLink)) {
     }
 }
 
-# --max-turns is a hard stop, not the after-the-fact comparison below: 14 runs
-# went 27 to 86 turns, up to 17 minutes, before being discarded. Verified
-# 2026-09-17 on Claude Code 2.1.274 through ollama 0.34.0: `ollama launch
-# claude ... -- --max-turns 1` passes the flag through, and a capped run ends
-# with type "result", subtype "error_max_turns", is_error true, exit 1, and
-# num_turns one ABOVE the cap (2 for a cap of 1).
+# --max-turns is a hard stop, so it guards against a runaway loop and nothing
+# else; the time limit is the bound that matters. It is not a fit filter: the
+# 14 runs the old after-the-fact check escalated at 27 to 86 turns all ended
+# DONE or DONE_WITH_CONCERNS with a commit, in 1.2 to 17.3 minutes, and were
+# redone by Anthropic only because of the count. A hard stop at 25 would cut
+# those same runs off half-done, so the default is 100, above the 86 seen.
+# Verified 2026-09-17 on Claude Code 2.1.274 through ollama 0.34.0: `ollama
+# launch claude ... -- --max-turns 1` passes the flag through, and a capped run
+# ends with type "result", subtype "error_max_turns", is_error true, exit 1,
+# and num_turns one ABOVE the cap (2 for a cap of 1).
 $claudeArgs = @('--settings', $overlay, '-p', '--output-format', 'json', '--max-turns', "$MaxTurns", '--dangerously-skip-permissions')
 if ($Resume) { $claudeArgs += @('--resume', $Resume) }
 $argList = @('launch', 'claude', '--model', $Model, '--') + $claudeArgs

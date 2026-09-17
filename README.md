@@ -182,8 +182,9 @@ cp -r find-cold-leads ~/.claude/skills/
   work stays in-process. Escalation is evidence-based (`is_error`, nonzero exit, the
   turn cap, the time limit) and has two rungs — ollama model, then Anthropic. Never
   ollama-to-ollama.
-- **Every dispatch is bounded.** `maxTurns` goes to the headless run as `--max-turns`
-  (a hard stop; 14 runs used to go 27-86 turns before being discarded). After
+- **Every dispatch is bounded.** `maxTurns` (default 100) goes to the headless run as
+  `--max-turns`, a hard stop against runaway loops only: the 14 runs an older
+  after-the-fact check escalated at 27-86 turns had all finished and committed. After
   `timeoutMinutes` (default 25) the wrapper kills the worker's whole process tree,
   which sits in a job object, and it waits on the launcher alone: `Start-Process -Wait`
   waits for every descendant, so a worker that finished but left a server running once

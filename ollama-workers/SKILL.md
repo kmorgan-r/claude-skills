@@ -10,7 +10,7 @@ separate headless Claude Code process. The orchestrator stays on Anthropic, and
 so does every reviewer.
 
 State: `~/.claude/ollama-workers.json` - `{ "enabled", "model", "maxTurns",
-"timeoutMinutes", "maxConcurrent" }`. The last three default to 25, 25 and 1
+"timeoutMinutes", "maxConcurrent" }`. The last three default to 100, 25 and 1
 when absent. The wrapper enforces `enabled` itself and exits 1 without
 launching anything unless it is `true`, so a dispatch on stale context fails
 loudly instead of running. A missing or unreadable state file counts as off.
@@ -23,6 +23,13 @@ Every dispatch is bounded: `maxTurns` is passed to the headless run as
 `--max-turns`, the wrapper kills the worker's whole process tree after
 `timeoutMinutes` of wall time, and it refuses a dispatch while `maxConcurrent`
 workers are already running. Each of those ends in a verdict, not a hang.
+
+`maxTurns` guards against a runaway loop; it is not a measure of fit. A hard
+stop cuts a worker off mid-task and leaves partial edits, and the 14 runs an
+older after-the-fact check escalated at 27 to 86 turns had all finished with a
+commit in under 18 minutes. Keep it well above what real tasks take, and let
+`timeoutMinutes` be the bound that matters.
+
 Keep `timeoutMinutes` at or below 35: the forwarder stops after ten checks of
 about 4 minutes, and a longer limit lets it give up while the worker is still
 editing the worktree the next implementer will be sent into.
