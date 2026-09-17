@@ -51,7 +51,7 @@ function Fail([string]$message, [int]$code = 1) {
 # -as, not a cast: a non-numeric or negative value in user-editable JSON would
 # otherwise throw a terminating error under $ErrorActionPreference = 'Stop' and
 # take the wrapper down before it could say what was wrong with the config.
-# Same reasoning as ollama-worker.ps1:128-133.
+# Same reasoning as ollama-worker.ps1:153-158.
 function Get-PositiveInt($value, [int]$default) {
     $n = $value -as [int]
     if ($null -eq $n -or $n -le 0) { return $default }
@@ -196,7 +196,7 @@ $transcriptPath = $found[0].FullName
 # partial record. Under $ErrorActionPreference = 'Stop' an unguarded
 # ConvertFrom-Json on it is a terminating error that would kill the wrapper
 # before any log row and with an exit code outside the published table. Same
-# hazard, same remedy, as ollama-worker.ps1:412-424.
+# hazard, same remedy, as ollama-worker.ps1:811-823.
 function Read-Turns([string]$path) {
     $turns   = [System.Collections.Generic.List[object]]::new()
     $skipped = 0

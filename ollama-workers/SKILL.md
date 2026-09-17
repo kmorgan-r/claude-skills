@@ -9,16 +9,26 @@ Routes short-turn mechanical implementer tasks to an Ollama cloud model in a
 separate headless Claude Code process. The orchestrator stays on Anthropic, and
 so does every reviewer.
 
-State: `~/.claude/ollama-workers.json` - `{ "enabled", "model", "maxTurns" }`.
-The wrapper enforces `enabled` itself and exits 1 without launching anything
-unless it is `true`, so a dispatch on stale context fails loudly instead of
-running. A missing or unreadable state file counts as off.
+State: `~/.claude/ollama-workers.json` - `{ "enabled", "model", "maxTurns",
+"timeoutMinutes", "maxConcurrent" }`. The last three default to 25, 25 and 1
+when absent. The wrapper enforces `enabled` itself and exits 1 without
+launching anything unless it is `true`, so a dispatch on stale context fails
+loudly instead of running. A missing or unreadable state file counts as off.
+
+Workers are opt-in. Nothing - a skill, a hook, a pipeline rule - should force
+work through a worker dispatch, and a conductor that could make an edit itself
+should not be made to dispatch it instead.
+
+Every dispatch is bounded: `maxTurns` is passed to the headless run as
+`--max-turns`, the wrapper kills the worker's whole process tree after
+`timeoutMinutes` of wall time, and it refuses a dispatch while `maxConcurrent`
+workers are already running. Each of those ends in a verdict, not a hang.
 
 ## Commands
 
 **`status`** (also the bare invocation) - read the state file, print enabled +
-model + maxTurns, then probe this directory, then `ollama list` so the user sees
-which cloud tags exist.
+model + maxTurns + timeoutMinutes + maxConcurrent, then probe this directory,
+then `ollama list` so the user sees which cloud tags exist.
 
 ```powershell
 pwsh -NoProfile -File "$HOME/.claude/scripts/ollama-worker.ps1" -Probe
@@ -32,8 +42,10 @@ directory.
 The probe runs the wrapper's own preflight against the current directory - the
 model tag's syntax, the directory, the settings overlay, the worktree guard,
 the ollama binary - and prints one JSON line: `dispatchable`, `reason`,
-`remedy`, `enabled`, `model`, `model_syntax_ok`. Exit 0 means a dispatch from
-here would get past the preflight, 1 means it would not.
+`remedy`, `enabled`, `model`, `model_syntax_ok`, `max_turns`,
+`timeout_minutes`, `max_concurrent`. Exit 0 means a dispatch from here would
+get past the preflight, 1 means it would not. The probe does not count running
+workers: a full concurrency cap is a moment, not a fact about the directory.
 
 `reason` names the *first* blocker, in the order a dispatch hits them, so fixing
 it is what unblocks the next attempt. It is not a list: a directory with two
@@ -112,9 +124,8 @@ brief you would have put in an Anthropic implementer prompt, including the
 skills it must follow. `superpowers:subagent-driven-development`'s
 `implementer-prompt.md` is unchanged; only the dispatch mechanism differs.
 
-**Transport.** The forwarder runs the wrapper through the PowerShell tool, and
-through Bash only when it has no PowerShell tool. Bash is the wrong default
-because a session isolated in a worktree - `EnterWorktree`, or an agent
+**Transport.** The forwarder runs the wrapper through the PowerShell tool only.
+Bash is the wrong tool because a session isolated in a worktree - `EnterWorktree`, or an agent
 launched with worktree isolation - vets every Bash command and refuses any
 that starts `pwsh`: Claude Code cannot show that text handed to a second shell
 will not run git. That check is built into Claude Code, not a hook, so there is
@@ -127,17 +138,20 @@ A result that quotes "is isolated in the worktree ... Refusing to run it", or
 starts `transport refused:`, means the wrapper never ran. It is not a verdict
 and it is not the unavailable case below: nothing was probed, nothing was
 logged, and the worker may be one tool call away. Run the same command yourself
-through the PowerShell tool, with `run_in_background: true`, and route on its
-JSON exactly as you would on the forwarder's:
+through the PowerShell tool, with `run_in_background: true`, then wait on it the
+way the forwarder does - foreground checks of its output file, each returning
+within about 4 minutes, until one says `STATE: finished` or `STATE: no verdict`
+- and route on the JSON exactly as you would on the forwarder's:
 
 ```powershell
 pwsh -NoProfile -File "$HOME/.claude/scripts/ollama-worker.ps1" -BriefFile <path> -Cwd <worktree> -Label <task-id>
+pwsh -NoProfile -File "$HOME/.claude/scripts/ollama-worker.ps1" -Await '<output file>'
 ```
 
-That is the same dispatch, not a retry. Expect it from a forwarder installed
-before this fix, and in any session opened before the reinstall: agent
-definitions load at session start, so that session keeps the old forwarder
-until it restarts.
+That is the same dispatch, not a retry. Expect it from a Bash-capable forwarder
+installed before the PowerShell fix, and in any session opened before a
+reinstall: agent definitions load at session start, so that session keeps the
+old forwarder until it restarts.
 
 Roles that stay on Anthropic, always:
 
@@ -178,6 +192,12 @@ if workers were off: a fast, cheap model for mechanical work, a standard model
 for integration and judgment. Do not promote a worker-shaped task to a larger
 model because the worker was missing.
 
+A verdict with `reason: "concurrency_cap"` is this case too, even though it
+says `escalate: true`. `maxConcurrent` workers were already running, so nothing
+ran and nothing was learned about the task: route it as unavailable, not as an
+escalation, and do not wait and re-dispatch - that is the queue the cap
+deliberately does not have.
+
 A transport refusal is not this case (see **Transport**). The wrapper never
 ran, so availability is unknown rather than false, and taking this fallback on
 it records a worker as missing that was one tool call away.
@@ -190,10 +210,25 @@ plan.
 
 ## Escalation
 
-Escalate on evidence, never predict. The wrapper exits 2 and sets `escalate`
-when `is_error`, a nonzero child exit, `num_turns > maxTurns`, or the child's
-stdout carries no usable result envelope. The caller escalates on that, or when
-review rejects the same task twice.
+Escalate on evidence, never predict. The wrapper exits 2 and sets `escalate`,
+and `reason` says why:
+
+| reason | what happened |
+|---|---|
+| `max_turns_<n>` | the run hit `--max-turns` and was stopped |
+| `turns_<n>_over_<m>` | the run reported more turns than the cap anyway |
+| `timeout_<n>m` | past `timeoutMinutes`; the worker's process tree was killed |
+| `is_error`, `exit_<n>` | the child reported an error or exited nonzero |
+| `no_result_json_exit_<n>`, `invalid_result_json_exit_<n>` | no usable result envelope |
+| `wrapper_error` | the wrapper itself failed after launching; `result` has the message |
+| `wrapper_died`, `wrapper_exit_<n>` | the wrapper was killed from outside; recorded by `-Await` |
+| `wrapper_overdue` | the wrapper outlived its own limit and `-Await` killed it |
+| `forwarder_check_cap` | the forwarder ran out of checks |
+| `concurrency_cap` | nothing ran - see **When the worker is unavailable** |
+
+The caller escalates on those, or when review rejects the same task twice. Every
+one except `concurrency_cap` means the worktree may hold partial work from the
+worker; the Anthropic implementer starts from what is there.
 
 The ladder has two rungs: **ollama model -> Anthropic**. Never re-dispatch a
 failed task to a larger Ollama model - it re-sends full context to a slower
@@ -201,10 +236,19 @@ endpoint with the same tool-format failure modes.
 
 ## Calibration
 
-Every run appends one line to `~/.claude/ollama-workers.log.jsonl` with
-`event: "run"`: model, num_turns, duration_ms, escalate, reason. After ~20
-tasks, read it and adjust `maxTurns` and the routing rubric from that instead of
-from published benchmarks.
+Every launched run appends two lines to `~/.claude/ollama-workers.log.jsonl`
+sharing a `run_id`: `event: "start"` before the launch, and `event: "run"` when
+it ends - model, num_turns, duration_ms, wall_ms, escalate, reason, and
+`leftover_processes`, the number of processes the worker left running that the
+wrapper then killed. The run row is written on every path out of the wrapper,
+including a timeout and a wrapper error. A wrapper killed from outside cannot
+write one; `-Await` writes it instead, with `recorded_by: "await"`, and a start
+row with no run row at all is a run nobody was waiting for. After ~20 tasks,
+read the run rows and adjust `maxTurns`, `timeoutMinutes` and the routing rubric
+from them instead of from published benchmarks.
+
+A dispatch refused by the concurrency cap appends `event: "refused"`. Like
+probe rows, those are availability, not outcomes.
 
 A probe that finds the directory not dispatchable while workers are on appends
 `event: "probe"` with `dispatchable: false` and a reason. Read those as
@@ -229,5 +273,13 @@ before this field exists have no `event` key and are runs.
   rejects a plain scratch directory, and that a scratch path under a
   version-controlled home directory resolves to *that* repo and is reported as
   a primary checkout.
-- This CLI has no `--max-turns`, so `maxTurns` is checked after the fact from
-  the result JSON. It is an escalation signal, not a hard stop.
+- `--max-turns` works in `-p` mode even though `claude --help` does not list
+  it, and `ollama launch claude ... --` passes it through. A capped run reports
+  `num_turns` one above the cap. The after-the-fact `num_turns > maxTurns`
+  check stays as a second layer.
+- The wrapper waits on the `ollama` launcher alone, not on its descendants, and
+  puts the worker's process tree in a job object. When the launcher exits, or
+  the time limit passes, or the wrapper itself dies, everything left in the job
+  is killed - a dev server or watch-mode test the worker started included.
+  `Start-Process -Wait` waits for every descendant, which is how a worker that
+  finished in 16 minutes held its wrapper for 8 hours.

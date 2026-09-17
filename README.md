@@ -179,9 +179,18 @@ cp -r find-cold-leads ~/.claude/skills/
 - **The endpoint has no prompt caching**, so ~34K of system prompt is re-sent every turn
   and TTFT is ~20s. Turn count, not the benchmark index, decides fit: short-turn
   mechanical tasks with a complete brief go to the worker, multi-file and integration
-  work stays in-process. Escalation is evidence-based (`is_error`, nonzero exit, or
-  `num_turns > maxTurns`) and has two rungs — ollama model, then Anthropic. Never
+  work stays in-process. Escalation is evidence-based (`is_error`, nonzero exit, the
+  turn cap, the time limit) and has two rungs — ollama model, then Anthropic. Never
   ollama-to-ollama.
+- **Every dispatch is bounded.** `maxTurns` goes to the headless run as `--max-turns`
+  (a hard stop; 14 runs used to go 27-86 turns before being discarded). After
+  `timeoutMinutes` (default 25) the wrapper kills the worker's whole process tree,
+  which sits in a job object, and it waits on the launcher alone: `Start-Process -Wait`
+  waits for every descendant, so a worker that finished but left a server running once
+  held its wrapper for 8 hours. `maxConcurrent` (default 1) refuses a dispatch rather
+  than queueing it, counted by named mutexes the kernel releases when a wrapper dies.
+  The forwarder waits in checks of about 4 minutes each, and a check ends on its own
+  once the wrapper's limit has passed.
 - **Isolated config dir.** The worker runs under `CLAUDE_CONFIG_DIR=~/.claude-ollama-worker`
   with `plugins` junctioned in. Sessions live at `<config-dir>/projects/<cwd>/`, so
   sharing the caller's config dir would leave worker transcripts where the caller's next
@@ -199,16 +208,18 @@ cp -r find-cold-leads ~/.claude/skills/
   tag to `[A-Za-z0-9._:/-]`, a session id to `[A-Za-z0-9._-]`, neither with a leading
   dash - and the line itself is built by the CRT's own quoting rules, so neither can
   close an argument early and append flags of its own.
-- **The forwarder calls the wrapper through the PowerShell tool**, and through Bash only
-  when it has none. A worktree-isolated session (`EnterWorktree`, or an agent launched
+- **The forwarder calls the wrapper through the PowerShell tool** only. A
+  worktree-isolated session (`EnterWorktree`, or an agent launched
   with worktree isolation) refuses any Bash command that starts `pwsh` — Claude Code's
   built-in check cannot show that a second shell will not run git — so a Bash-only
   forwarder could never dispatch from inside the worktree the wrapper requires. The
   PowerShell tool is not vetted that way and runs the same command line. A refusal means
   the wrapper never ran, so the caller re-issues the same command through its own
   PowerShell tool instead of recording the worker as unavailable.
-- Every run appends one line to `~/.claude/ollama-workers.log.jsonl` (`event: "run"`,
-  model, num_turns, duration_ms, escalate, reason). A probe that finds the directory
+- Every launched run appends a `start` row and a `run` row sharing a `run_id` to
+  `~/.claude/ollama-workers.log.jsonl` (model, num_turns, duration_ms, wall_ms,
+  leftover_processes, escalate, reason); the run row is written on every exit path,
+  timeouts included. A probe that finds the directory
   not dispatchable while workers are on appends an `event: "probe"` row, so the log
   distinguishes "the worker was never usable in this repo" from "no task was a good
   fit" — a task that is never dispatched writes nothing otherwise. Calibrate `maxTurns`
