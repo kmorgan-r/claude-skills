@@ -23,6 +23,9 @@ Every dispatch is bounded: `maxTurns` is passed to the headless run as
 `--max-turns`, the wrapper kills the worker's whole process tree after
 `timeoutMinutes` of wall time, and it refuses a dispatch while `maxConcurrent`
 workers are already running. Each of those ends in a verdict, not a hang.
+Keep `timeoutMinutes` at or below 35: the forwarder stops after ten checks of
+about 4 minutes, and a longer limit lets it give up while the worker is still
+editing the worktree the next implementer will be sent into.
 
 ## Commands
 

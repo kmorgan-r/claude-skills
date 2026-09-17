@@ -770,8 +770,11 @@ public static class OllamaWorkerJob {
         else { Remove-Item Env:\CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
     }
 
-    # Assigned right after the start. The launcher only spawns claude.exe once
-    # it has read its own configuration, so its children are born in the job.
+    # Assigned right after the start, so children the launcher spawns later are
+    # born in the job. That is timing, not a guarantee: with a real launcher
+    # (2026-09-17) claude.exe and its shells all landed in the job, but a child
+    # spawned before this line would not. On timeout taskkill /T below still
+    # reaches it; after a normal exit it would be neither counted nor killed.
     $inJob = [OllamaWorkerJob]::TryAssign($job, $proc.Handle)
     if (-not $inJob) {
         [Console]::Error.WriteLine("ollama-worker: could not put the worker in a job object; a timeout falls back to taskkill /T")

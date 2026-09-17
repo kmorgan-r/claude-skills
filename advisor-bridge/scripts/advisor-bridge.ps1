@@ -196,7 +196,7 @@ $transcriptPath = $found[0].FullName
 # partial record. Under $ErrorActionPreference = 'Stop' an unguarded
 # ConvertFrom-Json on it is a terminating error that would kill the wrapper
 # before any log row and with an exit code outside the published table. Same
-# hazard, same remedy, as ollama-worker.ps1:811-823.
+# hazard, same remedy, as ollama-worker.ps1:814-826.
 function Read-Turns([string]$path) {
     $turns   = [System.Collections.Generic.List[object]]::new()
     $skipped = 0
