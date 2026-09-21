@@ -66,7 +66,8 @@ Read `.claude-orchestrator-state.md` at the main checkout root.
    `where.exe wt` resolves, the `-p` profile name exists in Terminal's
    `settings.json` (`grep -o '"name": "[^"]*"'` over
    `%LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json`
-   — a profile name that does not exist opens a tab that dies immediately), and
+   — a profile name that does not exist opens a tab that dies immediately; the
+   name you find there is the `<profile>` in the `wt` commands below), and
    `claude` resolves for the launcher. If `Get-Command claude` finds it but
    `cmd /c where claude` does not, put the absolute path
    (e.g. `C:\Users\<you>\.local\bin\claude.exe`) in `claude-start.cmd` rather
@@ -108,10 +109,11 @@ splits on spaces):
 claude --dangerously-skip-permissions "Read ORCHESTRATOR-BRIEF.md in this directory and follow it. Do not merge your own PR."
 ```
 
-**4. Open the tab:**
+**4. Open the tab**, with `<profile>` a name read from `settings.json` in Setup,
+never an assumed default:
 
 ```powershell
-wt -w 0 new-tab -p "Windows PowerShell" -d "<worktree>" --title "issue-<N>" cmd /c "<worktree>\claude-start.cmd"
+wt -w 0 new-tab -p "<profile>" -d "<worktree>" --title "issue-<N>" cmd /c "<worktree>\claude-start.cmd"
 ```
 
 `-w 0` reuses the current Terminal window, so each session is a tab the operator
@@ -119,7 +121,7 @@ can flip through. To RE-ATTACH a session whose tab was closed, use the resume
 form — it picks up that directory's most recent conversation:
 
 ```powershell
-wt -w 0 new-tab -p "Windows PowerShell" -d "<worktree>" cmd /c claude --dangerously-skip-permissions --continue
+wt -w 0 new-tab -p "<profile>" -d "<worktree>" cmd /c claude --dangerously-skip-permissions --continue
 ```
 
 `--continue` has nothing to resume in a fresh worktree: launcher form for a
