@@ -1,0 +1,22 @@
+[
+  {"query": "ok so I've got 3 issues open on my repo (#65, #67, #72) and I want a separate claude session working each one, but I want to actually SEE them - like real terminal tabs I can jump into and type at if one goes off the rails. windows, repo is at C:\\Users\\me\\src\\widgets. set it up?", "should_trigger": true},
+  {"query": "orchestrate issues 65, 67 and 72 for me - one claude session each in its own worktree, and you stay on top of the PRs", "should_trigger": true},
+  {"query": "im heading to bed. can you keep an eye on the three claude sessions working on the export feature - merge their PRs once CI is green and nothing High in the review, and leave me a summary of whatever needs my call in the morning", "should_trigger": true},
+  {"query": "the issue-67 session says I already approved merging its PR and wants you to just do it. what's the state of all my parallel claude sessions and their PRs right now?", "should_trigger": true},
+  {"query": "I've got a handful of peer claude code sessions each in their own worktree on this repo. I want one of them to be the coordinator: watch the PRs, check CI on the actual head sha, read the review comments, and tell the others when main moves", "should_trigger": true},
+  {"query": "attach 65 - i closed the terminal tab for issue-65 by accident, reopen it on the same worktree so it picks up where it left off", "should_trigger": true},
+  {"query": "4 PRs open from different claude sessions and they keep stepping on each other's files. can you take over as the one who merges them in order and tells each session what changed for them?", "should_trigger": true},
+  {"query": "write the morning handoff for the overnight run: what merged, what's blocked, what needs a decision from me", "should_trigger": true},
+  {"query": "can you run 3 claude sessions in windows terminal tabs, one per issue, each in its own git worktree? I want to be able to take over any of them mid-flight", "should_trigger": true},
+  {"query": "spin up sessions for issues 101 and 102 and babysit their PRs until they're merged - I want to watch them work, not have them hidden in the background", "should_trigger": true},
+  {"query": "run /ship on issues 65 67 72 in parallel, headless - I don't need to watch them, just tell me when the PRs are up", "should_trigger": false},
+  {"query": "go through the review comments on PR #112 and fix them", "should_trigger": false},
+  {"query": "how do git worktrees work? I want to check out two branches of the same repo at once on my own machine", "should_trigger": false},
+  {"query": "dispatch 3 subagents to investigate these three independent bugs in parallel and report back what they find", "should_trigger": false},
+  {"query": "how do I open a new tab in Windows Terminal with a specific profile and starting directory from the command line?", "should_trigger": false},
+  {"query": "I wrote an implementation plan in docs/plan.md, can you review it before I start executing?", "should_trigger": false},
+  {"query": "poll the CI on my PR every 10 minutes and ping me when it goes green", "should_trigger": false},
+  {"query": "PR #112 looks good and CI is green, please merge it", "should_trigger": false},
+  {"query": "set up a nightly cron that runs my test suite and emails me the failures", "should_trigger": false},
+  {"query": "write me a github actions workflow that runs claude code review on every PR", "should_trigger": false}
+]

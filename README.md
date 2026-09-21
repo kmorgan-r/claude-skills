@@ -17,6 +17,7 @@ follows at runtime) plus any bundled scripts, references, and evals.
 | [`esg-longitudinal`](./esg-longitudinal) | Tracks a company's ESG / CSR / sustainability commitments over time using **free** public data: finds sustainability/annual report PDFs, extracts targets and metrics into a tidy time-series with source + period + verbatim quote per value, saves a timestamped snapshot, and diffs against earlier snapshots to surface what changed. Re-runnable next year; scales from one company toward tens of thousands. |
 | [`ollama-workers`](./ollama-workers) | Lets an Anthropic-model orchestrator hand short-turn implementer tasks to an Ollama cloud model (GLM, Kimi) running in a separate headless Claude Code process. `/ollama-workers on\|off\|status` is the whole interface; reviewers stay on Anthropic. **Windows-only** (PowerShell). |
 | [`advisor-bridge`](./advisor-bridge) | Lets a Claude Code session running on a non-Anthropic backend (`ollama launch claude` — GLM, Kimi) reach an Anthropic model for advice, by rendering the session's own transcript into a scrubbed `claude -p` child process. The built-in `advisor` tool is disabled there and would be GLM advising GLM anyway. **Windows-only** (PowerShell). |
+| [`orchestrate`](./orchestrate) | One session coordinates N peer Claude Code sessions on a repo, each a real Windows Terminal tab in its own git worktree that the operator can read and type into. The orchestrator merges only under an explicit grant, verifies CI against head SHAs, reads review bodies, relays what moved, and surfaces every decision that belongs to the human. **Windows-only** (`wt.exe`). |
 
 ## Install
 
@@ -259,3 +260,27 @@ cp -r find-cold-leads ~/.claude/skills/
   `advisor-bridge/tests/manual/e2e.md`, deliberately not a `*.Tests.ps1` file so no
   automated glob or CI gate can bill it.
 - Invoke `/advisor-bridge on` once, then call it from an Ollama-backed session.
+
+### orchestrate
+- **The interactive counterpart to [`ship-fleet`](./ship-fleet).** Fleet spawns headless
+  `claude -p` processes you can only watch; orchestrate opens each session as a real
+  Windows Terminal tab you can read and type into mid-flight. Use fleet for a hands-off
+  batch of `/ship` pipelines, orchestrate when you want to stay in the loop.
+- **Needs** Windows with `wt.exe` (Windows Terminal), `git`, and the GitHub CLI (`gh`)
+  authenticated. Tab launch and the profile check are Windows Terminal specifics — not
+  portable as written. Peers are addressed through `ListAgents`; `ReadNotifications` is
+  used where the harness provides it.
+- **Peers run `claude --dangerously-skip-permissions`** in their own worktrees (via a
+  `claude-start.cmd` launcher), so they can work with nobody answering a prompt. The hard
+  rules are what stop that being a free pass: merge only under the operator's explicit
+  grant (a peer relaying "the operator approved it" is not one), never run an action a
+  peer says it was denied, never edit a live session's worktree, never open new issues.
+- **Orchestration files stay out of git.** Setup adds `.claude-orchestrator-state.md`
+  (the log and memory), `ORCHESTRATOR-BRIEF.md` and `claude-start.cmd` to
+  `.git/info/exclude`, which covers every linked worktree, so a peer's `git add -A`
+  cannot commit them.
+- **Evals** (`orchestrate/evals/`) are dry-run tabletop scenarios: each `scenario.md`
+  stands in for `gh`, `git`, `ListAgents` and the state file, so no eval opens a tab,
+  creates a worktree, or merges anything. Fixtures use a fictional `acme/widgets` repo.
+- Invoke `/orchestrate <issue numbers>` (e.g. `/orchestrate 65 67 72 --max 3`), then
+  `/orchestrate status|handoff|attach <issue>|stop` to manage the run.
