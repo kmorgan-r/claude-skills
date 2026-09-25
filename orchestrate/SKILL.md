@@ -237,6 +237,12 @@ killed by the host for memory pressure. Parallelism beyond the machine's
 capacity produces flaky suites and untrustworthy numbers, and the slow phases
 (spec, plan, review) are not the parallel ones.
 
+Each session's own worktree is a valid `-Cwd` for the ollama worker, so
+sessions dispatch workers with no setup of their own. All sessions share the
+one machine-wide `maxConcurrent` in `~/.claude/ollama-workers.json`. A session
+that dispatches while every slot is in use gets `concurrency_cap` and routes
+that task to Anthropic. That is the cap doing its job, not a fault to relay.
+
 ## MORNING HANDOFF
 
 When the operator is away, end the night with a block they can read in 30 seconds:

@@ -189,6 +189,13 @@ Read `.claude-ship-state.json`:
   Then jump to the handler for `phase` (see Phases). If a
   non-done state already exists and the user names a DIFFERENT spec, warn (one
   active pipeline only) and ask before overwriting.
+- **Absent here, but a `.claude/worktrees/ship-*` worktree listed by
+  `git worktree list` holds one whose `status` is not `"done"`** → P0's
+  Worktree mode moved that pipeline there. Call EnterWorktree with its `path`,
+  then re-run this First action inside it. More than one such worktree → list
+  them and ask which. A `ship-*` worktree whose state is `"done"` is a finished
+  run: skip it, and tell the user it can be removed with
+  `git worktree remove <path>`.
 - **Absent + a committed spec exists** in `docs/superpowers/specs/` → confirm
   which spec to use (default: most recent; otherwise ask), then start at **P0**.
 - **Absent + no spec** → offer to run `/superpowers:brainstorming` first.
@@ -354,6 +361,36 @@ Preconditions (any failure → stop and ask, do NOT branch):
 - Local branch absent: `git branch --list feat/<slug>` empty.
 - **Remote** branch absent: `git ls-remote --heads origin feat/<slug>` empty
   (avoids a later push collision).
+
+**Worktree mode.** Before the Action, run:
+```bash
+grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$HOME/.claude/ollama-workers.json" 2>/dev/null \
+  && [ "$(git rev-parse --path-format=absolute --git-dir)" = "$(git rev-parse --path-format=absolute --git-common-dir)" ]
+```
+Exit 0 means ollama workers are on and this is a primary checkout. The worker
+refuses a primary checkout, so a pipeline branched here sends every P4 task to
+Anthropic. Run the pipeline in a new linked worktree instead: in the Action,
+replace `git checkout -b feat/<slug>` with these lines, then call
+**EnterWorktree** with `path: "$WT"` and run the rest of the Action and every
+later phase inside it:
+```bash
+PRIMARY="$(git rev-parse --show-toplevel)"
+EXCL="$(git rev-parse --path-format=absolute --git-common-dir)/info/exclude"
+grep -qxF '.claude/worktrees/' "$EXCL" 2>/dev/null || echo '.claude/worktrees/' >> "$EXCL"
+WT="$PRIMARY/.claude/worktrees/ship-$(printf %s "$SLUG" | cut -c1-24)"
+git worktree add -b "feat/$SLUG" "$WT" "$DEFAULT_BRANCH"
+```
+The directory is cut to 24 characters to stay under Windows' 260-character
+MAX_PATH (see ship-fleet Per-instance setup); the branch keeps the full slug.
+A new worktree has no dependencies installed: before advancing to P1, run
+project setup there (superpowers:using-git-worktrees Step 2; `npm ci` when
+`package-lock.json` exists), because the P4 gates need it. Rollback in this
+mode: ExitWorktree with `action: "keep"` (it will not remove a worktree entered
+by `path`), then in the primary checkout run `git worktree remove --force <WT>`
+and `git branch -D "feat/<slug>"`, with the literal paths: shell variables do
+not survive the EnterWorktree call.
+Exit 1 (workers off, or already in a linked worktree) → the Action runs
+unchanged.
 
 Action:
 ```bash

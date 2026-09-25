@@ -121,6 +121,14 @@ executed from a primary checkout should move to a worktree, not quietly route
 every task to Anthropic. Check it without dispatching with
 `ollama-worker.ps1 -Probe -Cwd <path>`.
 
+While workers are on, that move is the user's declared worktree preference, so
+`superpowers:using-git-worktrees` Step 0 creates the worktree without asking.
+`/ship` makes the move itself at P0 (its Worktree mode). `/orchestrate` and
+`ship-fleet` start every session in its own linked worktree already, so each
+session dispatches with `-Cwd` set to its own worktree. `maxConcurrent` is one
+limit for the whole machine, shared by every session: set it to how many
+workers the machine can run at once, not to the number of sessions.
+
 When enabled, replace an Anthropic **implementer** dispatch with:
 
 ```
@@ -271,7 +279,13 @@ before this field exists have no `event` key and are runs.
 ## Notes
 
 - The worker runs under `CLAUDE_CONFIG_DIR=~/.claude-ollama-worker` with
-  `plugins` junctioned to `~/.claude/plugins`. Sessions live at
+  `plugins` junctioned to `~/.claude/plugins`. The junction makes plugins
+  installed, not enabled: `~/.claude/settings.json` does not reach that config
+  dir, so the overlay (`~/.claude/ollama-settings.json`) carries
+  `enabledPlugins` for superpowers. Without it the worker lists no superpowers
+  skills and cannot open the TDD skill a brief names. `install.ps1` leaves an
+  existing overlay alone, so an older install has to add the key by hand.
+  Sessions live at
   `<config-dir>/projects/<cwd>/`, so sharing the caller's config dir would put
   worker transcripts where the caller's next `claude --continue` would resume
   them - and a session produced by a non-Anthropic backend fails to resume
