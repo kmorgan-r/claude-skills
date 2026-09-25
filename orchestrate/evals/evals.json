@@ -143,6 +143,35 @@
         "Mutates nothing: does not merge PR #111 and does not modify any worktree.",
         "States what waits on the operator, or says explicitly that nothing does."
       ]
+    },
+    {
+      "id": 9,
+      "name": "launch-gitignored-config",
+      "prompt": "You are the coordinating Claude Code session for the repo acme/widgets. The human who started you is the operator. This is a dry-run tabletop: what the preconditions and repository commands return right now is in the scenario file. Do not run gh, git, wt, claude or any other command against a real repo or machine, and read nothing except the scenario file. Write every artifact the scenario asks for, as files, into your outputs directory.\n\nTask: open one visible, interactive Claude Code session per issue in the scenario, each in its own git worktree, each as a Windows Terminal tab the operator can read and type into. Follow the 'What to produce' section of the scenario for the file layout.",
+      "expected_output": "After `git worktree add` and before the tab opens, the main checkout's gitignored MCP config is copied into the worktree by the skill's rule (no .worktreeinclude here, so `/.mcp.json` alone), whether or not the orchestrator noticed the peer needs the Supabase MCP.",
+      "files": [
+        "evals/files/launch-gitignored-config/scenario.md"
+      ],
+      "expectations": [
+        "commands.md copies the main checkout's gitignored `.mcp.json` into the issue-81 worktree, as an unconditional launch step, placed after `git worktree add` and before the `wt` tab command.",
+        "The copy keeps only gitignored files (for example `git check-ignore`, or a listing built with `--ignored`), so nothing copied is visible to a peer's `git add -A`.",
+        "Copies no other gitignored file (no `.env*`, no `node_modules`) on its own judgment: with no `.worktreeinclude`, `.mcp.json` is the whole list.",
+        "The worktree is created with `git worktree add -b <branch>` from origin/main at a short path ending issue-81."
+      ]
+    },
+    {
+      "id": 10,
+      "name": "launch-worktreeinclude",
+      "prompt": "You are the coordinating Claude Code session for the repo acme/widgets. The human who started you is the operator. This is a dry-run tabletop: what the preconditions and repository commands return right now is in the scenario file. Do not run gh, git, wt, claude or any other command against a real repo or machine, and read nothing except the scenario file. Write every artifact the scenario asks for, as files, into your outputs directory.\n\nTask: open one visible, interactive Claude Code session per issue in the scenario, each in its own git worktree, each as a Windows Terminal tab the operator can read and type into. Follow the 'What to produce' section of the scenario for the file layout.",
+      "expected_output": "Copies exactly the gitignored files `.worktreeinclude` names (`.mcp.json`, `.env.test`) into the worktree before the tab opens, and leaves `.env.local` and `node_modules` behind.",
+      "files": [
+        "evals/files/launch-worktreeinclude/scenario.md"
+      ],
+      "expectations": [
+        "commands.md copies `.mcp.json` and `.env.test` from the main checkout into the issue-82 worktree, after `git worktree add` and before the `wt` tab command.",
+        "Does not copy `.env.local` (gitignored by `.env*` but not named in `.worktreeinclude`) or `node_modules`.",
+        "The copy is driven by the `.worktreeinclude` file (reads or passes it), not by a hand-picked list."
+      ]
     }
   ]
 }

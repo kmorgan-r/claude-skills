@@ -271,6 +271,23 @@ worktree while another tree has the branch checked out). In order:
    tree in artifact filenames (`docs/superpowers/specs/<today>-<slug>-design.md`),
    so a long-slug directory on top overflows it. The branch (`feat/<slug>`) and
    those filenames keep the full slug; `issue-<N>` is unique within a fleet.
+
+   Then copy the local config `git worktree add` leaves behind (it checks out
+   tracked files only, so a gitignored `.mcp.json` stays in the primary tree
+   and the instance runs without those MCP servers, silently). The copy is
+   the gitignored files the primary tree's `.worktreeinclude` names (the
+   rule Claude Code's own worktrees follow), or `/.mcp.json` alone when it
+   has none:
+   ```powershell
+   $main = "<primary-tree>"; $wt = "<worktrees-root>\issue-<N>"
+   $pat = if (Test-Path "$main\.worktreeinclude") { "--exclude-from=$main\.worktreeinclude" } else { '--exclude=/.mcp.json' }
+   git -C $main ls-files --others --ignored $pat | git -C $main check-ignore --stdin | ForEach-Object {
+     if (-not (Test-Path "$wt\$_")) { New-Item -ItemType Directory -Force (Split-Path "$wt\$_") | Out-Null; Copy-Item "$main\$_" "$wt\$_" }
+   }
+   ```
+   What it lists is the whole copy: an unlisted `.env*` can point the
+   instance's tests at the operator's own database. `check-ignore` keeps
+   only gitignored files, so ship's commits cannot sweep a copy into the PR.
 2. **Committed gitignore entries** (in the worktree — tail-byte-safe append
    exactly as ship P0 does, then commit if changed):
    ```bash

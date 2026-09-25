@@ -80,7 +80,8 @@ Read `.claude-orchestrator-state.md` at the main checkout root.
    repo content, and a peer's `git add -A` would otherwise commit the brief and the
    launcher into its PR. The file lives in the common git dir, so it covers every
    linked worktree. Name every file Launching writes into a worktree; a pattern
-   that matches nothing the skill writes protects nothing.
+   that matches nothing the skill writes protects nothing. The config Launching
+   copies in needs no entry: it is copied only when already gitignored.
 4. Create `.claude-orchestrator-state.md`: the goal in one sentence, the
    operator's merge grant **verbatim** (or "no grant yet"), the standing rules,
    and an empty Decisions log. Everything after this appends; nothing is
@@ -97,10 +98,30 @@ git worktree add -b "feat/<slug>" "C:/Users/<you>/orchestrate/<repo>/issue-<N>" 
 Keep the directory name short (`issue-<N>`); the slug recurs inside artifact
 paths and Windows MAX_PATH is 260 characters.
 
-**2. Brief** — write `ORCHESTRATOR-BRIEF.md` INTO the worktree. This is the most
+**2. Local config** — `git worktree add` checks out tracked files only. A
+gitignored `.mcp.json` stays behind, and the peer opens without those MCP
+servers (a Supabase server, say) and without saying so. Run this on every
+launch, before the tab opens. It copies the gitignored files the main
+checkout's `.worktreeinclude` names (the rule Claude Code's own worktrees
+follow), or `/.mcp.json` alone when the repo has no `.worktreeinclude`:
+
+```powershell
+$main = "<main checkout>"; $wt = "<worktree>"
+$pat = if (Test-Path "$main\.worktreeinclude") { "--exclude-from=$main\.worktreeinclude" } else { '--exclude=/.mcp.json' }
+git -C $main ls-files --others --ignored $pat | git -C $main check-ignore --stdin | ForEach-Object {
+  if (-not (Test-Path "$wt\$_")) { New-Item -ItemType Directory -Force (Split-Path "$wt\$_") | Out-Null; Copy-Item "$main\$_" "$wt\$_" }
+}
+```
+
+What it lists is the whole copy. An `.env*` it does not list stays behind: it
+can point the peer's tests at the operator's own database. A repo that needs
+more names it in `.worktreeinclude`. `check-ignore` keeps only gitignored
+files, so nothing copied reaches a peer's `git add -A`.
+
+**3. Brief** — write `ORCHESTRATOR-BRIEF.md` INTO the worktree. This is the most
 valuable artifact in this skill; template below.
 
-**3. Launcher** — write `claude-start.cmd` into the worktree so nothing has to
+**4. Launcher** — write `claude-start.cmd` into the worktree so nothing has to
 survive `wt`'s argument splitting (`wt` treats `;` as a command separator and
 splits on spaces):
 
@@ -109,7 +130,7 @@ splits on spaces):
 claude --dangerously-skip-permissions "Read ORCHESTRATOR-BRIEF.md in this directory and follow it. Do not merge your own PR."
 ```
 
-**4. Open the tab**, with `<profile>` a name read from `settings.json` in Setup,
+**5. Open the tab**, with `<profile>` a name read from `settings.json` in Setup,
 never an assumed default:
 
 ```powershell
@@ -125,12 +146,14 @@ wt -w 0 new-tab -p "<profile>" -d "<worktree>" cmd /c claude --dangerously-skip-
 ```
 
 `--continue` has nothing to resume in a fresh worktree: launcher form for a
-first launch, `--continue` only for re-attach.
+first launch, `--continue` only for re-attach. Run step 2 before a re-attach
+too: a worktree made before that step existed has no `.mcp.json`, and the copy
+skips anything already there.
 
-**5. Register** in the state file: issue, worktree, branch, tab title, what it
+**6. Register** in the state file: issue, worktree, branch, tab title, what it
 owns, the time. Stagger launches ~30s.
 
-**6. Name it back.** Ask each session to report the name `ListAgents` shows for
+**7. Name it back.** Ask each session to report the name `ListAgents` shows for
 it. Names are how you address it later; a worktree path is not an address.
 
 ## The brief template
