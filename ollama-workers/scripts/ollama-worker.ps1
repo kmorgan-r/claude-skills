@@ -514,7 +514,8 @@ $pf = Get-PreflightBlocker $Cwd
 if (-not $pf.ok) { Fail $pf.fail }
 $ollama = $pf.ollama
 
-# Isolated config dir, with plugins junctioned in so the worker sees the same
+# Isolated config dir, with plugins junctioned in (and enabled by the overlay's
+# enabledPlugins - the junction alone installs them, it does not enable them) so the worker sees the same
 # skills (TDD, verification-before-completion) the brief refers to. A junction,
 # not ln -s: under git-bash ln -s silently copies the directory.
 if (-not (Test-Path -LiteralPath $workerCfg)) {

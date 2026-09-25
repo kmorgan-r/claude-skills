@@ -102,13 +102,29 @@ if isinstance(result, str):
     )
 elif result.get("dispatchable"):
     print(f"{header} When executing a superpowers plan, {ROUTING}")
+elif result.get("reason") in ("primary checkout", "not a git worktree"):
+    # No fallback offered here. The old text put "workers being on changes
+    # nothing here" next to the Anthropic fallback, and sessions started in a
+    # primary checkout read that as permission: over 14 days they sent 282
+    # implementer tasks to Anthropic and 44 to the worker, most of them /ship
+    # P4 runs that said "this checkout is the primary, so ollama workers are
+    # not dispatchable here" and never made a worktree. Declaring the worktree
+    # preference is what lets superpowers:using-git-worktrees skip its consent
+    # question (its Step 0 honours a declared preference).
+    print(
+        f"{header} This session started in a {result['reason']}, which the worker "
+        f"refuses as -Cwd. That describes this directory, not the workers. /ship "
+        f"moves its own pipeline into a linked worktree at P0. Before executing "
+        f"any other superpowers plan from here, create a linked worktree without "
+        f"asking - that is the user's declared preference while workers are on "
+        f"(superpowers:using-git-worktrees Step 0) - and pass its path as -Cwd. "
+        f"Inside that worktree, {ROUTING} Route worker-shaped tasks to the "
+        f"Anthropic tier only if the user declines the worktree, and say so."
+    )
 else:
-    # Named as a step to take, not a dead end: the orchestrator dispatches into
-    # a worktree it creates, so "primary checkout" is a precondition it can
-    # satisfy. Telling it not to dispatch would trade one silent skip for
-    # another. The worktree sentence is conditional because the other reasons
-    # (a missing overlay, no ollama binary, an unusable model tag) are not
-    # fixed by changing directory.
+    # Named as a step to take, not a dead end. These reasons (a missing
+    # overlay, no ollama binary, an unusable model tag) are not fixed by
+    # changing directory, so the fallback stays.
     reason = result.get("reason") or "unknown"
     remedy = " ".join((result.get("remedy") or "").split())
     parts = [
@@ -116,12 +132,6 @@ else:
         f"A dispatch with -Cwd {cwd} would be refused, so workers being on "
         f"changes nothing here until that is fixed.",
     ]
-    if reason in ("primary checkout", "not a git worktree"):
-        parts.append(
-            "The worker accepts only a linked git worktree. Before the first "
-            "dispatch, make one (superpowers:using-git-worktrees) and pass that "
-            "path as -Cwd."
-        )
     if remedy:
         parts.append(remedy.rstrip(".") + ".")
     parts.append(FALLBACK)
