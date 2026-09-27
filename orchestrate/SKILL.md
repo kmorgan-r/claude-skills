@@ -142,6 +142,7 @@ set CLAUDE_CODE_EXECPATH=
 set CLAUDE_PLUGIN_DATA=
 set AI_AGENT=
 "<absolute path to claude.exe>" --dangerously-skip-permissions %*
+exit /b 0
 ```
 
 The `set` lines are the fix, not noise. A tab `wt` opens from inside this
@@ -153,7 +154,9 @@ restart with CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 to keep future
 transcripts". That variable restores the transcript, not registration. Clear
 this named list, never every `CLAUDE*` variable: that would also wipe the
 operator's own settings, such as `CLAUDE_CONFIG_DIR` or
-`CLAUDE_CODE_GIT_BASH_PATH`. Write the file with PowerShell
+`CLAUDE_CODE_GIT_BASH_PATH`. `exit /b 0` makes the tab close however claude
+ended, including when Cleanup stops it; without it, Terminal keeps a killed
+session's tab open on "process exited with code 1". Write the file with PowerShell
 `[IO.File]::WriteAllText`, not bash `printf`, which reads the `\b` in a path
 like `.local\bin` as a backspace.
 
@@ -161,15 +164,21 @@ like `.local\bin` as a backspace.
 never an assumed default:
 
 ```powershell
-wt -w 0 new-tab -p "<profile>" -d "<worktree>" --title "issue-<N>" cmd /c "<worktree>\claude-start.cmd"
+wt -w orchestrate new-tab -p "<profile>" -d "<worktree>" --title "issue-<N>" cmd /c "<worktree>\claude-start.cmd"
 ```
 
-`-w 0` reuses the current Terminal window, so each session is a tab the operator
-can flip through. To RE-ATTACH a session whose tab was closed, use the resume
+`-w orchestrate` targets the Terminal window named `orchestrate`, creating it
+on the first launch, so every session is a tab in one window the operator can
+flip through. Never `-w 0`: that means the most recently used window, not this
+one, so with several windows open the tabs land wherever the operator last
+clicked. `wt` cannot target the window this session runs in by itself; for the
+tabs to open beside this session, the operator names this window `orchestrate`
+first (command palette, "Rename window") or starts this session with
+`wt -w orchestrate`. Say that once, at the first launch. To RE-ATTACH a session whose tab was closed, use the resume
 form — it picks up that directory's most recent conversation:
 
 ```powershell
-wt -w 0 new-tab -p "<profile>" -d "<worktree>" --title "issue-<N>" cmd /c "<worktree>\claude-start.cmd" --continue
+wt -w orchestrate new-tab -p "<profile>" -d "<worktree>" --title "issue-<N>" cmd /c "<worktree>\claude-start.cmd" --continue
 ```
 
 `--continue` has nothing to resume in a fresh worktree: launcher alone for a
@@ -346,7 +355,19 @@ When the operator is away, end the night with a block they can read in 30 second
 
 ## Cleanup
 
-`stop` leaves sessions and worktrees alone — tabs are the operator's. After a
-branch merges: delete the remote branch, remove the worktree only if no session
-is live in it, and never remove a worktree holding commits that exist on no
-other ref. Verify with `git log --all --oneline <sha>` before removing anything.
+`stop` leaves sessions and worktrees alone. After a branch merges, in this
+order:
+
+1. **Close its tab**, once all of these hold: the PR shows merged on GitHub,
+   `git -C <worktree> status --porcelain` prints nothing, `git -C <worktree>
+   log @ --not --remotes --oneline` prints nothing after a fetch, and the
+   peer's registry entry says `idle`. Look the peer up as in step 6 (same
+   `cwd` and `procStart` check, no wait loop), then
+   `Stop-Process -Id <pid> -Force`. The launcher's `exit /b 0` closes the tab.
+   If any check fails, leave the tab open and tell the operator which one.
+   Log the close in the state file; `attach <issue>` brings the conversation
+   back if the operator wants it.
+2. Delete the remote branch.
+3. Remove the worktree only if no session is live in it, and never remove a
+   worktree holding commits that exist on no other ref. Verify with
+   `git log --all --oneline <sha>` before removing anything.
