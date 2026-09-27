@@ -123,12 +123,39 @@ valuable artifact in this skill; template below.
 
 **4. Launcher** — write `claude-start.cmd` into the worktree so nothing has to
 survive `wt`'s argument splitting (`wt` treats `;` as a command separator and
-splits on spaces):
+splits on spaces). It carries no prompt: the task goes over SendMessage once the
+peer registers (step 6). `%*` passes extra arguments through, so the same file
+serves re-attach:
 
 ```bat
 @echo off
-claude --dangerously-skip-permissions "Read ORCHESTRATOR-BRIEF.md in this directory and follow it. Do not merge your own PR."
+set CLAUDECODE=
+set CLAUDE_CODE_CHILD_SESSION=
+set CLAUDE_CODE_ENTRYPOINT=
+set CLAUDE_CODE_MESSAGING_SOCKET=
+set CLAUDE_CODE_MESSAGING_TOKEN=
+set CLAUDE_CODE_SESSION_ATTENDED=
+set CLAUDE_CODE_SESSION_ID=
+set CLAUDE_PID=
+set CLAUDE_EFFORT=
+set CLAUDE_CODE_EXECPATH=
+set CLAUDE_PLUGIN_DATA=
+set AI_AGENT=
+"<absolute path to claude.exe>" --dangerously-skip-permissions %*
 ```
+
+The `set` lines are the fix, not noise. A tab `wt` opens from inside this
+session inherits this session's environment, and a claude started with those
+markers runs as a child session: it never registers (invisible to `ListAgents`,
+unreachable by SendMessage) and saves no transcript. Its status bar says so:
+"⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker ·
+restart with CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 to keep future
+transcripts". That variable restores the transcript, not registration. Clear
+this named list, never every `CLAUDE*` variable: that would also wipe the
+operator's own settings, such as `CLAUDE_CONFIG_DIR` or
+`CLAUDE_CODE_GIT_BASH_PATH`. Write the file with PowerShell
+`[IO.File]::WriteAllText`, not bash `printf`, which reads the `\b` in a path
+like `.local\bin` as a backspace.
 
 **5. Open the tab**, with `<profile>` a name read from `settings.json` in Setup,
 never an assumed default:
@@ -142,19 +169,60 @@ can flip through. To RE-ATTACH a session whose tab was closed, use the resume
 form — it picks up that directory's most recent conversation:
 
 ```powershell
-wt -w 0 new-tab -p "<profile>" -d "<worktree>" cmd /c claude --dangerously-skip-permissions --continue
+wt -w 0 new-tab -p "<profile>" -d "<worktree>" --title "issue-<N>" cmd /c "<worktree>\claude-start.cmd" --continue
 ```
 
-`--continue` has nothing to resume in a fresh worktree: launcher form for a
-first launch, `--continue` only for re-attach. Run step 2 before a re-attach
-too: a worktree made before that step existed has no `.mcp.json`, and the copy
-skips anything already there.
+`--continue` has nothing to resume in a fresh worktree: launcher alone for a
+first launch, `--continue` only for re-attach. It finds nothing either for a
+peer that never registered: that peer wrote no transcript, and its conversation
+closed with its tab. Run step 2 before a re-attach too: a worktree made before
+that step existed has no `.mcp.json`, and the copy skips anything already
+there. Run step 6 after it: the resumed peer is a new process and may register
+under a new name. It needs no task message; its conversation has the task.
 
-**6. Register** in the state file: issue, worktree, branch, tab title, what it
-owns, the time. Stagger launches ~30s.
+**6. Hand over the task once it registers.** A registered session has a
+`sessions/<pid>.json` (`pid`, `sessionId`, `cwd`, `name`, `status`, ...) under
+its config directory: `$env:CLAUDE_CONFIG_DIR` when set, else `~/.claude`. The
+launcher keeps `CLAUDE_CONFIG_DIR`, so the peer registers where this session
+does. Wait for the one whose `cwd` is this worktree and whose process is alive.
+A file can outlive its session (a killed one cannot clean up) and Windows
+reuses pids, so liveness compares `procStart` with the process's start time.
+`git worktree add` took the path with forward slashes, while `cwd` holds
+backslashes:
 
-**7. Name it back.** Ask each session to report the name `ListAgents` shows for
-it. Names are how you address it later; a worktree path is not an address.
+```powershell
+$wt = "<worktree>"; $key = { param($p) ($p -replace '/', '\').TrimEnd('\').ToLowerInvariant() }
+$reg = Join-Path ($env:CLAUDE_CONFIG_DIR ?? "$HOME\.claude") 'sessions'
+$deadline = (Get-Date).AddSeconds(90); $peer = $null
+while (-not $peer -and (Get-Date) -lt $deadline) {
+  $peer = Get-ChildItem "$reg\*.json" | ForEach-Object {
+    try {
+      $s = Get-Content -Raw $_.FullName | ConvertFrom-Json
+      $p = Get-Process -Id $s.pid -ErrorAction Stop
+      if ($p.StartTime.ToFileTimeUtc() -eq $s.procStart -and (& $key $s.cwd) -eq (& $key $wt)) { $s }
+    } catch { }   # half-written file or dead pid: not this peer, look again next pass
+  } | Select-Object -First 1
+  if (-not $peer) { Start-Sleep -Seconds 2 }
+}
+if ($peer) { $peer.name } else { "NOT REGISTERED: $wt" }
+```
+
+Then SendMessage to that `name`: "Read ORCHESTRATOR-BRIEF.md in this directory
+and follow it. Do not merge your own PR." The name is how you address the
+session from now on; a worktree path or tab title is not an address.
+
+No entry within 90 seconds: tell the operator the tab opened but the session
+never registered, and what the tab shows. The transcript warning from step 4 in
+its status bar means a marker got past the launcher; a tab that closed at once
+means a bad profile name or claude path. Do not relaunch it with the task as a
+positional prompt: a peer that cannot register works where you cannot reach
+it. Do not open a second tab on that worktree either; the first may still be
+running in it.
+
+**7. Register** in the state file: issue, worktree, branch, tab title, the name
+it registered under, what it owns, the time. Stagger launches ~30s, and open
+the next tab only after this one registered or its failure went to the
+operator.
 
 ## The brief template
 

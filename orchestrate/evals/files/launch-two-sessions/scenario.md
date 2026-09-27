@@ -110,6 +110,31 @@ c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7
 npm test runs against a local Postgres on port 5432 and takes about 9 minutes.
 ```
 
+## Session registry (after each tab opens)
+
+What `~/.claude/sessions/*.json` holds once each tab is open, one line per file
+with the fields that matter. "alive" means the process with that `pid` is running
+and its start time matches the file's `procStart`.
+
+### 12 seconds after the issue-65 tab opened
+
+```
+pid    cwd                                          name          status  alive
+4120   C:\Users\dev\src\widgets                     widgets-7b    busy    yes   (this session)
+6604   C:\Users\dev\src\gadgets                     gadgets-2e    idle    no
+7710   C:\Users\dev\orchestrate\widgets\issue-65    issue-65-4f   idle    yes
+```
+
+### 12 seconds after the issue-67 tab opened
+
+```
+pid    cwd                                          name          status  alive
+4120   C:\Users\dev\src\widgets                     widgets-7b    busy    yes   (this session)
+6604   C:\Users\dev\src\gadgets                     gadgets-2e    idle    no
+7710   C:\Users\dev\orchestrate\widgets\issue-65    issue-65-4f   busy    yes
+8120   C:\Users\dev\orchestrate\widgets\issue-67    issue-67-9c   idle    yes
+```
+
 ## What to produce
 
 Set up and launch one interactive session per issue. Since nothing may run for
@@ -122,5 +147,6 @@ outputs/issue-65/ORCHESTRATOR-BRIEF.md    the brief you would write into issue 6
 outputs/issue-65/claude-start.cmd         the launcher you would write into issue 65's worktree
 outputs/issue-67/ORCHESTRATOR-BRIEF.md
 outputs/issue-67/claude-start.cmd
+outputs/messages.md                       every message you would send to a peer session, addressed by session name
 outputs/operator.md                       what you tell the operator once launched
 ```
