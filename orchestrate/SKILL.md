@@ -83,7 +83,8 @@ Read `.claude-orchestrator-state.md` at the main checkout root.
    that matches nothing the skill writes protects nothing. The config Launching
    copies in needs no entry: it is copied only when already gitignored.
 4. Create `.claude-orchestrator-state.md`: the goal in one sentence, the
-   operator's merge grant **verbatim** (or "no grant yet"), the standing rules,
+   operator's merge grant **verbatim** (or "no grant yet"), any grant to close
+   tabs after merge (see Cleanup; absent one, tabs stay open), the standing rules,
    and an empty Decisions log. Everything after this appends; nothing is
    rewritten.
 
@@ -358,15 +359,28 @@ When the operator is away, end the night with a block they can read in 30 second
 `stop` leaves sessions and worktrees alone. After a branch merges, in this
 order:
 
-1. **Close its tab**, once all of these hold: the PR shows merged on GitHub,
-   `git -C <worktree> status --porcelain` prints nothing, `git -C <worktree>
-   log @ --not --remotes --oneline` prints nothing after a fetch, and the
-   peer's registry entry says `idle`. Look the peer up as in step 6 (same
-   `cwd` and `procStart` check, no wait loop), then
-   `Stop-Process -Id <pid> -Force`. The launcher's `exit /b 0` closes the tab.
-   If any check fails, leave the tab open and tell the operator which one.
-   Log the close in the state file; `attach <issue>` brings the conversation
-   back if the operator wants it.
+1. **Close its tab**, only under an operator grant to close tabs after merge,
+   recorded verbatim in the state file like the merge grant. Without one, tell
+   the operator the tab is ready to close and leave it. With one, close it once
+   all of these hold: the PR shows merged on GitHub, `git -C <worktree> status
+   --porcelain` prints nothing, `git -C <worktree> log @ --not --remotes
+   --oneline` prints nothing after a fetch, and the peer's registry entry says
+   `idle`. Stopping a session is a hard kill, so re-read the entry in the same
+   command as the stop and stop only if it still says `idle` with the same
+   `pid` and `procStart` (the step-6 lookup, no wait loop):
+
+   ```powershell
+   $s = Get-Content -Raw "<registry>\<pid>.json" | ConvertFrom-Json
+   $p = Get-Process -Id $s.pid -ErrorAction SilentlyContinue
+   if ($p -and $s.status -eq 'idle' -and $p.StartTime.ToFileTimeUtc() -eq $s.procStart) {
+     Stop-Process -Id $s.pid -Force; "CLOSED" } else { "SKIPPED: $($s.status)" }
+   ```
+
+   The launcher's `exit /b 0` closes the tab. If any check fails, or the
+   re-read says `busy`, leave the tab open and tell the operator which one.
+   Tell the operator at once for every tab closed: the issue, the PR, and
+   `attach <issue>` to bring the conversation back. Log the close in the
+   state file too.
 2. Delete the remote branch.
 3. Remove the worktree only if no session is live in it, and never remove a
    worktree holding commits that exist on no other ref. Verify with
