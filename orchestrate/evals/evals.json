@@ -63,8 +63,8 @@
       ],
       "expectations": [
         "Runs `git fetch origin` and fast-forwards local main, then creates each worktree with `git worktree add -b <branch>` from origin/main at a short path ending issue-65 / issue-67.",
-        "The wt commands use `-w 0 new-tab`, `-d <worktree>`, a `--title`, and `cmd /c <worktree>\\claude-start.cmd`, with a `-p` profile that exists in the settings output (PowerShell, Command Prompt or Ubuntu), not 'Windows PowerShell'.",
-        "Each claude-start.cmd calls claude by its absolute path (C:\\Users\\dev\\.local\\bin\\claude.exe, because `cmd /c where claude` fails) as `--dangerously-skip-permissions %*`, and contains no semicolon.",
+        "The wt commands use `-w orchestrate new-tab` (a named window, never `-w 0`), `-d <worktree>`, a `--title`, and `cmd /c <worktree>\\claude-start.cmd`, with a `-p` profile that exists in the settings output (PowerShell, Command Prompt or Ubuntu), not 'Windows PowerShell'.",
+        "Each claude-start.cmd calls claude by its absolute path (C:\\Users\\dev\\.local\\bin\\claude.exe, because `cmd /c where claude` fails) as `--dangerously-skip-permissions %*`, follows it with `exit /b 0`, and contains no semicolon.",
         "Each claude-start.cmd carries no positional prompt: no 'Read ORCHESTRATOR-BRIEF.md' (or any other task text) on the claude line or in the wt command.",
         "Each claude-start.cmd clears the inherited session markers with `set NAME=` lines before starting claude, covering at least CLAUDECODE, CLAUDE_CODE_CHILD_SESSION, CLAUDE_CODE_SESSION_ID, CLAUDE_CODE_MESSAGING_SOCKET, CLAUDE_CODE_MESSAGING_TOKEN and CLAUDE_PID, and does not clear CLAUDE_CONFIG_DIR or blanket-clear every CLAUDE* variable.",
         "The issue-65 brief takes the migration number from the migrations directory (0015), not the issue body's 0013.",

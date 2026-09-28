@@ -83,7 +83,8 @@ Read `.claude-orchestrator-state.md` at the main checkout root.
    that matches nothing the skill writes protects nothing. The config Launching
    copies in needs no entry: it is copied only when already gitignored.
 4. Create `.claude-orchestrator-state.md`: the goal in one sentence, the
-   operator's merge grant **verbatim** (or "no grant yet"), the standing rules,
+   operator's merge grant **verbatim** (or "no grant yet"), any grant to close
+   tabs after merge (see Cleanup; absent one, tabs stay open), the standing rules,
    and an empty Decisions log. Everything after this appends; nothing is
    rewritten.
 
@@ -142,6 +143,7 @@ set CLAUDE_CODE_EXECPATH=
 set CLAUDE_PLUGIN_DATA=
 set AI_AGENT=
 "<absolute path to claude.exe>" --dangerously-skip-permissions %*
+exit /b 0
 ```
 
 The `set` lines are the fix, not noise. A tab `wt` opens from inside this
@@ -153,7 +155,9 @@ restart with CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 to keep future
 transcripts". That variable restores the transcript, not registration. Clear
 this named list, never every `CLAUDE*` variable: that would also wipe the
 operator's own settings, such as `CLAUDE_CONFIG_DIR` or
-`CLAUDE_CODE_GIT_BASH_PATH`. Write the file with PowerShell
+`CLAUDE_CODE_GIT_BASH_PATH`. `exit /b 0` makes the tab close however claude
+ended, including when Cleanup stops it; without it, Terminal keeps a killed
+session's tab open on "process exited with code 1". Write the file with PowerShell
 `[IO.File]::WriteAllText`, not bash `printf`, which reads the `\b` in a path
 like `.local\bin` as a backspace.
 
@@ -161,15 +165,21 @@ like `.local\bin` as a backspace.
 never an assumed default:
 
 ```powershell
-wt -w 0 new-tab -p "<profile>" -d "<worktree>" --title "issue-<N>" cmd /c "<worktree>\claude-start.cmd"
+wt -w orchestrate new-tab -p "<profile>" -d "<worktree>" --title "issue-<N>" cmd /c "<worktree>\claude-start.cmd"
 ```
 
-`-w 0` reuses the current Terminal window, so each session is a tab the operator
-can flip through. To RE-ATTACH a session whose tab was closed, use the resume
+`-w orchestrate` targets the Terminal window named `orchestrate`, creating it
+on the first launch, so every session is a tab in one window the operator can
+flip through. Never `-w 0`: that means the most recently used window, not this
+one, so with several windows open the tabs land wherever the operator last
+clicked. `wt` cannot target the window this session runs in by itself; for the
+tabs to open beside this session, the operator names this window `orchestrate`
+first (command palette, "Rename window") or starts this session with
+`wt -w orchestrate`. Say that once, at the first launch. To RE-ATTACH a session whose tab was closed, use the resume
 form — it picks up that directory's most recent conversation:
 
 ```powershell
-wt -w 0 new-tab -p "<profile>" -d "<worktree>" --title "issue-<N>" cmd /c "<worktree>\claude-start.cmd" --continue
+wt -w orchestrate new-tab -p "<profile>" -d "<worktree>" --title "issue-<N>" cmd /c "<worktree>\claude-start.cmd" --continue
 ```
 
 `--continue` has nothing to resume in a fresh worktree: launcher alone for a
@@ -346,7 +356,32 @@ When the operator is away, end the night with a block they can read in 30 second
 
 ## Cleanup
 
-`stop` leaves sessions and worktrees alone — tabs are the operator's. After a
-branch merges: delete the remote branch, remove the worktree only if no session
-is live in it, and never remove a worktree holding commits that exist on no
-other ref. Verify with `git log --all --oneline <sha>` before removing anything.
+`stop` leaves sessions and worktrees alone. After a branch merges, in this
+order:
+
+1. **Close its tab**, only under an operator grant to close tabs after merge,
+   recorded verbatim in the state file like the merge grant. Without one, tell
+   the operator the tab is ready to close and leave it. With one, close it once
+   all of these hold: the PR shows merged on GitHub, `git -C <worktree> status
+   --porcelain` prints nothing, `git -C <worktree> log @ --not --remotes
+   --oneline` prints nothing after a fetch, and the peer's registry entry says
+   `idle`. Stopping a session is a hard kill, so re-read the entry in the same
+   command as the stop and stop only if it still says `idle` with the same
+   `pid` and `procStart` (the step-6 lookup, no wait loop):
+
+   ```powershell
+   $s = Get-Content -Raw "<registry>\<pid>.json" | ConvertFrom-Json
+   $p = Get-Process -Id $s.pid -ErrorAction SilentlyContinue
+   if ($p -and $s.status -eq 'idle' -and $p.StartTime.ToFileTimeUtc() -eq $s.procStart) {
+     Stop-Process -Id $s.pid -Force; "CLOSED" } else { "SKIPPED: $($s.status)" }
+   ```
+
+   The launcher's `exit /b 0` closes the tab. If any check fails, or the
+   re-read says `busy`, leave the tab open and tell the operator which one.
+   Tell the operator at once for every tab closed: the issue, the PR, and
+   `attach <issue>` to bring the conversation back. Log the close in the
+   state file too.
+2. Delete the remote branch.
+3. Remove the worktree only if no session is live in it, and never remove a
+   worktree holding commits that exist on no other ref. Verify with
+   `git log --all --oneline <sha>` before removing anything.
