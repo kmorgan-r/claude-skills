@@ -174,3 +174,11 @@ def test_unreadable_config_is_setup_error(private_home):
     (private_home / "config.json").write_text("{not json", encoding="utf-8")
     with pytest.raises(outlook.SetupError):
         outlook.load_config()
+
+
+@pytest.mark.parametrize("error", ["invalid_token", None, [1]])
+def test_error_value_that_is_not_an_object_stays_graph_error(error):
+    fake = Fake(lambda m, u, d, h: (401, {}, {"error": error}))
+    with pytest.raises(outlook.GraphError) as e:
+        graph(fake).call("GET", "/me")
+    assert (e.value.status, e.value.code) == (401, "")

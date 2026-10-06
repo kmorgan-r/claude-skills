@@ -92,7 +92,7 @@ def _graph_error(status, raw):
     try:
         err = json.loads(raw)["error"]
         return GraphError(status, err.get("code", ""), err.get("message", ""))
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, AttributeError):   # "error" may not be an object
         return GraphError(status, "", raw.decode("utf-8", "replace")[:500])
 
 
