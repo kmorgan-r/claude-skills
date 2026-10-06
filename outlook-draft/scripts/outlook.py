@@ -331,3 +331,96 @@ def find(graph, query=None, sent=False, top=5, body=None):
             item["body"] = (m.get("uniqueBody") or {}).get("content", "")
         out.append(item)
     return out[:top]
+
+
+def get_token(interactive=False):
+    """Return MSAL's token result. Only `login` passes interactive=True."""
+    cfg = load_config()
+    try:
+        import msal
+        from msal_extensions import PersistedTokenCache, build_encrypted_persistence
+    except ImportError as e:
+        raise SetupError("Run: python -m pip install msal msal-extensions") from e
+    try:
+        cache = PersistedTokenCache(build_encrypted_persistence(str(home() / "token_cache.bin")))
+        app = msal.PublicClientApplication(
+            cfg["client_id"],
+            authority=f"https://login.microsoftonline.com/{cfg['tenant_id']}",
+            token_cache=cache,
+        )
+        if interactive:
+            result = app.acquire_token_interactive(SCOPES, timeout=180, prompt="select_account")
+        else:
+            accounts = app.get_accounts()
+            result = app.acquire_token_silent(SCOPES, account=accounts[0]) if accounts else None
+    except Exception as e:   # msal raises on network, authority-discovery and cache-lock failures
+        raise SetupError(f"Sign-in failed: {type(e).__name__}: {e}") from e
+    if not result or "access_token" not in result:
+        detail = (result or {}).get("error_description")
+        raise SetupError(f"{detail}\n{LOGIN_HINT}" if detail else LOGIN_HINT)
+    return result
+
+
+def _emit(obj):
+    print(json.dumps(obj, ensure_ascii=False, indent=1))
+    return 0
+
+
+def _fail(code, kind, message):
+    print(json.dumps({"error": kind, "message": message}, ensure_ascii=False), file=sys.stderr)
+    return code
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):   # argparse's own exit 2 would read as "sign in needed"
+        sys.exit(_fail(1, "usage", message))
+
+
+def main(argv=None, transport=urllib_transport, token_fn=get_token, sleep=time.sleep):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")   # Windows consoles default to cp1252
+    ap = _Parser(prog="outlook.py")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("login")
+    sub.add_parser("lookup").add_argument("query")
+    p = sub.add_parser("find")
+    p.add_argument("query", nargs="?")
+    p.add_argument("--sent", action="store_true")
+    p.add_argument("--top", type=int, default=5)
+    body = p.add_mutually_exclusive_group()
+    body.add_argument("--full", action="store_true")
+    body.add_argument("--html", action="store_true")
+    sub.add_parser("draft").add_argument("spec")
+    args = ap.parse_args(argv)
+    try:
+        if args.cmd == "draft":
+            spec = read_spec(args.spec)
+            validate_spec(spec)   # a bad spec fails before sign-in or any Graph call
+        if args.cmd == "login":
+            res = token_fn(interactive=True)
+            return _emit({"account": (res.get("id_token_claims") or {}).get("preferred_username")})
+        graph = Graph(token_fn()["access_token"], transport, sleep)
+        if args.cmd == "lookup":
+            return _emit({"results": lookup(graph, args.query)})
+        if args.cmd == "find":
+            mode = "text" if args.full else "html" if args.html else None
+            return _emit({"results": find(graph, args.query, args.sent, args.top, mode)})
+        return _emit(draft(graph, spec))
+    except SpecError as e:
+        return _fail(1, "spec", str(e))
+    except SetupError as e:
+        return _fail(2, "setup", str(e))
+    except Partial as e:
+        _emit({**e.result, "partial": True})
+        return 3
+    except GraphError as e:
+        if e.status == 401:   # token rejected (consent revoked, session killed): sign in again
+            return _fail(2, "setup", LOGIN_HINT)
+        return _fail(1, e.code or "graph", e.message)
+    except Exception as e:   # keep the JSON contract even for a bug
+        return _fail(1, "unexpected", f"{type(e).__name__}: {e}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

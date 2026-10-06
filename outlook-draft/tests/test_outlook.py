@@ -578,3 +578,178 @@ def test_find_without_query_reads_inbox_and_with_query_searches_all_mail():
     assert "$orderby=receivedDateTime%20desc" in fake.calls[0].url
     assert "/v1.0/me/messages?" in fake.calls[1].url
     assert "$orderby" not in fake.calls[1].url
+
+
+# --- auth and CLI ----------------------------------------------------------------
+
+def _fake_msal(monkeypatch, accounts=(), silent=None, interactive=None):
+    """Install fake msal + msal_extensions modules; returns the call log."""
+    log = []
+
+    class App:
+        def __init__(self, client_id, authority, token_cache):
+            log.append(("init", client_id, authority))
+
+        def get_accounts(self):
+            return list(accounts)
+
+        def acquire_token_silent(self, scopes, account):
+            log.append(("silent", tuple(scopes)))
+            if isinstance(silent, Exception):
+                raise silent
+            return silent
+
+        def acquire_token_interactive(self, scopes, timeout, prompt):
+            log.append(("interactive", timeout))
+            return interactive
+
+    monkeypatch.setitem(sys.modules, "msal", types.SimpleNamespace(PublicClientApplication=App))
+    monkeypatch.setitem(sys.modules, "msal_extensions", types.SimpleNamespace(
+        build_encrypted_persistence=lambda path: ("persistence", path),
+        PersistedTokenCache=lambda persistence: ("cache", persistence)))
+    return log
+
+
+def _config(home):
+    (home / "config.json").write_text(json.dumps({"tenant_id": "T", "client_id": "C"}), encoding="utf-8")
+
+
+def _token(interactive=False):
+    return {"access_token": "tok"}
+
+
+def _write_spec(tmp_path, spec, bom=False):
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8-sig" if bom else "utf-8")
+    return str(path)
+
+
+def test_silent_miss_exits_2_without_going_interactive(private_home, monkeypatch, capsys):
+    _config(private_home)
+    log = _fake_msal(monkeypatch, accounts=[], interactive={"access_token": "x"})
+    assert outlook.main(["lookup", "Maria"], transport=Fake()) == 2
+    assert not [e for e in log if e[0] == "interactive"]
+    assert "outlook.py login" in json.loads(capsys.readouterr().err)["message"]
+
+
+def test_silent_hit_uses_cached_account(private_home, monkeypatch, capsys):
+    _config(private_home)
+    log = _fake_msal(monkeypatch, accounts=[{"username": "me"}], silent={"access_token": "tok"})
+    fake = Fake(lambda m, u, d, h: (200, {}, {"value": []}))
+    assert outlook.main(["lookup", "Maria"], transport=fake) == 0
+    assert fake.calls[0].headers["Authorization"] == "Bearer tok"
+    assert ("init", "C", "https://login.microsoftonline.com/T") in log
+    assert ("silent", ("Mail.ReadWrite", "People.Read")) in log
+
+
+def test_login_goes_interactive_with_180s_timeout(private_home, monkeypatch, capsys):
+    _config(private_home)
+    log = _fake_msal(monkeypatch, interactive={
+        "access_token": "t", "id_token_claims": {"preferred_username": "me@x.com"}})
+    assert outlook.main(["login"]) == 0
+    assert ("interactive", 180) in log
+    assert json.loads(capsys.readouterr().out) == {"account": "me@x.com"}
+
+
+def test_msal_exception_exits_2_with_its_message(private_home, monkeypatch, capsys):
+    _config(private_home)
+    _fake_msal(monkeypatch, accounts=[{"username": "me"}], silent=ConnectionError("offline"))
+    assert outlook.main(["lookup", "Maria"], transport=Fake()) == 2
+    assert "offline" in json.loads(capsys.readouterr().err)["message"]
+
+
+def test_rejected_token_exits_2_with_login_hint(capsys):
+    err = {"error": {"code": "InvalidAuthenticationToken", "message": "expired"}}
+    fake = Fake(lambda m, u, d, h: (401, {}, err))
+    assert outlook.main(["lookup", "Maria"], transport=fake, token_fn=_token) == 2
+    assert "outlook.py login" in json.loads(capsys.readouterr().err)["message"]
+
+
+def test_network_failure_exits_1_with_json(capsys):
+    def down(m, u, d, h):
+        raise urllib.error.URLError("getaddrinfo failed")
+    assert outlook.main(["lookup", "Maria"], transport=Fake(down), token_fn=_token) == 1
+    assert json.loads(capsys.readouterr().err)["error"] == "network"
+
+
+@pytest.mark.parametrize("argv", [["find", "--top", "abc"], ["find", "--full", "--html"], ["nope"]])
+def test_usage_errors_exit_1_not_2(argv, capsys):
+    with pytest.raises(SystemExit) as e:
+        outlook.main(argv, transport=Fake(), token_fn=_token)
+    assert e.value.code == 1
+    assert json.loads(capsys.readouterr().err)["error"] == "usage"
+
+
+@pytest.mark.parametrize("argv, url_part, prefer, count", [
+    (["find", "x", "--sent", "--top", "2", "--full"], "/me/mailFolders/sentitems/messages?$top=12", "text", 2),
+    (["find", "--html"], "/me/mailFolders/inbox/messages?$top=15", "html", 3),
+    (["find", "x"], "/me/messages?$top=15", None, 3),
+])
+def test_find_flags_reach_graph(argv, url_part, prefer, count, capsys):
+    fake = Fake(lambda m, u, d, h: (200, {}, _msgs({}, {}, {})))
+    assert outlook.main(argv, transport=fake, token_fn=_token) == 0
+    c = fake.calls[0]
+    assert url_part in c.url
+    assert c.headers.get("Prefer") == (f'outlook.body-content-type="{prefer}"' if prefer else None)
+    assert len(json.loads(capsys.readouterr().out)["results"]) == count
+
+
+def test_missing_config_exits_2(capsys):
+    assert outlook.main(["find", "x"], transport=Fake()) == 2
+    assert "config.json" in json.loads(capsys.readouterr().err)["message"]
+
+
+def test_msal_not_installed_exits_2(private_home, monkeypatch, capsys):
+    _config(private_home)
+    monkeypatch.setitem(sys.modules, "msal", None)
+    assert outlook.main(["find", "x"], transport=Fake()) == 2
+    assert "pip install msal" in json.loads(capsys.readouterr().err)["message"]
+
+
+@pytest.mark.parametrize("over", [
+    {"attachments": ["C:/missing.pdf"]}, {"mode": "replyAll"}, {"subject": ""}, {"mode": "x"},
+])
+def test_bad_spec_exits_1_before_auth_or_graph(over, tmp_path, capsys):
+    fake = Fake()
+
+    def no_token(interactive=False):
+        raise AssertionError("auth must not run for a bad spec")
+
+    assert outlook.main(["draft", _write_spec(tmp_path, _new_spec(**over))],
+                        transport=fake, token_fn=no_token) == 1
+    assert fake.calls == []
+    assert json.loads(capsys.readouterr().err)["error"] == "spec"
+
+
+def test_unreadable_spec_exits_1(tmp_path, capsys):
+    (tmp_path / "bad.json").write_text("{not json", encoding="utf-8")
+    assert outlook.main(["draft", str(tmp_path / "bad.json")], transport=Fake(), token_fn=_token) == 1
+    assert json.loads(capsys.readouterr().err)["error"] == "spec"
+
+
+def test_draft_with_bom_spec_and_non_ascii_prints_utf8_json(tmp_path, capsys):
+    spec = _new_spec(subject="Café — Zürich", body_html="<p>Grüße</p>")
+    fake = Fake(_created)
+    assert outlook.main(["draft", _write_spec(tmp_path, spec, bom=True)],
+                        transport=fake, token_fn=_token) == 0
+    out = capsys.readouterr().out
+    assert "Café — Zürich" in out
+    assert json.loads(out)["webLink"] == "https://outlook/D1"
+
+
+def test_graph_error_exits_1_with_code_and_message(tmp_path, capsys):
+    err = {"error": {"code": "ErrorAccessDenied", "message": "Access is denied."}}
+    fake = Fake(lambda m, u, d, h: (403, {}, err))
+    assert outlook.main(["draft", _write_spec(tmp_path, _new_spec())],
+                        transport=fake, token_fn=_token) == 1
+    assert json.loads(capsys.readouterr().err) == {"error": "ErrorAccessDenied", "message": "Access is denied."}
+
+
+def test_partial_exits_3_with_link_on_stdout(tmp_path, capsys):
+    bad = _file(tmp_path, "bad.txt", 5)
+    fake = Fake(_draft_handler(fail_names={"bad.txt"}))
+    assert outlook.main(["draft", _write_spec(tmp_path, _new_spec(attachments=[bad]))],
+                        transport=fake, token_fn=_token) == 3
+    out = json.loads(capsys.readouterr().out)
+    assert out["partial"] is True and out["webLink"] == "https://outlook/D1"
+    assert out["failed_attachments"][0]["path"] == bad
