@@ -65,6 +65,7 @@ flow is increasingly blocked by Conditional Access.
 claude-skills-main/outlook-draft/          (public repo)
   SKILL.md
   scripts/outlook.py
+  tests/conftest.py                        _load() by path, as in esg-longitudinal
   tests/test_outlook.py
   config.example.json                      {"tenant_id": "", "client_id": ""}
 
@@ -78,7 +79,15 @@ claude-skills-main/outlook-draft/          (public repo)
 ```
 
 Dependencies: `msal`, `msal-extensions` (DPAPI-backed persistent cache).
-Graph calls use stdlib `urllib`; no `requests`, no Graph SDK.
+Graph calls use stdlib `urllib`; no `requests`, no Graph SDK. `msal` and
+`msal_extensions` are imported lazily inside the auth function only, so the
+module loads (and the offline tests run) without them installed. Graph logic
+(payload building, reply insertion, attachment routing) lives in functions
+that take an injected `request` callable and never touch msal.
+
+The private directory defaults to `~/.claude/outlook-draft/`; the
+`OUTLOOK_DRAFT_HOME` environment variable overrides it (tests point it at
+`tmp_path`, so a real signature never leaks into assertions).
 
 ## Script: `scripts/outlook.py`
 
@@ -89,7 +98,7 @@ code page) and errors as JSON to stderr.
 |---|---|---|
 | `login` | interactive browser sign-in | signed-in account |
 | `lookup "<name or name + company>"` | `GET /me/people?$search=` | up to 5 `{name, email, company}` ranked by relevance |
-| `find ["<query>"] [--sent] [--top N] [--full]` | `GET /me/messages?$search=` or `/me/mailFolders/sentitems/messages` | up to N (default 5) `{id, subject, from, to, cc, received, preview}`; `--full` adds plain-text body (`Prefer: outlook.body-content-type="text"`) |
+| `find ["<query>"] [--sent] [--top N] [--full \| --html]` | `GET /me/messages?$search=` or `/me/mailFolders/sentitems/messages` | up to N (default 5) `{id, subject, from, to, cc, received, preview, isDraft}`, drafts dropped by the script (`$filter` cannot combine with `$search` on messages); `--full` adds `uniqueBody` as plain text (`Prefer: outlook.body-content-type="text"`), `--html` adds `uniqueBody` as HTML. `uniqueBody` is only the new part of each message, so quoted threads do not blow the shell's ~30k-character output limit |
 | `draft <spec.json>` | see below | `{id, webLink, subject, to, cc, attachments, failed_attachments}` |
 
 ### Draft spec (written by Claude to a scratch file)
@@ -115,23 +124,41 @@ The script appends `signature.html` to `body_html` when that file exists.
 2. **new:** `POST /me/messages` with subject, HTML body, `toRecipients`,
    `ccRecipients`. The message lands in Drafts.
 3. **reply / replyAll:** `POST /me/messages/{id}/createReply` (or
-   `createReplyAll`). The returned draft already holds the quoted original.
+   `createReplyAll`) with `Prefer: outlook.body-content-type="html"`, so the
+   returned draft body is HTML. It already holds the quoted original.
    Insert `body_html` + signature immediately after the opening `<body…>` tag
-   of that draft's body (or at the start if there is no `<body>` tag), then
-   `PATCH` the body. Any `to`/`cc` in the spec are added to the reply's
-   recipients, not replacing them. Never overwrite the body outright — that
+   (matched case-insensitively, attributes allowed, e.g. `<BODY class="x">`)
+   of that draft's body, or at the start if there is no `<body>` tag, then
+   `PATCH` the body with `contentType: HTML`. Any `to`/`cc` in the spec are
+   added to the reply's recipients, not replacing them, de-duplicated by
+   address case-insensitively. Never overwrite the body outright — that
    deletes the thread history.
-4. **Attachments:** files ≤ 3 MB via `POST /me/messages/{id}/attachments`
-   (`#microsoft.graph.fileAttachment`, base64). Larger files via
-   `POST /me/messages/{id}/attachments/createUploadSession`, then sequential
-   `PUT` chunks to the returned upload URL (Graph limit 150 MB).
+4. **Attachments:** files **< 3 MB** via `POST /me/messages/{id}/attachments`
+   (`#microsoft.graph.fileAttachment`, base64; base64 of 3 MiB already reaches
+   Graph's 4 MB request cap, so 3 MB exactly takes the large path). Files
+   ≥ 3 MB via `POST /me/messages/{id}/attachments/createUploadSession`, then
+   sequential `PUT` chunks of 3,276,800 bytes (10 × 320 KiB, under the 4 MB
+   per-request cap; last chunk shorter) to the returned `uploadUrl`, each with
+   `Content-Range: bytes <start>-<end>/<total>`. The `uploadUrl` is
+   pre-authenticated: chunk PUTs carry **no** `Authorization` header. Graph
+   limit 150 MB.
 5. Return the draft's `webLink` and the attachment outcome.
+
+Once a draft exists (after step 2's POST or step 3's `createReply`), any later
+failure — body PATCH, recipient PATCH, or an attachment — exits 3 ("partial")
+with the draft `id`, `webLink`, the failed stage, and uploaded/failed
+attachments. `SKILL.md` forbids re-running `draft` after exit 3 (it would
+create a duplicate); Claude reports the link and the user fixes or deletes
+the draft.
 
 ### Auth
 
-On every command: `acquire_token_silent` for the cached account; if that
-returns nothing, `acquire_token_interactive` with a 180 s timeout. `login`
-forces the interactive path. Scopes: `Mail.ReadWrite`, `People.Read`.
+`lookup`, `find` and `draft` use `acquire_token_silent` only. On a silent miss
+they exit 2 at once with the `login` instruction — they never open a browser,
+because an interactive wait would outlive the shell tool's 120 s default
+timeout and die without printing the instruction. Only `login` runs
+`acquire_token_interactive` (180 s timeout); Claude runs it with a Bash
+timeout of 300000 ms. Scopes: `Mail.ReadWrite`, `People.Read`.
 
 ## Setup (one-time)
 
@@ -148,8 +175,10 @@ On the PC (Claude):
 4. `pip install msal msal-extensions`.
 5. Write `~/.claude/outlook-draft/config.json`.
 6. Create the junction into `~/.claude/skills/`.
-7. `outlook.py login`.
-8. Seed voice and signature: `find --sent --top 20 --full`, then Claude
+7. `outlook.py login` (Bash timeout 300000 ms).
+8. Seed voice and signature: `find --sent --top 10 --full` for voice and
+   `find --sent --top 3 --html` for the signature (HTML keeps its links and
+   formatting), then Claude
    proposes `voice.md` (5–10 bullets: greeting, length, sign-off, formality,
    structure) and `signature.html`. The user approves both before they are
    saved. If the signature contains a logo, Graph drafts cannot reuse
@@ -166,7 +195,8 @@ On the PC (Claude):
    through `lookup`: one clear match → use it; several plausible → ask the
    user once; none → leave the recipient out and flag it.
 3. **Mode.** Reply when the hint or conversation points at an existing email.
-   `find` up to 5 candidates; one obvious match → use it; several → ask.
+   `find` up to 5 candidates (drafts, including the skill's own earlier
+   replies, are already excluded); one obvious match → use it; several → ask.
    `replyAll` when the user says "all" or the conversation implies it,
    otherwise `reply`. Not found → ask whether to search differently or start a
    new email.
@@ -180,12 +210,13 @@ On the PC (Claude):
 
 | Situation | Behaviour |
 |---|---|
-| Bad attachment path, missing `reply_to_id`/`subject` | Exit 1 before any Graph call; nothing created |
+| Bad attachment path (missing or a directory), missing `reply_to_id`/`subject`, unknown `mode` | Exit 1 before any Graph call; nothing created |
 | Missing `config.json` | Exit 2, message points to Setup |
-| Silent auth fails and interactive times out | Exit 2, message gives `! python ~/.claude/skills/outlook-draft/scripts/outlook.py login` |
-| Graph 429/503 | Honour `Retry-After`, up to 3 retries |
-| Other Graph error | Exit 1 with Graph's `error.code` and `error.message` |
-| Draft created, an attachment fails | Exit 3 ("partial"): draft link, uploaded and failed attachments. No rollback; the draft stays for the user to fix or delete |
+| Silent auth misses (any command but `login`), or `login` times out | Exit 2, message gives `! python ~/.claude/skills/outlook-draft/scripts/outlook.py login` |
+| Graph 429 (any call) | Honour `Retry-After`, up to 3 retries, then treat as other Graph error |
+| Graph 503 | Same retry, but only on GETs and upload-chunk PUTs. Never retry a 503 on a create (`POST /me/messages`, `createReply*`, attachment POST): it may have been processed, and a retry duplicates the draft or attachment |
+| Other Graph error, nothing created yet | Exit 1 with Graph's `error.code` and `error.message` |
+| Any failure after the draft exists | Exit 3 ("partial"): draft `id`, `webLink`, failed stage, uploaded and failed attachments. No rollback; the draft stays for the user to fix or delete |
 
 ## Revocation
 
@@ -195,17 +226,34 @@ Entra sign-in logs under the app name.
 
 ## Testing
 
-`tests/test_outlook.py`, pytest, offline; Graph replaced by an injected fake
-request function:
+`tests/test_outlook.py`, pytest, offline, loaded via the repo's
+`tests/conftest.py` `_load` pattern (as in `esg-longitudinal`); Graph
+replaced by an injected fake request function that records every call;
+`OUTLOOK_DRAFT_HOME` set to `tmp_path`; retry sleep injected so tests do not
+wait:
 
+- module loads with `msal` absent (it is not installed in the test env)
 - new-mode payload: recipients, HTML body, signature appended; no signature
   file → body unchanged
 - reply insertion: new text lands after `<body…>`, quoted original preserved;
-  body without a `<body>` tag gets the text prepended
-- reply recipients: spec `to`/`cc` added to existing reply recipients
-- attachment routing: ≤ 3 MB → simple POST; > 3 MB → upload session with
-  chunks covering the whole file
-- validation: missing attachment file fails with zero Graph calls
+  `<BODY class="x">` (case, attributes) handled; body without a `<body>` tag
+  gets the text prepended; PATCH sends `contentType: HTML`
+- reply recipients: spec `to`/`cc` added to existing reply recipients;
+  duplicates (incl. case-different) not added twice
+- attachment routing: 3 MB − 1 byte → simple POST; exactly 3 MB → upload
+  session; a large file's chunk PUTs have contiguous `Content-Range` values
+  ending in a shorter last chunk, summing to the file size, and carry no
+  `Authorization` header
+- validation (parametrized): missing attachment, attachment that is a
+  directory, reply mode without `reply_to_id`, new mode without `subject`,
+  unknown `mode` → exit 1 with zero Graph calls
+- errors: 429 with `Retry-After` retried then succeeds; four 429s give up;
+  503 on a create POST is not retried; Graph error body → exit 1 with `code`
+  and `message` in the stderr JSON; missing `config.json` → exit 2; silent
+  auth miss on a non-`login` command → exit 2 without going interactive
+- partial: draft created, then an attachment (or the reply PATCH) fails →
+  exit 3 with `id`, `webLink` and `failed_attachments` populated
+- `find`: drafts dropped from results
 
 Live smoke test after setup: new draft to self with one small and one > 3 MB
 attachment; reply-all draft on a test email; check both in new Outlook and on
@@ -214,8 +262,10 @@ the web, then delete them.
 ## Verify during planning
 
 Confirm against current Graph documentation before coding: the `createReply`
-response body shape, the upload-session chunk-size rule, the 3 MB simple
-attachment ceiling, `$search` behaviour on `/me/people` and `/me/messages`
-(including the `ConsistencyLevel` header requirement, if any), and whether
-the `http://localhost` public-client redirect needs "Allow public client
-flows" enabled.
+response body shape (and that it honours the `Prefer` body-content-type
+header), the upload-session chunk-size rule, that the `uploadUrl` PUTs must
+omit `Authorization`, the 3 MB simple attachment ceiling, that `uniqueBody`
+honours `Prefer: outlook.body-content-type`, `$search` behaviour on
+`/me/people` and `/me/messages` (including the `ConsistencyLevel` header
+requirement, if any), and whether the `http://localhost` public-client
+redirect needs "Allow public client flows" enabled.
