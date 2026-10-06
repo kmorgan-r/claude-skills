@@ -281,3 +281,48 @@ def draft(graph, spec):
     if result["failed_attachments"]:
         raise Partial({**result, "stage": "attachments", "error": "some attachments failed"})
     return result
+
+
+def _kql(text):
+    """A $search term: double-quoted, inner quotes and backslashes escaped, URL-encoded."""
+    return urllib.parse.quote('"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"')
+
+
+def lookup(graph, query):
+    res = graph.call("GET", f"/me/people?$search={_kql(query)}&$top=10"
+                            "&$select=displayName,scoredEmailAddresses,companyName")
+    out = []
+    for person in res.get("value", []):
+        emails = person.get("scoredEmailAddresses") or []
+        if emails and emails[0].get("address"):
+            out.append({"name": person.get("displayName"), "email": emails[0]["address"],
+                        "company": person.get("companyName")})
+    return out[:5]
+
+
+def find(graph, query=None, sent=False, top=5, body=None):
+    """body: None, "text" or "html" (adds uniqueBody: only the new part of each message)."""
+    folder = "/me/mailFolders/sentitems/messages" if sent else "/me/messages"
+    fields = "id,subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,isDraft"
+    if body:
+        fields += ",uniqueBody"
+    params = [f"$top={top + 10}", f"$select={fields}"]   # +10: drafts are dropped below
+    if query:
+        params.append(f"$search={_kql(query)}")            # $orderby cannot combine with $search
+    else:
+        params.append("$orderby=receivedDateTime%20desc")
+    headers = {"Prefer": f'outlook.body-content-type="{body}"'} if body else None
+    res = graph.call("GET", folder + "?" + "&".join(params), headers=headers)
+    out = []
+    for m in res.get("value", []):
+        if m.get("isDraft"):
+            continue
+        item = {"id": m["id"], "subject": m.get("subject"), "from": _addr(m.get("from")),
+                "to": [_addr(r) for r in m.get("toRecipients") or []],
+                "cc": [_addr(r) for r in m.get("ccRecipients") or []],
+                "received": m.get("receivedDateTime"), "preview": m.get("bodyPreview"),
+                "isDraft": False}
+        if body:
+            item["body"] = (m.get("uniqueBody") or {}).get("content", "")
+        out.append(item)
+    return out[:top]

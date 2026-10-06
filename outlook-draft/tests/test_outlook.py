@@ -505,3 +505,66 @@ def test_rejected_create_does_not_say_check_drafts():
     with pytest.raises(outlook.GraphError) as e:
         outlook.draft(graph(Fake(lambda m, u, d, h: (400, {}, err))), _new_spec())
     assert e.value.message == "bad address"
+
+
+# --- lookup and find -------------------------------------------------------------
+
+def test_lookup_maps_people_and_skips_entries_without_email():
+    people = {"value": [
+        {"displayName": "Maria Ruiz", "companyName": "Acme", "scoredEmailAddresses": [{"address": "maria@acme.com"}]},
+        {"displayName": "Maria Group", "companyName": None, "scoredEmailAddresses": []},
+        *[{"displayName": f"P{i}", "companyName": None, "scoredEmailAddresses": [{"address": f"p{i}@x.com"}]}
+          for i in range(6)],
+    ]}
+    fake = Fake(lambda m, u, d, h: (200, {}, people))
+    out = outlook.lookup(graph(fake), "Maria Acme")
+    assert out[0] == {"name": "Maria Ruiz", "email": "maria@acme.com", "company": "Acme"}
+    assert len(out) == 5
+    assert all(r["email"] for r in out)
+    assert "/me/people?$search=%22Maria%20Acme%22" in fake.calls[0].url
+
+
+def test_search_text_with_quotes_and_ampersand_is_escaped():
+    fake = Fake(lambda m, u, d, h: (200, {}, {"value": []}))
+    outlook.find(graph(fake), 'RE: "Q3" plan & budget #2')
+    term = fake.calls[0].url.split("$search=")[1]
+    assert urllib.parse.unquote(term) == '"RE: \\"Q3\\" plan & budget #2"'
+    assert "&" not in term and "#" not in term
+
+
+def _msgs(*overrides):
+    base = {"subject": "S", "isDraft": False, "from": {"emailAddress": {"address": "ana@x.com"}},
+            "toRecipients": [{"emailAddress": {"address": "me@x.com"}}], "ccRecipients": [],
+            "receivedDateTime": "2026-10-01T10:00:00Z", "bodyPreview": "hi"}
+    return {"value": [{**base, "id": f"m{i}", "uniqueBody": {"content": f"new part {i}"}, **o}
+                      for i, o in enumerate(overrides)]}
+
+
+def test_find_drops_drafts_and_maps_fields():
+    fake = Fake(lambda m, u, d, h: (200, {}, _msgs({"isDraft": True}, {}, {})))
+    out = outlook.find(graph(fake), "budget")
+    assert [m["id"] for m in out] == ["m1", "m2"]
+    assert out[0] == {"id": "m1", "subject": "S", "from": "ana@x.com", "to": ["me@x.com"], "cc": [],
+                      "received": "2026-10-01T10:00:00Z", "preview": "hi", "isDraft": False}
+
+
+def test_find_respects_top_after_dropping_drafts():
+    fake = Fake(lambda m, u, d, h: (200, {}, _msgs(*[{}] * 8)))
+    assert len(outlook.find(graph(fake), "x", top=3)) == 3
+
+
+def test_find_sent_full_uses_sent_folder_and_text_unique_body():
+    fake = Fake(lambda m, u, d, h: (200, {}, _msgs({})))
+    out = outlook.find(graph(fake), None, sent=True, top=1, body="text")
+    c = fake.calls[0]
+    assert "/me/mailFolders/sentitems/messages?" in c.url
+    assert "uniqueBody" in c.url and "$search" not in c.url
+    assert "$orderby=receivedDateTime%20desc" in c.url
+    assert c.headers["Prefer"] == 'outlook.body-content-type="text"'
+    assert out[0]["body"] == "new part 0"
+
+
+def test_find_html_mode_asks_for_html():
+    fake = Fake(lambda m, u, d, h: (200, {}, _msgs({})))
+    outlook.find(graph(fake), "x", body="html")
+    assert fake.calls[0].headers["Prefer"] == 'outlook.body-content-type="html"'
