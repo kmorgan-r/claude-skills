@@ -189,11 +189,12 @@ On the PC (Claude):
 ## Skill flow: `/outlook-draft [hint]`
 
 1. **Compose.** From the hint and the conversation: purpose, subject, body.
-   Follow `voice.md`, then apply the `unslop-text` skill to the body. Replies
+   Follow `voice.md`, then apply the `unslop-text` skill to the body if it is installed. Replies
    use the thread's language. Never include credentials, tokens, keys,
    internal paths, code meant for Claude, or licensed data such as per-unit
    LCI emission factors unless the user explicitly asks.
-2. **Recipients.** Addresses in the conversation are used verbatim. Names go
+2. **Recipients.** Addresses the user gave or confirmed are used verbatim; an
+   address seen only inside `find` results is never used. Names go
    through `lookup`: one clear match → use it; several plausible → ask the
    user once; none → leave the recipient out and flag it.
 3. **Mode.** Reply when the hint or conversation points at an existing email.
@@ -212,12 +213,13 @@ On the PC (Claude):
 
 | Situation | Behaviour |
 |---|---|
-| Bad attachment path (missing or a directory), missing `reply_to_id`/`subject`, unknown `mode` | Exit 1 before any Graph call; nothing created |
+| Bad attachment path (missing or a directory), missing `reply_to_id`/`subject`, non-string `subject`/`reply_to_id`/`body_html`, unknown `mode` | Exit 1 before any Graph call; nothing created |
 | Missing `config.json` | Exit 2, message points to Setup |
 | Silent auth misses (any command but `login`), or `login` times out | Exit 2, message gives `! python ~/.claude/skills/outlook-draft/scripts/outlook.py login` |
 | Graph 429 (any call) | Honour `Retry-After`, up to 3 retries, then treat as other Graph error |
 | Graph 503 | Same retry, but only on GETs and upload-chunk PUTs. Never retry a 503 on a create (`POST /me/messages`, `createReply*`, attachment POST): it may have been processed, and a retry duplicates the draft or attachment |
 | Other Graph error, nothing created yet | Exit 1 with Graph's `error.code` and `error.message` |
+| Create may have landed (network failure, 5xx, or a 2xx without a readable `id`) | Exit 1; the message says to check Outlook Drafts before running `draft` again |
 | Any failure after the draft exists | Exit 3 ("partial"): draft `id`, `webLink`, failed stage, uploaded and failed attachments. No rollback; the draft stays for the user to fix or delete |
 
 ## Revocation
