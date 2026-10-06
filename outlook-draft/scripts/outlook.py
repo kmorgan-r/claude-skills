@@ -91,7 +91,7 @@ def _retry_after(headers):
 def _graph_error(status, raw):
     try:
         err = json.loads(raw)["error"]
-        return GraphError(status, err.get("code", ""), err.get("message", ""))
+        return GraphError(status, str(err.get("code") or ""), str(err.get("message") or ""))
     except (ValueError, KeyError, TypeError, AttributeError):   # "error" may not be an object
         return GraphError(status, "", raw.decode("utf-8", "replace")[:500])
 
@@ -148,6 +148,9 @@ def validate_spec(spec):
     mode = spec.get("mode")
     if mode not in MODES:
         raise SpecError(f"mode must be one of {', '.join(MODES)}; got {mode!r}")
+    for key in ("subject", "reply_to_id", "body_html"):
+        if spec.get(key) is not None and not isinstance(spec[key], str):
+            raise SpecError(f"{key} must be a string")
     if mode == "new" and not spec.get("subject"):
         raise SpecError("new mode needs a subject")
     if mode != "new" and not spec.get("reply_to_id"):
@@ -253,25 +256,30 @@ def _create(graph, spec, body, to, cc):
 
 def draft(graph, spec):
     validate_spec(spec)
-    body = with_signature(spec.get("body_html", ""))
+    body = with_signature(spec.get("body_html") or "")
     to, cc = spec.get("to", []), spec.get("cc", [])
     try:
         msg = _create(graph, spec, body, to, cc)
+        result = {"id": msg["id"], "webLink": msg.get("webLink"), "subject": msg.get("subject"),
+                  "to": [], "cc": [], "attachments": [], "failed_attachments": []}
     except GraphError as e:
-        if e.status == 0 or e.status >= 500:   # timeout or server error: the create may have gone through
-            raise GraphError(e.status, e.code, e.message + MAYBE_CREATED) from e
-        raise
-    result = {"id": msg["id"], "webLink": msg.get("webLink"), "subject": msg.get("subject"),
-              "to": [], "cc": [], "attachments": [], "failed_attachments": []}
+        if 400 <= e.status < 500:   # Graph refused the create: no draft exists
+            raise
+        # timeout, server error or a 2xx we cannot read: the create may have gone through
+        raise GraphError(e.status, e.code, e.message + MAYBE_CREATED) from e
+    except Exception as e:   # a 2xx without a usable id: the draft probably exists
+        raise GraphError(0, "bad-response", f"{type(e).__name__}: {e}.{MAYBE_CREATED}") from e
     # From here on the draft exists: any failure, of any type, is reported as partial
     # (exit 3), so Claude never re-runs draft and makes a duplicate.
-    if spec["mode"] != "new":
-        try:
-            msg = _fill_reply(graph, msg["id"], body, to, cc)
-        except Exception as e:
-            raise Partial({**result, "stage": "reply-body", "error": str(e)}) from e
-    result["to"] = [_addr(r) for r in msg.get("toRecipients") or []]
-    result["cc"] = [_addr(r) for r in msg.get("ccRecipients") or []]
+    stage = "reply-body"
+    try:
+        if spec["mode"] != "new":
+            msg = _fill_reply(graph, result["id"], body, to, cc)
+        stage = "recipients"
+        result["to"] = [_addr(r) for r in msg.get("toRecipients") or []]
+        result["cc"] = [_addr(r) for r in msg.get("ccRecipients") or []]
+    except Exception as e:
+        raise Partial({**result, "stage": stage, "error": str(e)}) from e
     for path in spec.get("attachments", []):
         try:
             attach(graph, result["id"], path)
@@ -349,12 +357,15 @@ def get_token(interactive=False):
             token_cache=cache,
         )
         if interactive:
+            for account in app.get_accounts():   # one account only: other commands use accounts[0]
+                app.remove_account(account)
             result = app.acquire_token_interactive(SCOPES, timeout=180, prompt="select_account")
         else:
             accounts = app.get_accounts()
             result = app.acquire_token_silent(SCOPES, account=accounts[0]) if accounts else None
     except Exception as e:   # msal raises on network, authority-discovery and cache-lock failures
-        raise SetupError(f"Sign-in failed: {type(e).__name__}: {e}") from e
+        hint = f"\n{LOGIN_HINT}" if interactive else ""   # e.g. the 180 s sign-in window ran out
+        raise SetupError(f"Sign-in failed: {type(e).__name__}: {e}{hint}") from e
     if not result or "access_token" not in result:
         detail = (result or {}).get("error_description")
         raise SetupError(f"{detail}\n{LOGIN_HINT}" if detail else LOGIN_HINT)

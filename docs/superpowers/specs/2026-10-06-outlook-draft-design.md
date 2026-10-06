@@ -96,9 +96,9 @@ code page) and errors as JSON to stderr.
 
 | Command | Graph call | Output |
 |---|---|---|
-| `login` | interactive browser sign-in | signed-in account |
+| `login` | interactive browser sign-in; replaces any previously cached account | signed-in account |
 | `lookup "<name or name + company>"` | `GET /me/people?$search=` | up to 5 `{name, email, company}` ranked by relevance |
-| `find ["<query>"] [--sent] [--top N] [--full \| --html]` | `GET /me/messages?$search=` or `/me/mailFolders/sentitems/messages` | up to N (default 5) `{id, subject, from, to, cc, received, preview, isDraft}`, drafts dropped by the script (`$filter` cannot combine with `$search` on messages); `--full` adds `uniqueBody` as plain text (`Prefer: outlook.body-content-type="text"`), `--html` adds `uniqueBody` as HTML. `uniqueBody` is only the new part of each message, so quoted threads do not blow the shell's ~30k-character output limit |
+| `find ["<query>"] [--sent] [--top N] [--full \| --html]` | `GET /me/messages?$search=` with a query, else `/me/mailFolders/inbox/messages` (drafts would crowd the newest `/me/messages`); `/me/mailFolders/sentitems/messages` with `--sent` | up to N (default 5) `{id, subject, from, to, cc, received, preview, isDraft}`, drafts dropped by the script (`$filter` cannot combine with `$search` on messages); `--full` adds `uniqueBody` as plain text (`Prefer: outlook.body-content-type="text"`), `--html` adds `uniqueBody` as HTML. `uniqueBody` is only the new part of each message, so quoted threads do not blow the shell's ~30k-character output limit |
 | `draft <spec.json>` | see below | `{id, webLink, subject, to, cc, attachments, failed_attachments}` |
 
 ### Draft spec (written by Claude to a scratch file)

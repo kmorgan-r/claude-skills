@@ -205,6 +205,9 @@ def test_valid_new_spec_passes():
     {"mode": "forward"},
     {"to": "ana@x.com"},
     {"cc": [None]},
+    {"subject": 5},
+    {"body_html": ["<p>x</p>"]},
+    {"mode": "reply", "reply_to_id": 7},
 ])
 def test_invalid_spec_is_rejected(over, tmp_path):
     if over.get("attachments") == ["<DIR>"]:
@@ -489,7 +492,11 @@ def test_network_failure_after_reply_created_is_partial():
     assert (e.value.result["id"], e.value.result["stage"]) == ("R1", "reply-body")
 
 
-@pytest.mark.parametrize("failure", [TimeoutError("timed out"), (500, {}, None)])
+@pytest.mark.parametrize("failure", [
+    TimeoutError("timed out"), (500, {}, None),
+    (503, {}, {"error": {"code": None, "message": None}}),   # null fields must not break the suffix
+    (201, {}, None), (201, {}, b"<html>proxy</html>"), (201, {}, {"subject": "Hello"}),   # unreadable 2xx
+])
 def test_failed_create_that_may_have_landed_says_check_drafts(failure):
     def handler(m, u, d, h):
         if isinstance(failure, Exception):
@@ -601,7 +608,12 @@ def _fake_msal(monkeypatch, accounts=(), silent=None, interactive=None):
 
         def acquire_token_interactive(self, scopes, timeout, prompt):
             log.append(("interactive", timeout))
+            if isinstance(interactive, Exception):
+                raise interactive
             return interactive
+
+        def remove_account(self, account):
+            log.append(("remove", account["username"]))
 
     monkeypatch.setitem(sys.modules, "msal", types.SimpleNamespace(PublicClientApplication=App))
     monkeypatch.setitem(sys.modules, "msal_extensions", types.SimpleNamespace(
@@ -753,3 +765,57 @@ def test_partial_exits_3_with_link_on_stdout(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["partial"] is True and out["webLink"] == "https://outlook/D1"
     assert out["failed_attachments"][0]["path"] == bad
+
+
+# --- final review fixes ----------------------------------------------------------
+
+def test_unreadable_reply_draft_is_partial_not_a_crash():
+    reply = _reply_handler()
+
+    def handler(m, u, d, h):
+        if m == "GET":
+            return 200, {}, {"toRecipients": []}   # no "body": a KeyError, not a GraphError
+        return reply(m, u, d, h)
+    with pytest.raises(outlook.Partial) as e:
+        outlook.draft(graph(Fake(handler)), _reply_spec())
+    assert (e.value.result["id"], e.value.result["stage"]) == ("R1", "reply-body")
+
+
+def test_empty_patch_response_exits_3_with_link(tmp_path, capsys):
+    reply = _reply_handler()
+
+    def handler(m, u, d, h):
+        return (200, {}, None) if m == "PATCH" else reply(m, u, d, h)
+    path = _write_spec(tmp_path, _reply_spec())
+    assert outlook.main(["draft", path], transport=Fake(handler), token_fn=_token) == 3
+    out = json.loads(capsys.readouterr().out)
+    assert (out["webLink"], out["stage"], out["partial"]) == ("https://outlook/R1", "recipients", True)
+
+
+def test_unreadable_created_draft_exits_1_saying_check_drafts(tmp_path, capsys):
+    path = _write_spec(tmp_path, _new_spec())
+    fake = Fake(lambda m, u, d, h: (201, {}, None))
+    assert outlook.main(["draft", path], transport=fake, token_fn=_token) == 1
+    assert "check Outlook Drafts" in json.loads(capsys.readouterr().err)["message"]
+
+
+def test_null_optional_fields_are_allowed():
+    fake = Fake(_created)
+    outlook.draft(graph(fake), _new_spec(reply_to_id=None, body_html=None))
+    assert fake.json(0)["body"]["content"] == ""
+
+
+def test_login_replaces_cached_accounts(private_home, monkeypatch, capsys):
+    _config(private_home)
+    log = _fake_msal(monkeypatch, accounts=[{"username": "old@x.com"}], interactive={
+        "access_token": "t", "id_token_claims": {"preferred_username": "new@x.com"}})
+    assert outlook.main(["login"]) == 0
+    assert log.index(("remove", "old@x.com")) < log.index(("interactive", 180))
+
+
+def test_login_that_raises_says_how_to_retry(private_home, monkeypatch, capsys):
+    _config(private_home)
+    _fake_msal(monkeypatch, interactive=TimeoutError("no response in 180 s"))
+    assert outlook.main(["login"]) == 2
+    message = json.loads(capsys.readouterr().err)["message"]
+    assert "no response in 180 s" in message and "outlook.py login" in message

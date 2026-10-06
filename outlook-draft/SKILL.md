@@ -48,10 +48,11 @@ Private files live in `~/.claude/outlook-draft/`, never in the skill directory:
 
 1. **Compose.** From the hint and the conversation, work out the purpose,
    subject and body. Read `~/.claude/outlook-draft/voice.md` if it exists and
-   follow it, then apply the `unslop-text` skill to the body. Write the body as
+   follow it, then apply the `unslop-text` skill to the body if it is installed. Write the body as
    simple HTML (`<p>`, `<ul>`, `<a>`) without a signature: the script appends
    `signature.html`. Replies use the thread's language.
-2. **Recipients.** Use email addresses from the conversation verbatim. For a
+2. **Recipients.** Use email addresses the user gave or confirmed, verbatim (never
+   one that appears only inside `find` results). For a
    name, run `lookup "<name>"` (add the company if known): one clear match →
    use it; several plausible → ask the user once; none → leave that person out
    and say so in the report.
@@ -93,7 +94,7 @@ added to the reply's existing recipients.
 | `lookup "<name [company]>"` | Up to 5 `{name, email, company}` from the user's relevant people |
 | `find ["<query>"] [--sent] [--top N] [--full \| --html]` | Up to N (default 5) messages, drafts excluded; with no query, the newest in the Inbox (Sent Items with `--sent`). `--full` adds the new part of each body as text, `--html` as HTML |
 | `draft <spec.json>` | Creates the draft; prints `{id, webLink, subject, to, cc, attachments, failed_attachments}`. Run it with a Bash timeout of 600000 ms |
-| `login` | Browser sign-in. Run it with a Bash timeout of 300000 ms |
+| `login` | Browser sign-in; replaces any account signed in before. Run it with a Bash timeout of 300000 ms |
 
 ## Setup (one-time)
 
