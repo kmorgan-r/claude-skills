@@ -1107,7 +1107,12 @@ def lookup(graph, query):
 
 def find(graph, query=None, sent=False, top=5, body=None):
     """body: None, "text" or "html" (adds uniqueBody: only the new part of each message)."""
-    folder = "/me/mailFolders/sentitems/messages" if sent else "/me/messages"
+    if sent:
+        folder = "/me/mailFolders/sentitems/messages"
+    elif query:
+        folder = "/me/messages"
+    else:   # newest mail: the Inbox, since drafts (receivedDateTime = creation time) sort first in /me/messages
+        folder = "/me/mailFolders/inbox/messages"
     fields = "id,subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,isDraft"
     if body:
         fields += ",uniqueBody"
@@ -1268,7 +1273,7 @@ def test_usage_errors_exit_1_not_2(argv, capsys):
 
 @pytest.mark.parametrize("argv, url_part, prefer, count", [
     (["find", "x", "--sent", "--top", "2", "--full"], "/me/mailFolders/sentitems/messages?$top=12", "text", 2),
-    (["find", "--html"], "/me/messages?$top=15", "html", 3),
+    (["find", "--html"], "/me/mailFolders/inbox/messages?$top=15", "html", 3),
     (["find", "x"], "/me/messages?$top=15", None, 3),
 ])
 def test_find_flags_reach_graph(argv, url_part, prefer, count, capsys):
