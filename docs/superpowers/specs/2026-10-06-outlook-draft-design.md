@@ -116,6 +116,9 @@ code page) and errors as JSON to stderr.
 ```
 
 The script appends `signature.html` to `body_html` when that file exists.
+Each `<img src="cid:NAME">` in it whose NAME is a PNG, JPG or GIF beside it is
+attached to the draft as an inline image (`isInline`, `contentId` = NAME) before
+the spec's attachments; a missing image is a failed attachment (exit 3).
 
 ### `draft` sequence
 
@@ -183,8 +186,9 @@ On the PC (Claude):
    formatting), then Claude
    proposes `voice.md` (5–10 bullets: greeting, length, sign-off, formality,
    structure) and `signature.html`. The user approves both before they are
-   saved. If the signature contains a logo, Graph drafts cannot reuse
-   Outlook's embedded copy: use a hosted image URL or omit it.
+   saved. If the signature contains a logo, the user supplies the image file
+   (or a sent email saved as `.eml`); it is saved beside `signature.html` and
+   referenced as `<img src="cid:logo.png">`.
 
 ## Skill flow: `/outlook-draft [hint]`
 

@@ -25,7 +25,8 @@ error, `2` setup or sign-in needed, `3` partial (the draft exists, a later step
 failed).
 
 Private files live in `~/.claude/outlook-draft/`, never in the skill directory:
-`config.json`, `token_cache.bin`, `signature.html`, `voice.md`.
+`config.json`, `token_cache.bin`, `signature.html` (plus its logo, if any),
+`voice.md`.
 
 ## Rules
 
@@ -124,8 +125,11 @@ On the PC (Claude does this):
 8. Seed voice and signature. Run `find --sent --top 10 --full` and propose
    `voice.md` (5–10 bullets: greeting, length, sign-off, formality, structure).
    Run `find --sent --top 3 --html` and propose `signature.html`. Save each only
-   after the user approves it. If the signature has a logo, Graph drafts cannot
-   reuse Outlook's embedded copy: use a hosted image URL or leave it out.
+   after the user approves it. If the signature has a logo, `find` cannot fetch
+   the image: ask the user for the file (or a sent email saved as `.eml`), save
+   it beside `signature.html` as `logo.png`, and show it with
+   `<img src="cid:logo.png" alt="<company>">`. `draft` attaches every PNG, JPG or
+   GIF that `signature.html` names this way as an inline image.
 
 ## Revoking access
 

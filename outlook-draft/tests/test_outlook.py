@@ -358,6 +358,36 @@ def test_signature_is_appended(private_home):
     assert fake.json(0)["body"]["content"] == "<p>Hi Ana</p><p>-- Kev</p>"
 
 
+def test_signature_logo_is_attached_inline_and_only_images_are(private_home):
+    (private_home / "signature.html").write_text(
+        '<img src="cid:logo.png"><img src=\'CID:logo.png\'><img src="cid:config.json">', encoding="utf-8")
+    (private_home / "logo.png").write_bytes(b"\x89PNG")
+    (private_home / "config.json").write_text("{}", encoding="utf-8")
+    fake = Fake(_draft_handler())
+    out = outlook.draft(graph(fake), _new_spec())
+    assert len(fake.calls) == 2   # the create, then the logo once; config.json never
+    post = fake.json(1)
+    assert (post["name"], post["isInline"], post["contentId"]) == ("logo.png", True, "logo.png")
+    assert base64.b64decode(post["contentBytes"]) == b"\x89PNG"
+    assert (out["attachments"], out["failed_attachments"]) == ([], [])
+
+
+def test_missing_signature_logo_is_partial(private_home):
+    (private_home / "signature.html").write_text('<img src="cid:logo.png">', encoding="utf-8")
+    with pytest.raises(outlook.Partial) as e:
+        outlook.draft(graph(Fake(_draft_handler())), _new_spec())
+    r = e.value.result
+    assert r["stage"] == "attachments"
+    assert r["failed_attachments"][0]["path"].endswith("logo.png")
+
+
+def test_large_inline_image_keeps_its_content_id(tmp_path):
+    fake = Fake(_attach_handler())
+    outlook.attach(graph(fake), "D1", _file(tmp_path, "logo.png", outlook.SIMPLE_MAX), inline=True)
+    item = fake.json(0)["AttachmentItem"]
+    assert (item["isInline"], item["contentId"]) == (True, "logo.png")
+
+
 def test_new_draft_without_recipients_is_allowed():
     fake = Fake(_created)
     out = outlook.draft(graph(fake), _new_spec(to=[], cc=[]))

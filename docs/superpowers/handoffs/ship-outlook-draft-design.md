@@ -69,15 +69,19 @@ The controller also made two doc commits: 1c16f62 (plan drift) and 9e4358e (spec
 
 ## Live-only checks (not verifiable offline)
 
-These go into the smoke test after merge:
+Smoke-tested from this branch on 2026-10-06, before merge:
 
-- whether msal's `acquire_token_interactive` raises or returns an error dict on its 180-second timeout (both paths print the login command);
-- KQL escaping of `"` and `\` in `$search`;
-- whether `uniqueBody` honours `Prefer: outlook.body-content-type`;
-- whether "Allow public client flows" is needed;
-- the 60-second per-chunk `urlopen` timeout on slow uplinks;
-- Exchange `MaxSendSize` for large attachments;
-- whether inline `cid:` images survive the reply PATCH.
+- **Resolved:**
+  - `login` works without "Allow public client flows".
+  - `$search` with `"` and `\` returns results, no 400.
+  - `uniqueBody` honours `Prefer: outlook.body-content-type` (text and HTML).
+  - Inline `cid:` images in the quoted thread survive the reply PATCH.
+  - A 4.5 MB attachment went through the upload session.
+  - The signature logo attaches inline (`image/png`, `contentId` `logo.png`).
+- **Still open:**
+  - whether msal's `acquire_token_interactive` raises or returns an error dict on its 180-second timeout (both paths print the login command);
+  - the 60-second per-chunk `urlopen` timeout on slow uplinks;
+  - Exchange `MaxSendSize` for large attachments.
 
 ## After merge (manual, with the user)
 

@@ -26,6 +26,7 @@ MAX_ATTACHMENT = 150 * 1024 * 1024   # Graph's upload-session limit
 MAX_RETRIES = 3
 MAX_WAIT = 30                  # cap Retry-After so one throttled call cannot stall for minutes
 MODES = ("new", "reply", "replyAll")
+SIGNATURE_IMAGES = (".png", ".jpg", ".jpeg", ".gif")   # never config.json or the token cache
 LOGIN_HINT = "Not signed in. Run: ! python ~/.claude/skills/outlook-draft/scripts/outlook.py login"
 
 
@@ -173,19 +174,22 @@ def read_spec(path):
         raise SpecError(f"cannot read spec {path}: {e}") from e
 
 
-def attach(graph, msg_id, path):
+def attach(graph, msg_id, path, inline=False):
     p = pathlib.Path(path)
     size = p.stat().st_size
     base = f"/me/messages/{_q(msg_id)}/attachments"
+    # an inline image shows where the body has <img src="cid:<its contentId>">
+    extra = {"isInline": True, "contentId": p.name} if inline else {}
     if size < SIMPLE_MAX:
         graph.call("POST", base, {
             "@odata.type": "#microsoft.graph.fileAttachment",
             "name": p.name,
             "contentBytes": base64.b64encode(p.read_bytes()).decode("ascii"),
+            **extra,
         })
         return
     session = graph.call("POST", base + "/createUploadSession", {
-        "AttachmentItem": {"attachmentType": "file", "name": p.name, "size": size},
+        "AttachmentItem": {"attachmentType": "file", "name": p.name, "size": size, **extra},
     })
     with p.open("rb") as f:
         start = 0
@@ -201,9 +205,14 @@ def attach(graph, msg_id, path):
             start = end + 1
 
 
-def with_signature(body_html):
+def signature():
+    """signature.html, and the images beside it that it shows as <img src="cid:<file name>">."""
     sig = home() / "signature.html"
-    return body_html + sig.read_text(encoding="utf-8-sig") if sig.is_file() else body_html
+    if not sig.is_file():
+        return "", []
+    html = sig.read_text(encoding="utf-8-sig")
+    names = dict.fromkeys(re.findall(r'src=["\']cid:([^"\'/\\]+)["\']', html, re.IGNORECASE))
+    return html, [home() / n for n in names if n.lower().endswith(SIGNATURE_IMAGES)]
 
 
 _BODY_TAG = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
@@ -256,7 +265,8 @@ def _create(graph, spec, body, to, cc):
 
 def draft(graph, spec):
     validate_spec(spec)
-    body = with_signature(spec.get("body_html") or "")
+    sig_html, sig_images = signature()
+    body = (spec.get("body_html") or "") + sig_html
     to, cc = spec.get("to", []), spec.get("cc", [])
     try:
         msg = _create(graph, spec, body, to, cc)
@@ -280,6 +290,11 @@ def draft(graph, spec):
         result["cc"] = [_addr(r) for r in msg.get("ccRecipients") or []]
     except Exception as e:
         raise Partial({**result, "stage": stage, "error": str(e)}) from e
+    for path in sig_images:   # a missing logo is reported, not silently left as a broken image
+        try:
+            attach(graph, result["id"], path, inline=True)
+        except Exception as e:
+            result["failed_attachments"].append({"path": str(path), "error": str(e)})
     for path in spec.get("attachments", []):
         try:
             attach(graph, result["id"], path)
