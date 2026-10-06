@@ -17,8 +17,9 @@
 - No command deletes or moves mail.
 - Private files live in `~/.claude/outlook-draft/` (`OUTLOOK_DRAFT_HOME` overrides it). Nothing personal goes in the repo: `kmorgan-r/claude-skills` is public.
 - Every command prints one JSON object to stdout, UTF-8 with `ensure_ascii=False`. Errors go to stderr as `{"error": <kind or Graph code>, "message": ...}`.
-- Exit codes: `0` ok, `1` bad spec or Graph error, `2` setup/sign-in needed, `3` partial (the draft exists and a later step failed).
-- Attachments under `SIMPLE_MAX = 3 * 1024 * 1024` bytes use one POST. Anything else uses an upload session with `CHUNK = 10 * 320 * 1024`-byte PUTs that carry **no** `Authorization` header.
+- Exit codes: `0` ok, `1` bad spec, usage, network or Graph error, `2` setup/sign-in needed (including a 401 from Graph), `3` partial (the draft exists and a later step failed). Argparse's own exit 2 is overridden so a usage error never reads as "sign in". Once the draft exists, **any** failure, of any exception type, is exit 3: a traceback there would make Claude re-run `draft` and duplicate the draft.
+- Network failures (`URLError`, timeouts, resets, short reads) never escape as tracebacks: `Graph.call` turns them into `GraphError(0, "network", ...)`.
+- Attachments under `SIMPLE_MAX = 3 * 1024 * 1024` bytes use one POST. Anything else, up to `MAX_ATTACHMENT = 150 * 1024 * 1024` bytes, uses an upload session with `CHUNK = 10 * 320 * 1024`-byte PUTs that carry **no** `Authorization` header. A larger file fails spec validation, before any Graph call.
 - Retries: 429 is always retried. 503 is retried only on GETs and upload-chunk PUTs. At most 3 retries, and `Retry-After` is capped at 30 s.
 - Tests are offline and must pass with `msal` **not installed**.
 - Run every command from the worktree root. The test command is `python -m pytest outlook-draft/tests -q`. A global `pytest-asyncio` deprecation warning in the output is expected noise.
@@ -39,7 +40,7 @@ Other facts confirmed against the docs:
 1. **Search text containing `"`, `&` or `#`** (`find 'RE: "Q3" plan & budget #2'`): it must be escaped and URL-encoded rather than split the query string. Pinned by `test_search_text_with_quotes_and_ampersand_is_escaped` (Task 4).
 2. **Spec file saved with a UTF-8 BOM and non-ASCII text** (PowerShell writes a BOM; subjects like "Café — Zürich"): the file must parse, and stdout must stay readable UTF-8. Pinned by `test_read_spec_accepts_utf8_bom` (Task 2) and `test_draft_with_bom_spec_and_non_ascii_prints_utf8_json` (Task 5).
 3. **`to` given as a bare string instead of a list**: it must be rejected, not turned into one recipient per character. Pinned by the `{"to": "ana@x.com"}` case of `test_invalid_spec_is_rejected` (Task 2).
-4. **`Retry-After` missing, given as an HTTP date, or huge**: defaults to 1 s and is capped at 30 s, never a crash or a wait past the shell's 120 s timeout. Pinned by `test_retry_after_parsing` (Task 1).
+4. **`Retry-After` missing, given as an HTTP date, or huge**: defaults to 1 s and is capped at 30 s per wait, never a crash. (A whole `draft` with large attachments can still run for minutes, so SKILL.md runs it with a 600000 ms Bash timeout.) Pinned by `test_retry_after_parsing` (Task 1).
 5. **A new email whose only recipient could not be resolved**: the draft is still created with an empty To, and the skill reports the gap. Pinned by `test_new_draft_without_recipients_is_allowed` (Task 3).
 
 ---
@@ -54,11 +55,11 @@ Other facts confirmed against the docs:
 **Interfaces:**
 - Consumes: nothing.
 - Produces (in `outlook.py`):
-  - Constants `GRAPH`, `SCOPES`, `SIMPLE_MAX`, `CHUNK`, `MAX_RETRIES`, `MAX_WAIT`, `MODES`, `LOGIN_HINT`.
-  - Exceptions `SpecError`, `SetupError`, `GraphError(status, code, message)` (attributes `.status`, `.code`, `.message`), and `Partial(result: dict)` (attribute `.result`).
-  - `home() -> pathlib.Path` and `load_config() -> dict` (raises `SetupError`).
+  - Constants `GRAPH`, `SCOPES`, `SIMPLE_MAX`, `CHUNK`, `MAX_ATTACHMENT`, `MAX_RETRIES`, `MAX_WAIT`, `MODES`, `LOGIN_HINT`.
+  - Exceptions `SpecError`, `SetupError`, `GraphError(status, code, message)` (attributes `.status`, `.code`, `.message`; `status` is `0` for a network failure), and `Partial(result: dict)` (attribute `.result`).
+  - `home() -> pathlib.Path` and `load_config() -> dict` (raises `SetupError`, also for a config file that is not valid JSON).
   - `urllib_transport(method, url, data: bytes | None, headers: dict) -> (int, dict, bytes)`.
-  - `Graph(token, transport=urllib_transport, sleep=time.sleep)`, with `.call(method, url, body=None, *, data=None, headers=None, auth=True, retry_503=None) -> dict | None`. A `url` that does not start with `https://` is prefixed with `GRAPH`.
+  - `Graph(token, transport=urllib_transport, sleep=time.sleep)`, with `.call(method, url, body=None, *, data=None, headers=None, auth=True, retry_503=None) -> dict | None`. A `url` that does not start with `https://` is prefixed with `GRAPH`. It raises only `GraphError`: HTTP errors, `code "network"` (status 0) for transport failures, and `code "bad-response"` for a 2xx body that is not JSON.
 - Produces (in `test_outlook.py`, used by every later task's tests):
   - `Fake(handler)`, with `.calls[i].method/.url/.data/.headers` and `.json(i)`.
   - `_sequence(*responses)` and `graph(fake, sleeps=None)`.
@@ -90,10 +91,13 @@ Create `outlook-draft/tests/test_outlook.py` with exactly:
 
 ```python
 import base64
+import http.client
+import io
 import json
 import pathlib
 import sys
 import types
+import urllib.error
 import urllib.parse
 
 import pytest
@@ -232,6 +236,38 @@ def test_non_json_error_body_is_kept_as_message():
     assert e.value.code == "" and "bad gateway" in e.value.message
 
 
+@pytest.mark.parametrize("exc", [
+    urllib.error.URLError("getaddrinfo failed"), TimeoutError("timed out"), http.client.IncompleteRead(b"ab"),
+])
+def test_network_failure_is_graph_error_with_status_0(exc):
+    def down(m, u, d, h):
+        raise exc
+    with pytest.raises(outlook.GraphError) as e:
+        graph(Fake(down)).call("GET", "/me")
+    assert (e.value.status, e.value.code, e.value.message) == (0, "network", str(exc))
+
+
+def test_non_json_success_body_is_graph_error():
+    fake = Fake(lambda m, u, d, h: (200, {}, b"<html>proxy login</html>"))
+    with pytest.raises(outlook.GraphError) as e:
+        graph(fake).call("GET", "/me")
+    assert (e.value.status, e.value.code) == (200, "bad-response")
+
+
+def test_urllib_transport_returns_http_errors_instead_of_raising(monkeypatch):
+    def urlopen(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 429, "Too Many", {"Retry-After": "3"}, io.BytesIO(b"{}"))
+    monkeypatch.setattr(outlook.urllib.request, "urlopen", urlopen)
+    assert outlook.urllib_transport("GET", "https://graph.microsoft.com/v1.0/me", None, {}) == \
+        (429, {"Retry-After": "3"}, b"{}")
+
+
+def test_unreadable_config_is_setup_error(private_home):
+    (private_home / "config.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(outlook.SetupError):
+        outlook.load_config()
+
+
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
@@ -253,6 +289,7 @@ Exit codes: 0 ok, 1 bad input or Graph error, 2 setup/sign-in, 3 partial.
 """
 import argparse
 import base64
+import http.client
 import json
 import os
 import pathlib
@@ -267,8 +304,9 @@ GRAPH = "https://graph.microsoft.com/v1.0"
 SCOPES = ["Mail.ReadWrite", "People.Read"]
 SIMPLE_MAX = 3 * 1024 * 1024   # Graph: files under 3 MB go in one POST
 CHUNK = 10 * 320 * 1024        # upload-session chunk, under Graph's 4 MB per PUT
+MAX_ATTACHMENT = 150 * 1024 * 1024   # Graph's upload-session limit
 MAX_RETRIES = 3
-MAX_WAIT = 30                  # cap Retry-After so a call never outlives the shell timeout
+MAX_WAIT = 30                  # cap Retry-After so one throttled call cannot stall for minutes
 MODES = ("new", "reply", "replyAll")
 LOGIN_HINT = "Not signed in. Run: ! python ~/.claude/skills/outlook-draft/scripts/outlook.py login"
 
@@ -304,8 +342,11 @@ def load_config():
     path = home() / "config.json"
     if not path.is_file():
         raise SetupError(f"Missing {path}. Follow the Setup section of the outlook-draft SKILL.md.")
-    cfg = json.loads(path.read_text(encoding="utf-8-sig"))
-    if not cfg.get("tenant_id") or not cfg.get("client_id"):
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as e:
+        raise SetupError(f"Cannot read {path}: {e}") from e
+    if not isinstance(cfg, dict) or not cfg.get("tenant_id") or not cfg.get("client_id"):
         raise SetupError(f"{path} needs tenant_id and client_id.")
     return cfg
 
@@ -355,20 +396,26 @@ class Graph:
         if retry_503 is None:
             retry_503 = method == "GET"
         for attempt in range(MAX_RETRIES + 1):
-            status, resp_headers, raw = self.transport(method, url, data, hdrs)
+            try:
+                status, resp_headers, raw = self.transport(method, url, data, hdrs)
+            except (OSError, http.client.HTTPException) as e:   # URLError, timeout, reset, short read
+                raise GraphError(0, "network", str(e)) from e
             retryable = status == 429 or (status == 503 and retry_503)
             if not retryable or attempt == MAX_RETRIES:
                 break
             self.sleep(_retry_after(resp_headers))
         if status >= 400:
             raise _graph_error(status, raw)
-        return json.loads(raw) if raw else None
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError as e:   # e.g. a proxy's HTML page with a 200
+            raise GraphError(status, "bad-response", raw.decode("utf-8", "replace")[:500]) from e
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `python -m pytest outlook-draft/tests -q`
-Expected: `15 passed`.
+Expected: `21 passed`.
 
 - [ ] **Step 6: Commit**
 
@@ -390,7 +437,7 @@ git commit -m "feat(outlook-draft): Graph request wrapper with retry and error m
 - Produces:
   - `_q(message_id) -> str`: URL-quotes an id and keeps `=`.
   - `_addr(recipient: dict | None) -> str | None` and `_rcpt(address: str) -> dict`.
-  - `validate_spec(spec) -> None`, which raises `SpecError`.
+  - `validate_spec(spec) -> None`, which raises `SpecError` (also for an attachment over `MAX_ATTACHMENT`).
   - `read_spec(path) -> object`: reads UTF-8 with or without a BOM, raises `SpecError`.
   - `attach(graph, msg_id, path) -> None`, which raises `GraphError` or `OSError`.
   - Test helpers `_new_spec(**over) -> dict`, `_attach_handler(fail_names=())` and `_file(tmp_path, name, size) -> str`.
@@ -427,6 +474,16 @@ def test_invalid_spec_is_rejected(over, tmp_path):
         over = {"attachments": [str(tmp_path)]}
     with pytest.raises(outlook.SpecError):
         outlook.validate_spec(_new_spec(**over))
+
+
+def test_attachment_over_graph_limit_is_rejected_before_any_call(tmp_path, monkeypatch):
+    monkeypatch.setattr(outlook, "MAX_ATTACHMENT", 10)
+    path = tmp_path / "big.bin"
+    path.write_bytes(b"x" * 11)
+    with pytest.raises(outlook.SpecError, match="150 MB"):
+        outlook.validate_spec(_new_spec(attachments=[str(path)]))
+    path.write_bytes(b"x" * 10)
+    outlook.validate_spec(_new_spec(attachments=[str(path)]))
 
 
 def test_spec_must_be_an_object():
@@ -513,7 +570,7 @@ def test_large_file_chunks_cover_file_without_auth_header(tmp_path):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest outlook-draft/tests -q`
-Expected: the new tests fail with `AttributeError: module 'outlook' has no attribute 'validate_spec'` (or `read_spec` / `attach`): `14 failed, 15 passed`.
+Expected: the new tests fail with `AttributeError: module 'outlook' has no attribute 'validate_spec'` (or `read_spec` / `attach`): `15 failed, 21 passed`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -549,6 +606,8 @@ def validate_spec(spec):
     for path in spec.get("attachments", []):
         if not pathlib.Path(path).is_file():
             raise SpecError(f"attachment is not a file: {path}")
+        if pathlib.Path(path).stat().st_size > MAX_ATTACHMENT:
+            raise SpecError(f"attachment is over Graph's 150 MB limit: {path}")
 
 
 def read_spec(path):
@@ -589,7 +648,7 @@ def attach(graph, msg_id, path):
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest outlook-draft/tests -q`
-Expected: `29 passed`.
+Expected: `36 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -615,7 +674,8 @@ git commit -m "feat(outlook-draft): validate draft specs and upload attachments"
   - `insert_reply(draft_html, new_html) -> str`.
   - `merge_recipients(existing: list[dict], extra: list[str]) -> list[dict]`.
   - `_fill_reply(graph, draft_id, body, to, cc) -> dict`.
-  - `draft(graph, spec) -> dict`, returning `{id, webLink, subject, to, cc, attachments, failed_attachments}`. It raises `SpecError` (before any call), `GraphError` (nothing created) or `Partial` (draft exists; the result also carries `stage` and `error`).
+  - `MAYBE_CREATED` (message suffix) and `_create(graph, spec, body, to, cc) -> dict`.
+  - `draft(graph, spec) -> dict`, returning `{id, webLink, subject, to, cc, attachments, failed_attachments}`. It raises `SpecError` (before any call), `GraphError` from the create call, or `Partial` (draft exists; the result also carries `stage` and `error`). A create that failed with status 0 or 5xx may still have landed, so its message ends with `MAYBE_CREATED`. After the create, every exception type becomes `Partial`.
   - Test helpers `_created` and `_draft_handler(fail_names=())`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -776,18 +836,60 @@ def test_reply_signature_goes_before_the_quote(private_home):
     assert fake.json(2)["body"]["content"] == "<body><p>Thanks!</p><p>-- Kev</p><p>quoted</p></body>"
 
 
-def test_reply_patch_failure_is_partial():
+def test_reply_patch_failure_is_partial_and_skips_attachments(tmp_path):
     fake = Fake(_reply_handler(patch_status=400))
     with pytest.raises(outlook.Partial) as e:
-        outlook.draft(graph(fake), _reply_spec())
+        outlook.draft(graph(fake), _reply_spec(attachments=[_file(tmp_path, "a.txt", 5)]))
     r = e.value.result
     assert (r["id"], r["webLink"], r["stage"]) == ("R1", "https://outlook/R1", "reply-body")
+    assert len(fake.calls) == 3   # createReply, GET, PATCH: no attachment upload
+
+
+def test_reply_attachments_go_to_the_reply_draft(tmp_path):
+    reply, attachments = _reply_handler(), _attach_handler()
+
+    def handler(m, u, d, h):
+        return attachments(m, u, d, h) if "/attachments" in u else reply(m, u, d, h)
+    fake = Fake(handler)
+    out = outlook.draft(graph(fake), _reply_spec(attachments=[_file(tmp_path, "a.txt", 5)]))
+    assert fake.calls[3].url.endswith("/me/messages/R1/attachments")
+    assert out["attachments"] == ["a.txt"]
+
+
+def test_network_failure_after_reply_created_is_partial():
+    reply = _reply_handler()
+
+    def handler(m, u, d, h):
+        if m == "GET":
+            raise TimeoutError("timed out")
+        return reply(m, u, d, h)
+    with pytest.raises(outlook.Partial) as e:
+        outlook.draft(graph(Fake(handler)), _reply_spec())
+    assert (e.value.result["id"], e.value.result["stage"]) == ("R1", "reply-body")
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("timed out"), (500, {}, None)])
+def test_failed_create_that_may_have_landed_says_check_drafts(failure):
+    def handler(m, u, d, h):
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+    with pytest.raises(outlook.GraphError) as e:
+        outlook.draft(graph(Fake(handler)), _new_spec())
+    assert "check Outlook Drafts" in e.value.message
+
+
+def test_rejected_create_does_not_say_check_drafts():
+    err = {"error": {"code": "ErrorInvalidRecipients", "message": "bad address"}}
+    with pytest.raises(outlook.GraphError) as e:
+        outlook.draft(graph(Fake(lambda m, u, d, h: (400, {}, err))), _new_spec())
+    assert e.value.message == "bad address"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest outlook-draft/tests -q`
-Expected: the new tests fail with `AttributeError: module 'outlook' has no attribute 'draft'` (or `insert_reply` / `merge_recipients`): `15 failed, 29 passed`.
+Expected: the new tests fail with `AttributeError: module 'outlook' has no attribute 'draft'` (or `insert_reply` / `merge_recipients`): `20 failed, 36 passed`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -832,27 +934,39 @@ def _fill_reply(graph, draft_id, body, to, cc):
     })
 
 
-def draft(graph, spec):
-    validate_spec(spec)
-    body = with_signature(spec.get("body_html", ""))
-    to, cc = spec.get("to", []), spec.get("cc", [])
+MAYBE_CREATED = " The draft may have been created anyway: check Outlook Drafts before running draft again."
+
+
+def _create(graph, spec, body, to, cc):
     if spec["mode"] == "new":
-        msg = graph.call("POST", "/me/messages", {
+        return graph.call("POST", "/me/messages", {
             "subject": spec["subject"],
             "body": {"contentType": "HTML", "content": body},
             "toRecipients": [_rcpt(a) for a in to],
             "ccRecipients": [_rcpt(a) for a in cc],
         })
-    else:
-        action = "createReply" if spec["mode"] == "reply" else "createReplyAll"
-        msg = graph.call("POST", f"/me/messages/{_q(spec['reply_to_id'])}/{action}")
+    action = "createReply" if spec["mode"] == "reply" else "createReplyAll"
+    return graph.call("POST", f"/me/messages/{_q(spec['reply_to_id'])}/{action}")
+
+
+def draft(graph, spec):
+    validate_spec(spec)
+    body = with_signature(spec.get("body_html", ""))
+    to, cc = spec.get("to", []), spec.get("cc", [])
+    try:
+        msg = _create(graph, spec, body, to, cc)
+    except GraphError as e:
+        if e.status == 0 or e.status >= 500:   # timeout or server error: the create may have gone through
+            raise GraphError(e.status, e.code, e.message + MAYBE_CREATED) from e
+        raise
     result = {"id": msg["id"], "webLink": msg.get("webLink"), "subject": msg.get("subject"),
               "to": [], "cc": [], "attachments": [], "failed_attachments": []}
-    # From here on the draft exists: every failure is reported as partial, never retried by Claude.
+    # From here on the draft exists: any failure, of any type, is reported as partial
+    # (exit 3), so Claude never re-runs draft and makes a duplicate.
     if spec["mode"] != "new":
         try:
             msg = _fill_reply(graph, msg["id"], body, to, cc)
-        except GraphError as e:
+        except Exception as e:
             raise Partial({**result, "stage": "reply-body", "error": str(e)}) from e
     result["to"] = [_addr(r) for r in msg.get("toRecipients") or []]
     result["cc"] = [_addr(r) for r in msg.get("ccRecipients") or []]
@@ -860,7 +974,7 @@ def draft(graph, spec):
         try:
             attach(graph, result["id"], path)
             result["attachments"].append(pathlib.Path(path).name)
-        except (GraphError, OSError) as e:
+        except Exception as e:
             result["failed_attachments"].append({"path": path, "error": str(e)})
     if result["failed_attachments"]:
         raise Partial({**result, "stage": "attachments", "error": "some attachments failed"})
@@ -870,7 +984,7 @@ def draft(graph, spec):
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest outlook-draft/tests -q`
-Expected: `44 passed`.
+Expected: `56 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -967,7 +1081,7 @@ def test_find_html_mode_asks_for_html():
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest outlook-draft/tests -q`
-Expected: `AttributeError: module 'outlook' has no attribute 'lookup'` / `'find'`: `6 failed, 44 passed`.
+Expected: `AttributeError: module 'outlook' has no attribute 'lookup'` / `'find'`: `6 failed, 56 passed`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -1022,7 +1136,7 @@ def find(graph, query=None, sent=False, top=5, body=None):
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest outlook-draft/tests -q`
-Expected: `50 passed`.
+Expected: `62 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -1040,10 +1154,11 @@ git commit -m "feat(outlook-draft): lookup people and find messages" -m "Co-Auth
 - Modify: `outlook-draft/tests/test_outlook.py` (append at end of file)
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–4, and the test helpers `_new_spec`, `_file`, `_created` and `_draft_handler`.
+- Consumes: everything from Tasks 1–4, and the test helpers `_new_spec`, `_file`, `_created`, `_draft_handler` and `_msgs`.
 - Produces:
-  - `get_token(interactive=False) -> dict`, the MSAL result containing `access_token`. Non-`login` commands only ever take the silent path. It raises `SetupError` when the config or msal is missing or sign-in is needed.
-  - `main(argv=None, transport=urllib_transport, token_fn=get_token, sleep=time.sleep) -> int`, the exit code.
+  - `get_token(interactive=False) -> dict`, the MSAL result containing `access_token`. Non-`login` commands only ever take the silent path. It raises `SetupError` when the config or msal is missing, when sign-in is needed, or when msal itself raises (network, authority discovery, cache lock).
+  - `_Parser`, an `argparse.ArgumentParser` whose usage errors exit 1 with `{"error": "usage"}` on stderr.
+  - `main(argv=None, transport=urllib_transport, token_fn=get_token, sleep=time.sleep) -> int`, the exit code. A Graph 401 exits 2 with `LOGIN_HINT`; any other unexpected exception exits 1 as JSON.
   - The `__main__` guard.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1066,6 +1181,8 @@ def _fake_msal(monkeypatch, accounts=(), silent=None, interactive=None):
 
         def acquire_token_silent(self, scopes, account):
             log.append(("silent", tuple(scopes)))
+            if isinstance(silent, Exception):
+                raise silent
             return silent
 
         def acquire_token_interactive(self, scopes, timeout, prompt):
@@ -1118,6 +1235,49 @@ def test_login_goes_interactive_with_180s_timeout(private_home, monkeypatch, cap
     assert outlook.main(["login"]) == 0
     assert ("interactive", 180) in log
     assert json.loads(capsys.readouterr().out) == {"account": "me@x.com"}
+
+
+def test_msal_exception_exits_2_with_its_message(private_home, monkeypatch, capsys):
+    _config(private_home)
+    _fake_msal(monkeypatch, accounts=[{"username": "me"}], silent=ConnectionError("offline"))
+    assert outlook.main(["lookup", "Maria"], transport=Fake()) == 2
+    assert "offline" in json.loads(capsys.readouterr().err)["message"]
+
+
+def test_rejected_token_exits_2_with_login_hint(capsys):
+    err = {"error": {"code": "InvalidAuthenticationToken", "message": "expired"}}
+    fake = Fake(lambda m, u, d, h: (401, {}, err))
+    assert outlook.main(["lookup", "Maria"], transport=fake, token_fn=_token) == 2
+    assert "outlook.py login" in json.loads(capsys.readouterr().err)["message"]
+
+
+def test_network_failure_exits_1_with_json(capsys):
+    def down(m, u, d, h):
+        raise urllib.error.URLError("getaddrinfo failed")
+    assert outlook.main(["lookup", "Maria"], transport=Fake(down), token_fn=_token) == 1
+    assert json.loads(capsys.readouterr().err)["error"] == "network"
+
+
+@pytest.mark.parametrize("argv", [["find", "--top", "abc"], ["find", "--full", "--html"], ["nope"]])
+def test_usage_errors_exit_1_not_2(argv, capsys):
+    with pytest.raises(SystemExit) as e:
+        outlook.main(argv, transport=Fake(), token_fn=_token)
+    assert e.value.code == 1
+    assert json.loads(capsys.readouterr().err)["error"] == "usage"
+
+
+@pytest.mark.parametrize("argv, url_part, prefer, count", [
+    (["find", "x", "--sent", "--top", "2", "--full"], "/me/mailFolders/sentitems/messages?$top=12", "text", 2),
+    (["find", "--html"], "/me/messages?$top=15", "html", 3),
+    (["find", "x"], "/me/messages?$top=15", None, 3),
+])
+def test_find_flags_reach_graph(argv, url_part, prefer, count, capsys):
+    fake = Fake(lambda m, u, d, h: (200, {}, _msgs({}, {}, {})))
+    assert outlook.main(argv, transport=fake, token_fn=_token) == 0
+    c = fake.calls[0]
+    assert url_part in c.url
+    assert c.headers.get("Prefer") == (f'outlook.body-content-type="{prefer}"' if prefer else None)
+    assert len(json.loads(capsys.readouterr().out)["results"]) == count
 
 
 def test_missing_config_exits_2(capsys):
@@ -1184,7 +1344,7 @@ def test_partial_exits_3_with_link_on_stdout(tmp_path, capsys):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest outlook-draft/tests -q`
-Expected: `AttributeError: module 'outlook' has no attribute 'main'`: `13 failed, 50 passed`.
+Expected: `AttributeError: module 'outlook' has no attribute 'main'`: `22 failed, 62 passed`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -1198,18 +1358,21 @@ def get_token(interactive=False):
         import msal
         from msal_extensions import PersistedTokenCache, build_encrypted_persistence
     except ImportError as e:
-        raise SetupError("Run: pip install msal msal-extensions") from e
-    cache = PersistedTokenCache(build_encrypted_persistence(str(home() / "token_cache.bin")))
-    app = msal.PublicClientApplication(
-        cfg["client_id"],
-        authority=f"https://login.microsoftonline.com/{cfg['tenant_id']}",
-        token_cache=cache,
-    )
-    if interactive:
-        result = app.acquire_token_interactive(SCOPES, timeout=180, prompt="select_account")
-    else:
-        accounts = app.get_accounts()
-        result = app.acquire_token_silent(SCOPES, account=accounts[0]) if accounts else None
+        raise SetupError("Run: python -m pip install msal msal-extensions") from e
+    try:
+        cache = PersistedTokenCache(build_encrypted_persistence(str(home() / "token_cache.bin")))
+        app = msal.PublicClientApplication(
+            cfg["client_id"],
+            authority=f"https://login.microsoftonline.com/{cfg['tenant_id']}",
+            token_cache=cache,
+        )
+        if interactive:
+            result = app.acquire_token_interactive(SCOPES, timeout=180, prompt="select_account")
+        else:
+            accounts = app.get_accounts()
+            result = app.acquire_token_silent(SCOPES, account=accounts[0]) if accounts else None
+    except Exception as e:   # msal raises on network, authority-discovery and cache-lock failures
+        raise SetupError(f"Sign-in failed: {type(e).__name__}: {e}") from e
     if not result or "access_token" not in result:
         detail = (result or {}).get("error_description")
         raise SetupError(f"{detail}\n{LOGIN_HINT}" if detail else LOGIN_HINT)
@@ -1226,11 +1389,16 @@ def _fail(code, kind, message):
     return code
 
 
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):   # argparse's own exit 2 would read as "sign in needed"
+        sys.exit(_fail(1, "usage", message))
+
+
 def main(argv=None, transport=urllib_transport, token_fn=get_token, sleep=time.sleep):
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")   # Windows consoles default to cp1252
-    ap = argparse.ArgumentParser(prog="outlook.py")
+    ap = _Parser(prog="outlook.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("login")
     sub.add_parser("lookup").add_argument("query")
@@ -1265,7 +1433,11 @@ def main(argv=None, transport=urllib_transport, token_fn=get_token, sleep=time.s
         _emit({**e.result, "partial": True})
         return 3
     except GraphError as e:
+        if e.status == 401:   # token rejected (consent revoked, session killed): sign in again
+            return _fail(2, "setup", LOGIN_HINT)
         return _fail(1, e.code or "graph", e.message)
+    except Exception as e:   # keep the JSON contract even for a bug
+        return _fail(1, "unexpected", f"{type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
@@ -1275,7 +1447,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest outlook-draft/tests -q`
-Expected: `63 passed`.
+Expected: `84 passed`.
 
 - [ ] **Step 5: Check the real CLI from a shell**
 
@@ -1352,6 +1524,9 @@ Private files live in `~/.claude/outlook-draft/`, never in the skill directory:
   runs `! python ~/.claude/skills/outlook-draft/scripts/outlook.py login`.
 - Exit 3: do **not** run `draft` again. The draft already exists and a re-run
   makes a duplicate. Report the link and what failed.
+- `draft` failed with a message saying the draft may have been created, or was
+  killed or timed out with no JSON: do **not** run it again. Ask the user to
+  check Outlook Drafts first (`find` cannot see drafts).
 
 ## Flow: `/outlook-draft [hint]`
 
@@ -1372,7 +1547,8 @@ Private files live in `~/.claude/outlook-draft/`, never in the skill directory:
 4. **Attachments.** Files the hint names or the conversation produced, as
    absolute paths.
 5. **Create.** Write the draft spec below as UTF-8 JSON to the session
-   scratchpad, then run `draft <spec.json>`.
+   scratchpad, then run `draft <spec.json>` with a Bash timeout of 600000 ms
+   (large attachments upload in many chunks).
 6. **Report.** To/CC, subject, attachments, anything you were unsure about
    (e.g. which "Maria" you picked and why), and the `webLink` that opens the
    draft. Do not reprint the body.
@@ -1400,7 +1576,7 @@ added to the reply's existing recipients.
 |---|---|
 | `lookup "<name [company]>"` | Up to 5 `{name, email, company}` from the user's relevant people |
 | `find ["<query>"] [--sent] [--top N] [--full \| --html]` | Up to N (default 5) messages, drafts excluded. `--full` adds the new part of each body as text, `--html` as HTML |
-| `draft <spec.json>` | Creates the draft; prints `{id, webLink, subject, to, cc, attachments, failed_attachments}` |
+| `draft <spec.json>` | Creates the draft; prints `{id, webLink, subject, to, cc, attachments, failed_attachments}`. Run it with a Bash timeout of 600000 ms |
 | `login` | Browser sign-in. Run it with a Bash timeout of 300000 ms |
 
 ## Setup (one-time)
@@ -1419,7 +1595,8 @@ admin):
 
 On the PC (Claude does this):
 
-4. `pip install msal msal-extensions`
+4. `python -m pip install msal msal-extensions` (the same `python` that runs the
+   script)
 5. Write `~/.claude/outlook-draft/config.json` in the shape of
    `config.example.json`, with the two IDs.
 6. Link the skill from the main checkout (never a feature-branch worktree), in
@@ -1459,7 +1636,7 @@ the Entra sign-in logs under the app name.
 ### outlook-draft
 - **Needs** a Microsoft 365 work account, an Entra app registration in your tenant
   (tenant admin consent for `Mail.ReadWrite` and `People.Read`; the skill's Setup
-  section walks through it), and `pip install msal msal-extensions`.
+  section walks through it), and `python -m pip install msal msal-extensions`.
 - **Drafts only, by construction:** the app holds no `Mail.Send`, and the script has
   no delete or move command.
 - **Nothing personal in the repo:** config, the DPAPI-encrypted token cache, your
@@ -1479,7 +1656,7 @@ grep -n "Mail.Send" outlook-draft/SKILL.md
 ```
 
 Expected:
-- `63 passed`.
+- `84 passed`.
 - No assertion error.
 - A README count of at least `3`.
 - Every `Mail.Send` line in SKILL.md says it is never granted or never added.
@@ -1498,7 +1675,7 @@ git commit -m "docs(outlook-draft): skill instructions, config example, README e
 These steps touch the user's Entra tenant and `~/.claude/`. They follow `SKILL.md` → Setup and run from the main checkout, **never** from a feature-branch worktree, because the skill junction must point at merged code:
 
 1. The user registers the Entra app and grants admin consent (Setup steps 1–3).
-2. `pip install msal msal-extensions`, write `config.json`, create the junction, then `login` with a Bash timeout of 300000 ms (Setup steps 4–7).
+2. `python -m pip install msal msal-extensions`, write `config.json`, create the junction, then `login` with a Bash timeout of 300000 ms (Setup steps 4–7).
 3. Seed `voice.md` and `signature.html`, with the user's approval (Setup step 8).
 4. Live smoke test:
    - A new draft to self with one small attachment and one attachment over 3 MB.
