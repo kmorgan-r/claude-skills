@@ -128,3 +128,71 @@ class Graph:
             return json.loads(raw) if raw else None
         except ValueError as e:   # e.g. a proxy's HTML page with a 200
             raise GraphError(status, "bad-response", raw.decode("utf-8", "replace")[:500]) from e
+
+
+def _q(message_id):
+    return urllib.parse.quote(message_id, safe="=")
+
+
+def _addr(recipient):
+    return ((recipient or {}).get("emailAddress") or {}).get("address")
+
+
+def _rcpt(address):
+    return {"emailAddress": {"address": address}}
+
+
+def validate_spec(spec):
+    if not isinstance(spec, dict):
+        raise SpecError("spec must be a JSON object")
+    mode = spec.get("mode")
+    if mode not in MODES:
+        raise SpecError(f"mode must be one of {', '.join(MODES)}; got {mode!r}")
+    if mode == "new" and not spec.get("subject"):
+        raise SpecError("new mode needs a subject")
+    if mode != "new" and not spec.get("reply_to_id"):
+        raise SpecError(f"{mode} mode needs reply_to_id")
+    for key in ("to", "cc", "attachments"):
+        value = spec.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise SpecError(f"{key} must be a list of strings")
+    for path in spec.get("attachments", []):
+        if not pathlib.Path(path).is_file():
+            raise SpecError(f"attachment is not a file: {path}")
+        if pathlib.Path(path).stat().st_size > MAX_ATTACHMENT:
+            raise SpecError(f"attachment is over Graph's 150 MB limit: {path}")
+
+
+def read_spec(path):
+    try:
+        return json.loads(pathlib.Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as e:
+        raise SpecError(f"cannot read spec {path}: {e}") from e
+
+
+def attach(graph, msg_id, path):
+    p = pathlib.Path(path)
+    size = p.stat().st_size
+    base = f"/me/messages/{_q(msg_id)}/attachments"
+    if size < SIMPLE_MAX:
+        graph.call("POST", base, {
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": p.name,
+            "contentBytes": base64.b64encode(p.read_bytes()).decode("ascii"),
+        })
+        return
+    session = graph.call("POST", base + "/createUploadSession", {
+        "AttachmentItem": {"attachmentType": "file", "name": p.name, "size": size},
+    })
+    with p.open("rb") as f:
+        start = 0
+        while start < size:
+            chunk = f.read(CHUNK)
+            end = start + len(chunk) - 1
+            # uploadUrl is pre-authenticated: Graph rejects an Authorization header here.
+            graph.call("PUT", session["uploadUrl"], data=chunk, auth=False, retry_503=True, headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(len(chunk)),
+                "Content-Range": f"bytes {start}-{end}/{size}",
+            })
+            start = end + 1
