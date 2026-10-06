@@ -568,3 +568,13 @@ def test_find_html_mode_asks_for_html():
     fake = Fake(lambda m, u, d, h: (200, {}, _msgs({})))
     outlook.find(graph(fake), "x", body="html")
     assert fake.calls[0].headers["Prefer"] == 'outlook.body-content-type="html"'
+
+
+def test_find_without_query_reads_inbox_and_with_query_searches_all_mail():
+    fake = Fake(lambda m, u, d, h: (200, {}, _msgs({})))
+    outlook.find(graph(fake))
+    outlook.find(graph(fake), "budget")
+    assert "/me/mailFolders/inbox/messages?" in fake.calls[0].url
+    assert "$orderby=receivedDateTime%20desc" in fake.calls[0].url
+    assert "/v1.0/me/messages?" in fake.calls[1].url
+    assert "$orderby" not in fake.calls[1].url
