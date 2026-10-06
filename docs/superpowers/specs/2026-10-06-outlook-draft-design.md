@@ -124,8 +124,10 @@ The script appends `signature.html` to `body_html` when that file exists.
 2. **new:** `POST /me/messages` with subject, HTML body, `toRecipients`,
    `ccRecipients`. The message lands in Drafts.
 3. **reply / replyAll:** `POST /me/messages/{id}/createReply` (or
-   `createReplyAll`) with `Prefer: outlook.body-content-type="html"`, so the
-   returned draft body is HTML. It already holds the quoted original.
+   `createReplyAll`), then `GET` the new draft's body and recipients with
+   `Prefer: outlook.body-content-type="html"` (the `createReply` docs do not
+   list that header and may return a text body), so the body is HTML. It
+   already holds the quoted original.
    Insert `body_html` + signature immediately after the opening `<body…>` tag
    (matched case-insensitively, attributes allowed, e.g. `<BODY class="x">`)
    of that draft's body, or at the start if there is no `<body>` tag, then
