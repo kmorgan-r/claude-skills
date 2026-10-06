@@ -196,3 +196,88 @@ def attach(graph, msg_id, path):
                 "Content-Range": f"bytes {start}-{end}/{size}",
             })
             start = end + 1
+
+
+def with_signature(body_html):
+    sig = home() / "signature.html"
+    return body_html + sig.read_text(encoding="utf-8-sig") if sig.is_file() else body_html
+
+
+_BODY_TAG = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
+
+
+def insert_reply(draft_html, new_html):
+    """Put new_html right after the opening <body> tag, keeping the quoted thread."""
+    m = _BODY_TAG.search(draft_html)
+    if not m:
+        return new_html + draft_html
+    return draft_html[:m.end()] + new_html + draft_html[m.end():]
+
+
+def merge_recipients(existing, extra):
+    seen = {(_addr(r) or "").lower() for r in existing}
+    merged = list(existing)
+    for address in extra:
+        if address.lower() not in seen:
+            seen.add(address.lower())
+            merged.append(_rcpt(address))
+    return merged
+
+
+def _fill_reply(graph, draft_id, body, to, cc):
+    current = graph.call(
+        "GET", f"/me/messages/{_q(draft_id)}?$select=body,toRecipients,ccRecipients",
+        headers={"Prefer": 'outlook.body-content-type="html"'},
+    )
+    return graph.call("PATCH", f"/me/messages/{_q(draft_id)}", {
+        "body": {"contentType": "HTML", "content": insert_reply(current["body"]["content"], body)},
+        "toRecipients": merge_recipients(current.get("toRecipients") or [], to),
+        "ccRecipients": merge_recipients(current.get("ccRecipients") or [], cc),
+    })
+
+
+MAYBE_CREATED = " The draft may have been created anyway: check Outlook Drafts before running draft again."
+
+
+def _create(graph, spec, body, to, cc):
+    if spec["mode"] == "new":
+        return graph.call("POST", "/me/messages", {
+            "subject": spec["subject"],
+            "body": {"contentType": "HTML", "content": body},
+            "toRecipients": [_rcpt(a) for a in to],
+            "ccRecipients": [_rcpt(a) for a in cc],
+        })
+    action = "createReply" if spec["mode"] == "reply" else "createReplyAll"
+    return graph.call("POST", f"/me/messages/{_q(spec['reply_to_id'])}/{action}")
+
+
+def draft(graph, spec):
+    validate_spec(spec)
+    body = with_signature(spec.get("body_html", ""))
+    to, cc = spec.get("to", []), spec.get("cc", [])
+    try:
+        msg = _create(graph, spec, body, to, cc)
+    except GraphError as e:
+        if e.status == 0 or e.status >= 500:   # timeout or server error: the create may have gone through
+            raise GraphError(e.status, e.code, e.message + MAYBE_CREATED) from e
+        raise
+    result = {"id": msg["id"], "webLink": msg.get("webLink"), "subject": msg.get("subject"),
+              "to": [], "cc": [], "attachments": [], "failed_attachments": []}
+    # From here on the draft exists: any failure, of any type, is reported as partial
+    # (exit 3), so Claude never re-runs draft and makes a duplicate.
+    if spec["mode"] != "new":
+        try:
+            msg = _fill_reply(graph, msg["id"], body, to, cc)
+        except Exception as e:
+            raise Partial({**result, "stage": "reply-body", "error": str(e)}) from e
+    result["to"] = [_addr(r) for r in msg.get("toRecipients") or []]
+    result["cc"] = [_addr(r) for r in msg.get("ccRecipients") or []]
+    for path in spec.get("attachments", []):
+        try:
+            attach(graph, result["id"], path)
+            result["attachments"].append(pathlib.Path(path).name)
+        except Exception as e:
+            result["failed_attachments"].append({"path": path, "error": str(e)})
+    if result["failed_attachments"]:
+        raise Partial({**result, "stage": "attachments", "error": "some attachments failed"})
+    return result

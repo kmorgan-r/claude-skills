@@ -302,3 +302,206 @@ def test_large_file_chunks_cover_file_without_auth_header(tmp_path):
         assert "Authorization" not in c.headers
         assert c.headers["Content-Type"] == "application/octet-stream"
         assert c.headers["Content-Length"] == str(len(c.data))
+
+
+# --- drafts: new and reply ----------------------------------------------------
+
+def _created(m, u, d, h):
+    body = json.loads(d)
+    return 201, {}, {"id": "D1", "webLink": "https://outlook/D1", "subject": body["subject"],
+                     "toRecipients": body["toRecipients"], "ccRecipients": body["ccRecipients"]}
+
+
+def _draft_handler(fail_names=()):
+    attachments = _attach_handler(fail_names)
+
+    def handler(m, u, d, h):
+        if u.endswith("/me/messages"):
+            return _created(m, u, d, h)
+        return attachments(m, u, d, h)
+    return handler
+
+
+def test_insert_reply_after_body_tag_any_case_with_attributes():
+    assert outlook.insert_reply('<BODY class="x"><p>q</p></BODY>', "<p>new</p>") == \
+        '<BODY class="x"><p>new</p><p>q</p></BODY>'
+    assert outlook.insert_reply("<p>q</p>", "<p>new</p>") == "<p>new</p><p>q</p>"
+
+
+def test_merge_recipients_adds_and_dedupes_case_insensitively():
+    existing = [{"emailAddress": {"name": "Ana", "address": "Ana@X.com"}}]
+    merged = outlook.merge_recipients(existing, ["ana@x.com", "cy@x.com", "CY@x.com"])
+    assert [r["emailAddress"]["address"] for r in merged] == ["Ana@X.com", "cy@x.com"]
+
+
+def test_new_draft_payload_and_result():
+    fake = Fake(_created)
+    out = outlook.draft(graph(fake), _new_spec())
+    sent = fake.json(0)
+    assert fake.calls[0].method == "POST"
+    assert fake.calls[0].url.endswith("/v1.0/me/messages")
+    assert sent["subject"] == "Hello"
+    assert sent["body"] == {"contentType": "HTML", "content": "<p>Hi Ana</p>"}
+    assert sent["toRecipients"] == [{"emailAddress": {"address": "ana@x.com"}}]
+    assert sent["ccRecipients"] == [{"emailAddress": {"address": "bo@x.com"}}]
+    assert out == {"id": "D1", "webLink": "https://outlook/D1", "subject": "Hello",
+                   "to": ["ana@x.com"], "cc": ["bo@x.com"], "attachments": [], "failed_attachments": []}
+
+
+def test_signature_is_appended(private_home):
+    (private_home / "signature.html").write_text("<p>-- Kev</p>", encoding="utf-8")
+    fake = Fake(_created)
+    outlook.draft(graph(fake), _new_spec())
+    assert fake.json(0)["body"]["content"] == "<p>Hi Ana</p><p>-- Kev</p>"
+
+
+def test_new_draft_without_recipients_is_allowed():
+    fake = Fake(_created)
+    out = outlook.draft(graph(fake), _new_spec(to=[], cc=[]))
+    assert fake.json(0)["toRecipients"] == []
+    assert out["to"] == []
+
+
+@pytest.mark.parametrize("over", [{"attachments": ["C:/missing.pdf"]}, {"mode": "replyAll"}])
+def test_invalid_draft_makes_no_graph_calls(over):
+    fake = Fake()
+    with pytest.raises(outlook.SpecError):
+        outlook.draft(graph(fake), _new_spec(**over))
+    assert fake.calls == []
+
+
+def test_draft_attachments_are_listed(tmp_path):
+    path = _file(tmp_path, "a.txt", 5)
+    fake = Fake(_draft_handler())
+    out = outlook.draft(graph(fake), _new_spec(attachments=[path]))
+    assert fake.calls[1].url.endswith("/me/messages/D1/attachments")
+    assert out["attachments"] == ["a.txt"]
+
+
+def test_failed_attachment_is_partial_with_link(tmp_path):
+    ok = _file(tmp_path, "ok.txt", 5)
+    bad = _file(tmp_path, "bad.txt", 5)
+    fake = Fake(_draft_handler(fail_names={"bad.txt"}))
+    with pytest.raises(outlook.Partial) as e:
+        outlook.draft(graph(fake), _new_spec(attachments=[ok, bad]))
+    r = e.value.result
+    assert (r["id"], r["webLink"], r["stage"]) == ("D1", "https://outlook/D1", "attachments")
+    assert r["attachments"] == ["ok.txt"]
+    assert r["failed_attachments"][0]["path"] == bad
+    assert "boom" in r["failed_attachments"][0]["error"]
+
+
+QUOTED = '<html><head></head><BODY class="x"><hr><p>Original from Ana</p></BODY></html>'
+
+
+def _reply_handler(draft_html=QUOTED, patch_status=200):
+    def handler(m, u, d, h):
+        if u.endswith("/createReply") or u.endswith("/createReplyAll"):
+            return 201, {}, {"id": "R1", "webLink": "https://outlook/R1", "subject": "RE: Hello"}
+        if m == "GET" and "/me/messages/R1?" in u:
+            return 200, {}, {"body": {"contentType": "html", "content": draft_html},
+                             "toRecipients": [{"emailAddress": {"name": "Ana", "address": "Ana@X.com"}}],
+                             "ccRecipients": []}
+        if m == "PATCH":
+            if patch_status != 200:
+                return patch_status, {}, {"error": {"code": "ErrorInvalidRequest", "message": "nope"}}
+            return 200, {}, {"id": "R1", "subject": "RE: Hello", **json.loads(d)}
+        raise AssertionError(f"unexpected {m} {u}")
+    return handler
+
+
+def _reply_spec(**over):
+    spec = {"mode": "reply", "reply_to_id": "M/1=", "to": [], "cc": [],
+            "body_html": "<p>Thanks!</p>", "attachments": []}
+    spec.update(over)
+    return spec
+
+
+def test_reply_inserts_after_body_tag_and_keeps_quote():
+    fake = Fake(_reply_handler())
+    out = outlook.draft(graph(fake), _reply_spec())
+    assert fake.calls[0].url.endswith("/me/messages/M%2F1=/createReply")
+    assert fake.calls[1].headers["Prefer"] == 'outlook.body-content-type="html"'
+    assert fake.json(2)["body"] == {
+        "contentType": "HTML",
+        "content": '<html><head></head><BODY class="x"><p>Thanks!</p><hr><p>Original from Ana</p></BODY></html>',
+    }
+    assert (out["id"], out["subject"], out["webLink"]) == ("R1", "RE: Hello", "https://outlook/R1")
+
+
+def test_reply_all_uses_create_reply_all():
+    fake = Fake(_reply_handler())
+    outlook.draft(graph(fake), _reply_spec(mode="replyAll"))
+    assert fake.calls[0].url.endswith("/createReplyAll")
+
+
+def test_reply_body_without_body_tag_is_prepended():
+    fake = Fake(_reply_handler(draft_html="<p>quoted</p>"))
+    outlook.draft(graph(fake), _reply_spec())
+    assert fake.json(2)["body"]["content"] == "<p>Thanks!</p><p>quoted</p>"
+
+
+def test_reply_recipients_are_added_not_replaced_and_deduped():
+    fake = Fake(_reply_handler())
+    out = outlook.draft(graph(fake), _reply_spec(to=["ana@x.com", "cy@x.com"], cc=["dee@x.com"]))
+    patch = fake.json(2)
+    assert [r["emailAddress"]["address"] for r in patch["toRecipients"]] == ["Ana@X.com", "cy@x.com"]
+    assert [r["emailAddress"]["address"] for r in patch["ccRecipients"]] == ["dee@x.com"]
+    assert out["to"] == ["Ana@X.com", "cy@x.com"]
+
+
+def test_reply_signature_goes_before_the_quote(private_home):
+    (private_home / "signature.html").write_text("<p>-- Kev</p>", encoding="utf-8")
+    fake = Fake(_reply_handler(draft_html="<body><p>quoted</p></body>"))
+    outlook.draft(graph(fake), _reply_spec())
+    assert fake.json(2)["body"]["content"] == "<body><p>Thanks!</p><p>-- Kev</p><p>quoted</p></body>"
+
+
+def test_reply_patch_failure_is_partial_and_skips_attachments(tmp_path):
+    fake = Fake(_reply_handler(patch_status=400))
+    with pytest.raises(outlook.Partial) as e:
+        outlook.draft(graph(fake), _reply_spec(attachments=[_file(tmp_path, "a.txt", 5)]))
+    r = e.value.result
+    assert (r["id"], r["webLink"], r["stage"]) == ("R1", "https://outlook/R1", "reply-body")
+    assert len(fake.calls) == 3   # createReply, GET, PATCH: no attachment upload
+
+
+def test_reply_attachments_go_to_the_reply_draft(tmp_path):
+    reply, attachments = _reply_handler(), _attach_handler()
+
+    def handler(m, u, d, h):
+        return attachments(m, u, d, h) if "/attachments" in u else reply(m, u, d, h)
+    fake = Fake(handler)
+    out = outlook.draft(graph(fake), _reply_spec(attachments=[_file(tmp_path, "a.txt", 5)]))
+    assert fake.calls[3].url.endswith("/me/messages/R1/attachments")
+    assert out["attachments"] == ["a.txt"]
+
+
+def test_network_failure_after_reply_created_is_partial():
+    reply = _reply_handler()
+
+    def handler(m, u, d, h):
+        if m == "GET":
+            raise TimeoutError("timed out")
+        return reply(m, u, d, h)
+    with pytest.raises(outlook.Partial) as e:
+        outlook.draft(graph(Fake(handler)), _reply_spec())
+    assert (e.value.result["id"], e.value.result["stage"]) == ("R1", "reply-body")
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("timed out"), (500, {}, None)])
+def test_failed_create_that_may_have_landed_says_check_drafts(failure):
+    def handler(m, u, d, h):
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+    with pytest.raises(outlook.GraphError) as e:
+        outlook.draft(graph(Fake(handler)), _new_spec())
+    assert "check Outlook Drafts" in e.value.message
+
+
+def test_rejected_create_does_not_say_check_drafts():
+    err = {"error": {"code": "ErrorInvalidRecipients", "message": "bad address"}}
+    with pytest.raises(outlook.GraphError) as e:
+        outlook.draft(graph(Fake(lambda m, u, d, h: (400, {}, err))), _new_spec())
+    assert e.value.message == "bad address"
