@@ -337,17 +337,19 @@ export const register: Register = on => {
     const els = $.ui.resolve(e)
     const { Box, Text } = els
     const Select = 'Select' in els ? els.Select : undefined // mobile has none, and no wt.exe either
+    // Picker and note first: the pane has a fixed height and clips from the bottom, so a long
+    // project list would push them out of view.
     return (
       <Box flexDirection="column" width={e.props.bodyColumns}>
+        {Select && v.projects.length > 0 && (
+          <Select key="lca-launch" label="Start session: " options={v.projects.map(p => ({ value: p.id, label: p.name }))} onSelect={() => {}} />
+        )}
+        {v.note && <Text color={COLOR.flag}>{v.note}</Text>}
         {paneRows(v.projects, v.checkedAt, now).map((r, i) => (
           <Text key={`r${i}`} bold={r.kind === 'company'} color={COLOR[r.kind]} wrap="truncate">
             {r.text}
           </Text>
         ))}
-        {v.note && <Text color={COLOR.flag}>{v.note}</Text>}
-        {Select && v.projects.length > 0 && (
-          <Select key="lca-launch" label="Start session: " options={v.projects.map(p => ({ value: p.id, label: p.name }))} onSelect={() => {}} />
-        )}
       </Box>
     )
   })
