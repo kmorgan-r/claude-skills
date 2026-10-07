@@ -28,9 +28,12 @@ async function scan(file: SessionFile, path: string) {
   for await (const line of createInterface({ input: createReadStream(path, 'utf8'), crlfDelay: Infinity })) scanLine(file, line)
 }
 
+// Missing means the wrong config folder (CLAUDE_CONFIG_DIR): a run that finds nothing must not look clean.
+if (!existsSync(projects)) throw new Error(`no transcripts at ${projects}`)
 mkdirSync(join(root, 'sessions'), { recursive: true })
 let written = 0
 let present = 0
+let failed = 0
 for (const p of ls(projects)) {
   if (!p.isDirectory()) continue
   const dir = join(projects, p.name)
@@ -43,16 +46,25 @@ for (const p of ls(projects)) {
       continue
     }
     const file = emptySession('')
-    await scan(file, join(dir, f.name))
-    const cwd = file.cwd
-    for (const a of ls(join(dir, sid, 'subagents'))) {
-      if (a.isFile() && a.name.endsWith('.jsonl')) await scan(file, join(dir, sid, 'subagents', a.name))
+    try {
+      await scan(file, join(dir, f.name))
+      const cwd = file.cwd
+      for (const a of ls(join(dir, sid, 'subagents'))) {
+        if (a.isFile() && a.name.endsWith('.jsonl')) await scan(file, join(dir, sid, 'subagents', a.name))
+      }
+      file.cwd = cwd // a subagent's worktree is not the session's folder
+      if (!hasIds(file)) continue
+      writeFileSync(out, JSON.stringify(file, null, 2), { flag: 'wx' }) // a live session may have written it meanwhile
+    } catch (err) {
+      if ((err as { code?: string }).code === 'EEXIST') present++
+      else {
+        failed++
+        console.error(`${sid}  skipped: ${err}`)
+      }
+      continue
     }
-    file.cwd = cwd || file.cwd // a subagent's worktree is not the session's folder
-    if (!hasIds(file)) continue
-    writeFileSync(out, JSON.stringify(file, null, 2))
     written++
     console.log(`${sid}  ${Object.keys(file.products).length} products  ${Object.keys(file.companies).length} companies  ${file.cwd}`)
   }
 }
-console.log(`${written} session files written, ${present} already there`)
+console.log(`${written} session files written, ${present} already there${failed ? `, ${failed} unreadable` : ''} (from ${projects})`)
