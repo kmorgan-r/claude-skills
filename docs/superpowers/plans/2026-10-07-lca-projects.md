@@ -27,7 +27,7 @@ So each implementation step **copies** the verified file and checks it is byte-i
 - **Ollama workers:** Tasks 1-3 are mechanical copy-and-gate tasks; dispatch them to the ollama-worker with `-Cwd` set to the worktree path above (it is a linked worktree, so it is dispatchable even though the conductor session started elsewhere). **Task 4 is Anthropic-only**: it handles client-confidential content and needs the Supabase MCP.
 - **Stage explicitly.** `git add <paths>` with the exact paths each task lists, never `git add -A` or `git add .`; check `git show --name-only HEAD` after each commit.
 - **P4 exit gate** (from the worktree root):
-  1. `claude plugin test ./lca-projects` → `29 pass`, `0 fail` (25 as copied in Task 1; the task-review fix added 4)
+  1. `claude plugin test ./lca-projects` → `30 pass`, `0 fail` (25 as copied in Task 1; the task-review fixes added 5)
   2. `tsc -p lca-projects/tsconfig.json` → exit 0, no output
   3. `claude plugin validate ./lca-projects` → `✔ Validation passed with warnings` (the one warning left is the missing `author`, as in the other mods)
 
@@ -48,7 +48,7 @@ So each implementation step **copies** the verified file and checks it is byte-i
 2. **A launch folder that no longer exists.** The tab opens in the home folder instead of failing. Pinned by Task 1's `a launch folder that is gone opens the tab in the home folder`.
 3. **`/lca-save` naming a company UUID the cache does not know, with no rule to refresh.** The company is still tagged to the session, no query runs, and the answer says how to resolve it (open `/lca`). Pinned by Task 1's `lca_context pins an unknown company UUID…`; the skill (Task 3) tells the model to relay that note.
 4. **Adversarial company names** (quotes, `;`, `%PATH%`, `<script>`). Nothing reaches the nudge, the pane or `launch.cmd` unsanitized. Pinned by Task 1's `sanitize strips…` and `seed and launcher hold no separators or quotes…`.
-5. **A corrupt or half-written `status.json` or session file** (two sessions write `status.json`; last writer wins). It reads as null, the list treats it as empty, and the next write replaces it. Pinned by Task 1's `a corrupt session or status file reads as null`.
+5. **A corrupt or half-written `status.json` or session file** (two sessions write `status.json`; last writer wins). It reads as null and the list treats it as empty. A session file is replaced by the next write; `status.json` is never overwritten while unreadable (that would re-derive every slug), and `/lca` says so. Pinned by Task 1's `a corrupt session or status file reads as null` and, after the task-review fix, `an unreadable status.json is never overwritten, and the pane says so`.
 
 ---
 
@@ -1558,7 +1558,7 @@ Run: `rm -rf C:/Users/kmorg/lca-projects-verified/backfill-check`
 - [ ] **Step 4: Re-run the mod's gate** (backfill.ts sits beside the mod; nothing may break)
 
 Run: `claude plugin test ./lca-projects`
-Expected: `29 pass`, `0 fail` (with the Task 1 fix).
+Expected: `30 pass`, `0 fail` (with the Task 1 fixes).
 
 - [ ] **Step 5: Commit**
 

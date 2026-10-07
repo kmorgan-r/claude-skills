@@ -153,7 +153,9 @@ company to claim a slug keeps it. A later company whose name collides gets
 `-<first 6 chars of company id>` appended. The slug is stored in `status.json` once
 assigned and never recomputed, so a brief folder never moves: every refresh reads the
 existing `status.json` first and carries each company's `slug` forward, assigning one
-only to companies that have none. A company renamed on the platform keeps its slug.
+only to companies that have none. A company renamed on the platform keeps its slug. A
+company missing from an answer (the query asks for every id ever touched, so it was
+deleted) stays in `status.json` with status `gone`, out of the list, and keeps its slug.
 
 ### `brief.md`
 
@@ -476,11 +478,12 @@ re-run. It does not query the database. The next refresh resolves companies.
 | Failure | Behaviour |
 |---|---|
 | Any hook throws | caught, logged to debug, engine unaffected |
-| Supabase MCP absent | refresh skipped, last `status.json` shown as stale |
+| Supabase MCP absent | refresh skipped, last `status.json` shown as stale; on pane open, the pane says so |
 | `tool.check` not `allow` (background) | refresh skipped silently |
 | Permission denied (pane open) | last `status.json` kept, pane notes the denial |
-| Response unparsable | last `status.json` kept, debug log |
-| `status.json` / session file corrupt | treated as empty and rewritten on next write |
+| Response unparsable or an error | last `status.json` kept, debug log; on pane open, the pane says so |
+| Session file corrupt | treated as empty and rewritten on next write |
+| `status.json` corrupt | treated as empty; never overwritten, since that would give every company its slug afresh; on pane open, the pane says to fix or delete it |
 | `wt.exe` or `$.process` unavailable | pane shows the copy command |
 | Launch folder gone | home folder |
 

@@ -114,7 +114,8 @@ test('slugs: kebab case, a collision gets the id prefix, and a slug never moves'
   expect(both.checkedAt).toBe('t2')
   // missing from one answer, then back renamed: the slug holds
   const without = mergeStatus(both, { companies: { [other]: { name: 'Acme  Motors', status: 'active' } }, products: {}, followups: {} }, 't3')
-  const back = mergeStatus(without, { companies: { [ACME]: { name: 'Acme Industries', status: 'active' } }, products: {}, followups: {} }, 't4')
+  expect(without.companies[ACME]).toEqual({ name: 'Acme Motors AS', status: 'gone', slug: 'acme-motors' }) // out of the list
+  const back = mergeStatus(without,{ companies: { [ACME]: { name: 'Acme Industries', status: 'active' } }, products: {}, followups: {} }, 't4')
   expect(back.companies[ACME]!.slug).toBe('acme-motors')
   expect(back.companies[other]!.slug).toBe('acme-motors-aaaaaa')
 })
@@ -395,6 +396,21 @@ test('after a /clear the new session is tracked and nudged afresh', async ($, on
   expect(fake.file(`${S}\\sessions\\self.json`)).not.toContain(BDP)
   const ctx = await $.tool.call({ tool: 'mcp__lca-projects__lca_context' } as never)
   expect(JSON.parse(String(ctx.result))).toMatchObject({ sessionId: 'cleared', companies: [expect.objectContaining({ id: ACME })] })
+  expect(fake.logs).toEqual([])
+})
+
+test('a background refresh landing after a /clear nudges only for the new conversation', async ($, on) => {
+  const empty = JSON.stringify({ checkedAt: '2026-10-07T07:55:00Z', companies: {}, products: {}, followups: {} })
+  const fake = host(on, { [`${S}\\status.json`]: empty }, { verdict: 'allow' })
+  await $.session.start({ cwd: 'C:\\work', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__claude_ai_ClimatePoint__climatepoint_followup_guide', product_id: ADP } as never)
+  await fake.clock.settle()
+  expect(fake.nudges()).toBe(0) // unknown until the refresh
+  fake.clear('cleared')
+  await fake.clock.advance(30_000)
+  await fake.clock.settle()
+  expect(fake.sql).toHaveLength(1)
+  expect(fake.nudges()).toBe(0) // the new conversation touched nothing
   expect(fake.logs).toEqual([])
 })
 

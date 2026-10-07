@@ -183,11 +183,11 @@ export const kebab = (name: string) =>
     .replace(/^-+|-+$/g, '') || 'company'
 
 // A company keeps the slug it was first given (its brief folder never moves, a rename included);
-// a newcomer whose name collides gets -<first 6 chars of its id>. A company missing from one answer
-// stays as it was, so it keeps its slug when it comes back.
+// a newcomer whose name collides gets -<first 6 chars of its id>. A company missing from an answer
+// (the query asks for every id ever touched, so: deleted) stays as `gone`, keeping its slug.
 export function mergeStatus(prev: Status | null, fresh: Fresh, now: string): Status {
   const taken = new Set(Object.values(prev?.companies ?? {}).map(c => c.slug))
-  const companies: Status['companies'] = { ...prev?.companies }
+  const companies: Status['companies'] = Object.fromEntries(Object.entries(prev?.companies ?? {}).map(([id, c]) => [id, { ...c, status: 'gone' }]))
   for (const [id, c] of Object.entries(fresh.companies)) {
     let slug = prev?.companies[id]?.slug
     if (!slug) {

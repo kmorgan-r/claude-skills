@@ -100,6 +100,7 @@ async function loadSessions($: EngineInterface): Promise<Record<string, SessionF
 
 // The list, into the atom the render hooks read; then the nudge for any company newly resolved.
 async function recompute($: EngineInterface) {
+  await ensureSession($) // a background refresh after a /clear lands here first
   const [sessions, status, now] = await Promise.all([loadSessions($), loadStatus($), $.clock.now()])
   const projects = buildProjects(sessions, status, now, root)
   for (const p of projects) {
@@ -180,7 +181,10 @@ async function refresh($: EngineInterface, why: Why) {
     }
     const now = await $.clock.now()
     if ((why === 'start' || why === 'timer') && status && now - Date.parse(status.checkedAt) < FRESH_MS) return
-    if (!(await $.tool.list()).some(t => t.name === SQL_TOOL)) return
+    if (!(await $.tool.list()).some(t => t.name === SQL_TOOL)) {
+      if (why === 'pane') await update($, view, v => ({ ...v, note: 'No Supabase MCP in this session: showing the last saved status.' }))
+      return
+    }
     const ids: Ids = allIds(await loadSessions($))
     if (ids.products.length === 0 && ids.companies.length === 0) return
     const query = statusQuery(ids)
@@ -298,7 +302,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'lca' }, async $ => {
     await $.ui.open({ id: PANE, title: 'LCA Projects' })
-    void ensureSession($).then(() => recompute($)).then(() => refresh($, 'pane')).catch(err => log($, err))
+    void recompute($).then(() => refresh($, 'pane')).catch(err => log($, err))
     return { text: 'LCA Projects pane opened.' }
   })
 
