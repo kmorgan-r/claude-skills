@@ -27,7 +27,7 @@ So each implementation step **copies** the verified file and checks it is byte-i
 - **Ollama workers:** Tasks 1-3 are mechanical copy-and-gate tasks; dispatch them to the ollama-worker with `-Cwd` set to the worktree path above (it is a linked worktree, so it is dispatchable even though the conductor session started elsewhere). **Task 4 is Anthropic-only**: it handles client-confidential content and needs the Supabase MCP.
 - **Stage explicitly.** `git add <paths>` with the exact paths each task lists, never `git add -A` or `git add .`; check `git show --name-only HEAD` after each commit.
 - **P4 exit gate** (from the worktree root):
-  1. `claude plugin test ./lca-projects` → `25 pass`, `0 fail`
+  1. `claude plugin test ./lca-projects` → `29 pass`, `0 fail` (25 as copied in Task 1; the task-review fix added 4)
   2. `tsc -p lca-projects/tsconfig.json` → exit 0, no output
   3. `claude plugin validate ./lca-projects` → `✔ Validation passed with warnings` (the one warning left is the missing `author`, as in the other mods)
 
@@ -1558,7 +1558,7 @@ Run: `rm -rf C:/Users/kmorg/lca-projects-verified/backfill-check`
 - [ ] **Step 4: Re-run the mod's gate** (backfill.ts sits beside the mod; nothing may break)
 
 Run: `claude plugin test ./lca-projects`
-Expected: `25 pass`, `0 fail`.
+Expected: `29 pass`, `0 fail` (with the Task 1 fix).
 
 - [ ] **Step 5: Commit**
 
