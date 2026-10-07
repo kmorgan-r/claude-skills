@@ -1,0 +1,6 @@
+{
+  "name": "lca-projects",
+  "version": "0.1.0",
+  "description": "LCA client projects: detects ClimatePoint products a session works on, lists the Active companies with live follow-up state in a band and the /lca pane, and opens a session seeded with the company's brief",
+  "types": "./types/index.d.ts"
+}
