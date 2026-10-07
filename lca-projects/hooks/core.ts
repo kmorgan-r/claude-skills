@@ -174,11 +174,15 @@ export function parseStatus(text: string): Fresh | null {
   }
 }
 
+// Ø, Æ, ß, Đ and Ł have no NFKD decomposition: spelled out first, or a Nordic name loses letters.
+const FOLD: Record<string, string> = { ø: 'o', æ: 'ae', ß: 'ss', đ: 'd', ł: 'l' }
+
 export const kebab = (name: string) =>
   name
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
+    .replace(/[øæßđł]/g, c => FOLD[c] ?? c)
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'company'
 
@@ -325,10 +329,11 @@ export function contextOf(file: SessionFile, status: Status | null, root: string
     })
 }
 
-// A company named by UUID (known or not yet), slug or name, case-insensitive; a live one before a gone one.
+// A company named by UUID (known or not yet; a known product's names its company), slug or name,
+// case-insensitive; a live one before a gone one.
 export function resolveCompany(q: string, status: Status | null): string | undefined {
   const id = uuid(q)
-  if (id) return id
+  if (id) return status?.products[id]?.companyId ?? id
   const k = q.trim().toLowerCase()
   const hits = Object.entries(status?.companies ?? {}).filter(([, c]) => c.slug === k || c.name.toLowerCase() === k)
   return (hits.find(([, c]) => c.status !== 'gone') ?? hits[0])?.[0]

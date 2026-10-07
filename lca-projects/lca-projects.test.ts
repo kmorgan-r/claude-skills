@@ -64,6 +64,8 @@ test('detects product and company ids in ClimatePoint and execute_sql calls, UUI
   }
   expect(detect(SQL_TOOL, { query: `select * from x where parent_product_id = '${ADP}'` })).toEqual({ products: [], companies: [] })
   expect(detect('Read', { product_id: ADP })).toEqual({ products: [], companies: [] })
+  // the mod's own status query passes the observer too: it must tag nothing
+  expect(detect(SQL_TOOL, { query: statusQuery({ products: [ADP, BDP], companies: [ACME] }) })).toEqual({ products: [], companies: [] })
 })
 
 test('touch writes a new id at once and a known one at most once a minute', () => {
@@ -104,7 +106,7 @@ test('parses a captured execute_sql response, enveloped or bare, and rejects any
 
 test('slugs: kebab case, a collision gets the id prefix, and a slug never moves', () => {
   expect(kebab('Acme Motors')).toBe('acme-motors')
-  expect(kebab('Ørsted A/S — Wind')).toBe('rsted-a-s-wind')
+  expect(kebab('Ødegård Æble Straße AS — Łódź')).toBe('odegard-aeble-strasse-as-lodz')
   expect(kebab('***')).toBe('company')
   const other = 'aaaaaaaa-0000-4000-8000-000000000000'
   const first = mergeStatus(null, { companies: { [ACME]: { name: 'Acme Motors', status: 'active' } }, products: {}, followups: {} }, 't1')
@@ -229,6 +231,7 @@ test('nudge, brief frontmatter and company lookup', () => {
   expect(resolveCompany('acme motors', s)).toBe(ACME)
   expect(resolveCompany('acme-motors', s)).toBe(ACME)
   expect(resolveCompany(ACME.toUpperCase(), s)).toBe(ACME)
+  expect(resolveCompany(ADP, s)).toBe(ACME) // a product's UUID names its company
   expect(resolveCompany('Nobody', s)).toBeUndefined()
   const recreated = 'abcdef12-0000-4000-8000-000000000000' // the same client, created again
   const withGone = { ...s, companies: { [ACME]: { ...s.companies[ACME]!, status: 'gone' }, [recreated]: { name: 'Acme Motors', status: 'active', slug: 'acme-motors-abcdef' } } }
@@ -278,7 +281,7 @@ const PANE = {
 } as const
 
 // A fake host: files in memory, the SQL tool answering the captured response, wt recorded.
-function host(on: On, files: Record<string, string>, { sqlTool = true, verdict = 'ask' as 'allow' | 'ask' | 'deny', said = [] as string[] } = {}) {
+function host(on: On, files: Record<string, string>, { sqlTool = true, verdict = 'ask' as 'allow' | 'ask' | 'deny', said = [] as string[], answer = RESPONSE, refuse = '', wtExit = 0 } = {}) {
   const key = (p: string) => p.replace(/\//g, '\\').toLowerCase()
   const disk = new Map(Object.entries(files).map(([p, t]) => [key(p), t]))
   let nudges = 0
@@ -306,7 +309,8 @@ function host(on: On, files: Record<string, string>, { sqlTool = true, verdict =
   on('tool.check', () => ({ decision: verdict }))
   on('tool.call', { tool: SQL_TOOL }, (_, e) => {
     sql.push(String((e as { query?: unknown }).query))
-    return { result: RESPONSE, text: RESPONSE } as never
+    if (refuse) return { deny: refuse } // a classifier or a person said no
+    return { result: answer, text: answer } as never
   })
   on('tool.call', (_, e) => ({ result: `ran ${e.tool}`, text: `ran ${e.tool}` }) as never)
   on('ui.open', () => ({ value: { id: 'lca' } as never }))
@@ -327,7 +331,7 @@ function host(on: On, files: Record<string, string>, { sqlTool = true, verdict =
   on('fs.exists', (_, e) => ({ value: disk.has(key(e.path)) || key(e.path) === 'c:\\work\\builder2' }))
   on('process.run', (_, e) => {
     spawned.push([...e.argv])
-    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return { value: { exitCode: wtExit, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   const file = (p: string) => disk.get(key(p))
   // A /clear: the process goes on under a new session id with an empty conversation.
@@ -372,6 +376,16 @@ test('a subagent call tags the session but never nudges; the main loop then does
   await $.tool.call({ tool: 'mcp__claude_ai_ClimatePoint__climatepoint_followup_guide', product_id: ADP } as never)
   await fake.clock.settle()
   expect(fake.nudges()).toBe(1)
+  expect(fake.logs).toEqual([])
+})
+
+test('a -p run or the SDK is tagged but never nudged: nobody watches it write a brief', async ($, on) => {
+  const fake = host(on, { [`${S}\\status.json`]: statusFile('2026-10-07T07:55:00Z') })
+  await $.session.start({ cwd: 'C:\\work', surface: null, isInteractive: false })
+  await $.tool.call({ tool: 'mcp__claude_ai_ClimatePoint__climatepoint_followup_guide', product_id: ADP } as never)
+  await fake.clock.settle()
+  expect(fake.file(`${S}\\sessions\\self.json`)).toContain(ADP)
+  expect(fake.nudges()).toBe(0)
   expect(fake.logs).toEqual([])
 })
 
@@ -476,6 +490,22 @@ test('an unreadable status.json is never overwritten, and the pane says so', asy
   await ui.unmount()
 })
 
+for (const [why, over, note] of [
+  ['denied', { refuse: 'not now' }, 'Status refresh denied: not now'],
+  ['answered with something unparsable', { answer: 'permission denied for table products' }, 'Status refresh failed; showing the last saved status.'],
+] as const) {
+  test(`a pane refresh ${why} keeps status.json and says so`, async ($, on) => {
+    const fake = host(on, stale, over)
+    await $.session.start({ cwd: 'C:\\work', surface: 'terminal', isInteractive: true })
+    await $.command.run({ command: 'lca' })
+    await fake.clock.settle()
+    expect(JSON.parse(fake.file(`${S}\\status.json`)!).checkedAt).toBe('2026-10-07T07:00:00Z')
+    const ui = await $.ui.mount(PANE)
+    expect(await ui.find({ type: 'Text', text: note })).toBeDefined()
+    await ui.unmount()
+  })
+}
+
 test('a fresh status is not re-queried at start, even where a rule allows it', async ($, on) => {
   const fake = host(on, { ...stale, [`${S}\\status.json`]: statusFile('2026-10-07T07:55:00Z') }, { verdict: 'allow' })
   await $.session.start({ cwd: 'C:\\work', surface: 'terminal', isInteractive: true })
@@ -535,6 +565,18 @@ test('a launch folder that is gone opens the tab in the home folder', async ($, 
   await ui.select({ key: 'lca-launch', value: ACME })
   await fake.clock.settle()
   expect(fake.spawned).toEqual([wtArgs('acme-motors', 'C:\\home', `${S}\\acme-motors\\launch.cmd`)])
+  await ui.unmount()
+})
+
+test('when wt fails, the pane gives the command to run by hand', async ($, on) => {
+  const fake = host(on, { [`${S}\\status.json`]: statusFile('2026-10-07T07:55:00Z'), [`${S}\\sessions\\other.json`]: stale[`${S}\\sessions\\other.json`] }, { wtExit: 1 })
+  await $.session.start({ cwd: 'C:\\work', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'lca' })
+  await fake.clock.settle()
+  const ui = await $.ui.mount(PANE)
+  await ui.select({ key: 'lca-launch', value: ACME })
+  await fake.clock.settle()
+  expect(await ui.find({ type: 'Text', text: `Could not open a tab. Run: cmd /c "${S}\\acme-motors\\launch.cmd"` })).toBeDefined()
   await ui.unmount()
 })
 

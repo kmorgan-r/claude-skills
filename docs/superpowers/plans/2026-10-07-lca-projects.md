@@ -27,7 +27,7 @@ So each implementation step **copies** the verified file and checks it is byte-i
 - **Ollama workers:** Tasks 1-3 are mechanical copy-and-gate tasks; dispatch them to the ollama-worker with `-Cwd` set to the worktree path above (it is a linked worktree, so it is dispatchable even though the conductor session started elsewhere). **Task 4 is Anthropic-only**: it handles client-confidential content and needs the Supabase MCP.
 - **Stage explicitly.** `git add <paths>` with the exact paths each task lists, never `git add -A` or `git add .`; check `git show --name-only HEAD` after each commit.
 - **P4 exit gate** (from the worktree root):
-  1. `claude plugin test ./lca-projects` → `30 pass`, `0 fail` (25 as copied in Task 1; the task-review fixes added 5)
+  1. `claude plugin test ./lca-projects` → `34 pass`, `0 fail` (25 as copied in Task 1; the task-review fixes added 5, the final-review fixes 4)
   2. `tsc -p lca-projects/tsconfig.json` → exit 0, no output
   3. `claude plugin validate ./lca-projects` → `✔ Validation passed with warnings` (the one warning left is the missing `author`, as in the other mods)
 
@@ -54,7 +54,7 @@ So each implementation step **copies** the verified file and checks it is byte-i
 
 ### Task 1: The `lca-projects` mod
 
-> Task review amended the code below after it was copied, in the commit `fix(lca-projects): follow the session across /clear; keep slugs; fence the main-loop nudge`: `register.tsx`, `core.ts` and the test file differ from these blocks, and that commit is authoritative.
+> Task review and the final review amended the code below after it was copied, in the `fix(lca-projects): …` commits on this branch: `register.tsx`, `core.ts` and the test file differ from these blocks, and the branch head is authoritative.
 
 **Files:**
 - Create: `lca-projects/.claude-plugin/plugin.json`
@@ -233,7 +233,7 @@ test('parses a captured execute_sql response, enveloped or bare, and rejects any
 
 test('slugs: kebab case, a collision gets the id prefix, and a slug never moves', () => {
   expect(kebab('Acme Motors')).toBe('acme-motors')
-  expect(kebab('Ørsted A/S — Wind')).toBe('rsted-a-s-wind')
+  expect(kebab('Ødegård Æble Straße AS — Łódź')).toBe('odegard-aeble-strasse-as-lodz')
   expect(kebab('***')).toBe('company')
   const other = 'aaaaaaaa-0000-4000-8000-000000000000'
   const first = mergeStatus(null, { companies: { [ACME]: { name: 'Acme Motors', status: 'active' } }, products: {}, followups: {} }, 't1')
@@ -1558,7 +1558,7 @@ Run: `rm -rf C:/Users/kmorg/lca-projects-verified/backfill-check`
 - [ ] **Step 4: Re-run the mod's gate** (backfill.ts sits beside the mod; nothing may break)
 
 Run: `claude plugin test ./lca-projects`
-Expected: `30 pass`, `0 fail` (with the Task 1 fixes).
+Expected: `34 pass`, `0 fail` (with the review fixes).
 
 - [ ] **Step 5: Commit**
 
@@ -1887,10 +1887,12 @@ Not a P4 task: the mod loads at session start, and the band, the pane and a new 
 3. `claude plugin list` shows `lca-projects@inline … Status: ✔ loaded`.
 
 **Smoke test** (spec §10, adjusted to the spike outcome), in a fresh session:
-1. `/lca` opens the pane: Acme Motors with ADP and BDP and their follow-up lines. Watch whether the pane's refresh runs or notes `Status refresh denied: …` (the auto-mode classifier's call). Either way the list shows, from the bootstrap `status.json`.
-2. Call a ClimatePoint tool on ADP (`climatepoint_get_product_summary`, product `5e1f0c2a-7b3d-4c8e-9a1f-2b3c4d5e6f70`). The band shows `LCA · 1 active · ⚑n`. The `<lca-project company="Acme Motors">` notice arrives once; a second call on BDP adds none.
-3. Pick Acme Motors in the pane: a new tab `lca-acme-motors` opens in `C:\Users\kmorg\climatepoint-eco-report-builder2` and its session starts with `Resume LCA project Acme Motors. Read …brief.md first.` Check the new session registers (it shows in `/workers` or the session list).
+1. `/lca` opens the pane: the client companies from the bootstrap with their products and follow-up lines. Expect the test companies dev sessions touched (Test Company, UPSERT_NULL_TEST_CO, ClimatePoint) among them; archive them on the dashboard to drop them. Watch whether the pane's refresh runs or notes `Status refresh denied: …` (the auto-mode classifier's call). Either way the list shows, from the bootstrap `status.json`.
+2. Call a ClimatePoint tool on a real client product (`climatepoint_get_product_summary`, with a product UUID from `~/.claude/lca-projects/status.json`). The band shows `LCA · 1 active · ⚑n`. The `<lca-project company="…">` notice arrives once; a second call on the company's other product adds none. **Check the next model turn goes on with no API error:** the notice is appended inside the tool call, before the tool runs, and only a live session shows where the engine lists it. (It stays before `next(e)`: after it, an overrun would make the hook's `.catch` run the tool a second time.)
+3. Pick that company in the pane: a new tab `lca-<slug>` opens in the brief's `launch_cwd` and its session starts with `Resume LCA project <name>. Read …brief.md first.` Check the new session registers (it shows in `/workers` or the session list), and that `launch.cmd` names the native `claude.exe` (`CLAUDE_CODE_EXECPATH`).
 4. `/lca-save` in that session updates the brief in place.
 5. Archive a test company in the dashboard (or change one's status): it drops out of the list on the next `/lca` open.
 
-**After merge:** re-point both to the primary checkout once `main` is pulled: `CLAUDE_CODE_PLUGIN_DIRS` entry → `C:\Users\kmorg\claude-skills-main\lca-projects`; the `lca-save` junction → `C:\Users\kmorg\claude-skills-main\lca-save`. Then `C:\Users\kmorg\lca-projects-verified\` can be deleted.
+**Before the push, and until the ref is gone:** this clone keeps `refs/original/refs/heads/feat/lca-projects`, the pre-scrub history, which names the real client. Push the branch by name only (`git push -u origin feat/lca-projects`), never `--mirror` or `refs/*`.
+
+**After merge:** first `git update-ref -d refs/original/refs/heads/feat/lca-projects` (Kevin runs it). Then re-point both to the primary checkout once `main` is pulled: `CLAUDE_CODE_PLUGIN_DIRS` entry → `C:\Users\kmorg\claude-skills-main\lca-projects`; the `lca-save` junction → `C:\Users\kmorg\claude-skills-main\lca-save`. Then `C:\Users\kmorg\lca-projects-verified\` can be deleted.

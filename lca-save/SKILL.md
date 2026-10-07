@@ -47,7 +47,9 @@ name, slug or UUID). It returns JSON:
 
 ## 2. Read the current brief
 
-If `briefExists` is true, read `briefPath` in full before writing anything.
+If `briefExists` is true, read `briefPath` in full before writing anything. If its
+`company_id` is not the company's `id`, the folder holds another company's brief (a deleted
+`status.json` hands out slugs afresh): say so and stop without writing.
 
 ## 3. Rewrite it from the conversation
 

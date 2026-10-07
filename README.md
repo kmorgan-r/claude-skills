@@ -18,7 +18,7 @@ follows at runtime) plus any bundled scripts, references, and evals.
 | [`ollama-workers`](./ollama-workers) | Lets an Anthropic-model orchestrator hand short-turn implementer tasks to an Ollama cloud model (GLM, Kimi) running in a separate headless Claude Code process. `/ollama-workers on\|off\|status` is the whole interface; reviewers stay on Anthropic. **Windows-only** (PowerShell). |
 | [`advisor-bridge`](./advisor-bridge) | Lets a Claude Code session running on a non-Anthropic backend (`ollama launch claude` — GLM, Kimi) reach an Anthropic model for advice, by rendering the session's own transcript into a scrubbed `claude -p` child process. The built-in `advisor` tool is disabled there and would be GLM advising GLM anyway. **Windows-only** (PowerShell). |
 | [`orchestrate`](./orchestrate) | One session coordinates N peer Claude Code sessions on a repo, each a real Windows Terminal tab in its own git worktree that the operator can read and type into. The orchestrator merges only under an explicit grant, verifies CI against head SHAs, reads review bodies, relays what moved, and surfaces every decision that belongs to the human. **Windows-only** (`wt.exe`). |
-| [`lca-projects`](./lca-projects) | A Claude Code **mod**, not a skill: notices when a session works on a ClimatePoint product, lists the Active client companies those sessions touched with live follow-up state (a band under the prompt and an `/lca` pane), nudges each session once to keep a per-company brief, and opens a new Windows Terminal tab seeded with that brief. **Windows-only** (`wt.exe`). |
+| [`lca-projects`](./lca-projects) | A Claude Code **mod**, not a skill: notices when a session works on a ClimatePoint product, lists the Active client companies those sessions touched with live follow-up state (a band under the prompt and an `/lca` pane), nudges once per company per session to keep a per-company brief, and opens a new Windows Terminal tab seeded with that brief. **Windows-only** (`wt.exe`). |
 | [`lca-save`](./lca-save) | Writes or updates an LCA client project's brief from the current conversation, at the path the `lca-projects` mod's `lca_context` tool gives. |
 | [`outlook-draft`](./outlook-draft) | Turns the current conversation into an Outlook draft (a new email, or a reply / reply-all inside a thread, with attachments, your signature and writing voice) through Microsoft Graph and your own Entra app. Drafts only: the app is never granted `Mail.Send`, so it cannot send. |
 
@@ -295,7 +295,8 @@ A mod, loaded from the folders `CLAUDE_CODE_PLUGIN_DIRS` lists (`~/.claude/setti
 `lca-projects` folder there. Its data (session files, the status cache, briefs) lives in
 `~/.claude/lca-projects/`, never in this repo.
 
-- Once: `node lca-projects/backfill.ts` registers past sessions from their transcripts.
+- Once: `node lca-projects/backfill.ts` registers past sessions from their transcripts (node 24:
+  it runs the TypeScript file through node's native type stripping).
 - Status comes from one read-only `mcp__supabase__execute_sql` query. A plugin cannot approve
   its own tool call, so the background refresh runs only where a permission rule allows that
   tool; otherwise opening `/lca` refreshes.

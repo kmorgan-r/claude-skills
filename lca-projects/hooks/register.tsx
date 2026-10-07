@@ -46,6 +46,7 @@ const nudged = new Set<string>()
 const queried = new Set<string>()
 let busy = false
 let debounced = false
+let interactive = false // a person at the prompt: a -p run or the SDK is never nudged
 
 const log = ($: EngineInterface, err: unknown) => $.ui.log(`lca-projects: ${err}`, { to: 'debug' })
 const iso = async ($: EngineInterface) => new Date(await $.clock.now()).toISOString()
@@ -117,9 +118,11 @@ async function recompute($: EngineInterface) {
   return { projects, status }
 }
 
-// Once per company per session, on the main loop only. Skipped when the conversation already
-// holds the brief's path (a seeded session) or this notice (a resume, a reload).
+// Once per company per session, on an interactive session's main loop only: nobody watches a
+// headless run rewrite a brief. Skipped when the conversation already holds the brief's path (a
+// seeded session) or this notice (a resume, a reload).
 async function nudgeNew($: EngineInterface, projects: Project[], status: Status | null) {
+  if (!interactive) return
   const companies = new Set([...mainIds].map(id => status?.products[id]?.companyId ?? id))
   const due = projects.filter(p => companies.has(p.id) && !nudged.has(p.id))
   if (due.length === 0) return
@@ -205,7 +208,8 @@ async function refresh($: EngineInterface, why: Why) {
     await update($, view, v => ({ ...v, note: null }))
     await recompute($)
   } catch (err) {
-    log($, err)
+    log($, err) // a call cancelled at its permission dialog rejects, and lands here
+    if (why === 'pane') await update($, view, v => ({ ...v, note: 'Status refresh failed; showing the last saved status.' }))
   } finally {
     busy = false
   }
@@ -237,6 +241,7 @@ export const register: Register = on => {
     busy = false
     debounced = false
     cwd = e.cwd
+    interactive = e.isInteractive
     sid = ''
     try {
       const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${await $.env.get('USERPROFILE')}\\.claude`
@@ -249,7 +254,7 @@ export const register: Register = on => {
           "This session's LCA client companies: id, name, status, brief path (and whether it exists), the products touched and live follow-up state. With `company` (name, slug or UUID) not yet tagged, tags it to this session. /lca-save calls it first.",
         inputSchema: { type: 'object', properties: { company: { type: 'string', description: 'Company name, slug or UUID' } } },
       })
-      await recompute($)
+      void recompute($).catch(err => log($, err)) // reads every session file: the start never waits on it
       void refresh($, 'start')
       $.clock.every(FRESH_MS, () => {
         $.ui.invalidate('ui.render') // the band's "status as of" moves with time

@@ -129,8 +129,8 @@ session, or null.
 ### Project list (computed in memory, never stored on disk)
 
 The list is recomputed into an atom only on triggers: this session writing its session
-file, a status refresh finishing, and the pane opening (which also re-reads other
-sessions' files). The band and pane render hooks read the atom and never touch the disk,
+file, a status refresh finishing, and the pane opening; each recompute re-reads the other
+sessions' files. The band and pane render hooks read the atom and never touch the disk,
 because `PromptHint` redraws on every keystroke. `status.json` is likewise loaded once
 per trigger, not per render.
 
@@ -148,7 +148,8 @@ per trigger, not per render.
 
 ### Slug
 
-The company name in kebab case (`Acme Motors` → `acme-motors`). The first
+The company name in kebab case (`Acme Motors` → `acme-motors`; letters NFKD leaves whole,
+`ø æ ß đ ł`, are spelled out first: `Ødegård` → `odegard`). The first
 company to claim a slug keeps it. A later company whose name collides gets
 `-<first 6 chars of company id>` appended. The slug is stored in `status.json` once
 assigned and never recomputed, so a brief folder never moves: every refresh reads the
@@ -207,7 +208,9 @@ and a brief changes only through `/lca-save`.
 
 ### Nudge
 
-Once per company per session, on the main loop only (`e.agentId === undefined`), the
+Once per company per session, on the main loop only (`e.agentId === undefined`) of an
+interactive session (`session.start`'s `isInteractive`: a `-p` run or the SDK, which nobody
+watches rewrite a brief, gets none), the
 first time that company resolves to `active`, via
 `$.session.append({ message: { type: 'user', content: [note] } })`:
 
