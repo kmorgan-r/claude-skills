@@ -117,7 +117,13 @@ lca-projects/
 }
 ```
 
-### Project list (computed on read, never stored)
+### Project list (computed in memory, never stored on disk)
+
+The list is recomputed into an atom only on triggers: this session writing its session
+file, a status refresh finishing, and the pane opening (which also re-reads other
+sessions' files). The band and pane render hooks read the atom and never touch the disk,
+because `PromptHint` redraws on every keystroke. `status.json` is likewise loaded once
+per trigger, not per render.
 
 1. Union every `sessions/*.json`: products, companies, pinned, each with its sessions,
    first/last seen and cwd.
@@ -126,8 +132,10 @@ lca-projects/
 3. Drop products with `isArchived = true`.
 4. Keep companies with `status = 'active'`. A company appears if it has at least one
    live touched product, or it was detected/pinned directly.
-5. Sort companies by most recent `lastSeen`. A company's launch folder is the `cwd` of
-   its most recent session.
+5. Sort companies by most recent `lastSeen`. A company's launch folder is the brief's
+   `launch_cwd` when set, else the `cwd` of its most recent session. The backfill
+   registers past debugging sessions too, so the most recent session can be a dev
+   checkout rather than the consulting folder; `launch_cwd` is the fix.
 
 ### Slug
 
@@ -147,6 +155,7 @@ company: Acme Motors
 products: [{id: 5e1f0c2a-7b3d-4c8e-9a1f-2b3c4d5e6f70, name: ADP}, {id: 9d8c7b6a-5e4f-4a3b-8c2d-1e0f9a8b7c6d, name: BDP}]
 updated: 2026-10-07
 sessions: [1937fdab-ce11-43e7-a778-a95ab6345136]
+launch_cwd: C:/Users/kmorg/climatepoint-eco-report-builder2
 ---
 ## Where it stands      (one paragraph)
 ## Products             (per product: id, name, goal/standard, current state)
@@ -206,13 +215,22 @@ Update it when decisions, gates or next actions change, or run /lca-save before 
 - The company name is sanitized first (section 5, Security).
 - About 70 tokens, once.
 
+The nudge depends on status refresh. A product already in `status.json` resolves at
+once. A product not yet in it resolves only when a refresh succeeds. If the spike
+(section 5) finds background refresh cannot run, the nudge for a new company is delayed
+until the next refresh that does run, at the latest when Kevin opens `/lca`; that
+refresh fires the nudge for every company it newly resolves to `active`. The plan reports
+this outcome with the spike result.
+
 ## 5. Status refresh
 
 ### Triggers
 
 - `session.start`
 - `/lca` pane open
-- every 15 minutes (`$.clock.every(900_000, …)`)
+- every 15 minutes (`$.clock.every(900_000, …)`), skipped when `status.json`'s
+  `checkedAt` is under 15 minutes old, so N open sessions still make about one query
+  per 15 minutes between them
 - an unknown product detected, debounced to 30 s
 
 ### Gating
@@ -391,7 +409,8 @@ error listing the known companies.
 3. Rewrite it from the conversation: keep what is still true, move changed decisions into
    Decisions with date and who decided, update `## Products` per product, refresh the
    frontmatter (`products` names from `lca_context`, append `sessionId` to `sessions`,
-   set `updated`).
+   set `updated`, and set `launch_cwd` to the current working folder unless the brief
+   already has one; Kevin can edit it by hand).
 4. Write the file and report a 5-line summary of what changed.
 
 The skill never writes platform follow-up state into the brief, and never writes the
