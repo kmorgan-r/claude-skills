@@ -284,7 +284,7 @@ export const register: Register = on => {
         }
         nudged.add(id) // /lca-save is about to write the brief: no notice needed
         if (touch(mine, { products: [], companies: [id] }, await iso($))) await saveMine($)
-        if (!status?.companies[id]) {
+        if (!status?.companies[id] || status.companies[id].status === 'gone') {
           await refresh($, 'unknown')
           status = await loadStatus($)
         }

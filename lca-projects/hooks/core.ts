@@ -325,12 +325,13 @@ export function contextOf(file: SessionFile, status: Status | null, root: string
     })
 }
 
-// A company named by UUID (known or not yet), slug or name, case-insensitive.
+// A company named by UUID (known or not yet), slug or name, case-insensitive; a live one before a gone one.
 export function resolveCompany(q: string, status: Status | null): string | undefined {
   const id = uuid(q)
   if (id) return id
   const k = q.trim().toLowerCase()
-  return Object.entries(status?.companies ?? {}).find(([, c]) => c.slug === k || c.name.toLowerCase() === k)?.[0]
+  const hits = Object.entries(status?.companies ?? {}).filter(([, c]) => c.slug === k || c.name.toLowerCase() === k)
+  return (hits.find(([, c]) => c.status !== 'gone') ?? hits[0])?.[0]
 }
 
 // The brief's launch_cwd frontmatter field, when set. The model writes the brief, and wt reads `;`

@@ -42,7 +42,8 @@ name, slug or UUID). It returns JSON:
   `note` says: open `/lca` (which refreshes status from the database) or pass the company, then
   run `/lca-save` again. Stop.
 - **More than one company and none named:** ask which one.
-- **One company:** use it.
+- **One company:** use it. If its `status` is `gone` (deleted on the platform), say so and ask
+  before writing.
 
 ## 2. Read the current brief
 

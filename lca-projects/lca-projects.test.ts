@@ -230,6 +230,9 @@ test('nudge, brief frontmatter and company lookup', () => {
   expect(resolveCompany('acme-motors', s)).toBe(ACME)
   expect(resolveCompany(ACME.toUpperCase(), s)).toBe(ACME)
   expect(resolveCompany('Nobody', s)).toBeUndefined()
+  const recreated = 'abcdef12-0000-4000-8000-000000000000' // the same client, created again
+  const withGone = { ...s, companies: { [ACME]: { ...s.companies[ACME]!, status: 'gone' }, [recreated]: { name: 'Acme Motors', status: 'active', slug: 'acme-motors-abcdef' } } }
+  expect(resolveCompany('Acme Motors', withGone)).toBe(recreated)
 })
 
 // ---- backfill
