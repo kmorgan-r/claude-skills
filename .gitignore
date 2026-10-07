@@ -25,3 +25,6 @@ Thumbs.db
 
 # Superpowers session artifacts (brainstorm companion, scratch)
 .superpowers/
+
+# lca-projects: the engine's types, copied locally for tsc; not ours to version
+lca-projects/.claude-plugin/types/
