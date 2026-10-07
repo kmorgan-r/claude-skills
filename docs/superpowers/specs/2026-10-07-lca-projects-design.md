@@ -148,8 +148,9 @@ per trigger, not per render.
 
 ### Slug
 
-The company name in kebab case (`Acme Motors` → `acme-motors`; letters NFKD leaves whole,
-`ø æ ß đ ł`, are spelled out first: `Ødegård` → `odegard`). The first
+The company name in kebab case (`Acme Motors` → `acme-motors`; the common letters NFKD
+leaves whole, `ø æ ß đ ł`, are spelled out first: `Ødegård` → `odegard`; rarer ones such as
+`ð þ œ` drop). The first
 company to claim a slug keeps it. A later company whose name collides gets
 `-<first 6 chars of company id>` appended. The slug is stored in `status.json` once
 assigned and never recomputed, so a brief folder never moves: every refresh reads the
