@@ -33,8 +33,11 @@ name, slug or UUID). It returns JSON:
 }
 ```
 
-- **The tool is missing:** the mod is not loaded in this session. Say so and stop.
-- **Denied with "Unknown company":** show the known companies it lists and ask which one.
+- **The tool is missing:** if it is listed as deferred, load it with ToolSearch first. Otherwise
+  the mod is not loaded in this session. Say so and stop.
+- **Denied with "Unknown company":** show the known companies it lists and ask which one. If it
+  lists none, or the denial is anything else (`lca_context failed`, `timed out`), say so,
+  suggest opening `/lca`, and stop.
 - **`companies` is empty:** the session's products are not resolved to a company yet. Say what
   `note` says: open `/lca` (which refreshes status from the database) or pass the company, then
   run `/lca-save` again. Stop.
@@ -62,7 +65,7 @@ launch_cwd: <folder>
 One paragraph.
 
 ## Products
-Per product: id, name, goal or standard (ISO 14067, EN 15804...), current state.
+Per product: id, name, goal or standard (ISO 14067, EN 15804...), where the LCA stands (not follow-up rounds).
 
 ## Decisions
 What, who decided, date. A changed decision moves here with its new date; the old one goes.
@@ -87,7 +90,8 @@ Frontmatter:
 - `sessions`: the existing list with `sessionId` appended once.
 - `updated`: today.
 - `launch_cwd`: keep the brief's value when it has one (Kevin may have set it by hand). Otherwise
-  the current working folder. A launched session opens there.
+  the current working folder. A launched session opens there. Write it unquoted with forward
+  slashes (`C:/Users/...`): the mod ignores a value holding a quote or `;`.
 
 ## 4. Write and report
 
