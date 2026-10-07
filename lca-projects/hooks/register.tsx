@@ -38,6 +38,7 @@ const view = atom({ plugin: 'lca-projects', key: 'view' } as const, { projects: 
 
 // Module state: a reload starts it over, as orchestrate-status's does.
 let root = '' // ~/.claude/lca-projects
+let cwd = ''
 let sid = ''
 let mine: SessionFile = emptySession('')
 const mainIds = new Set<string>() // ids the main loop touched: only their companies get the nudge
@@ -56,6 +57,25 @@ async function loadStatus($: EngineInterface): Promise<Status | null> {
   } catch {
     return null
   }
+}
+
+// A /clear or an in-process resume goes on under a new session id, and no session.start fires for
+// it: whatever runs first under the new id begins this session's bookkeeping over. The file is read
+// before any state moves, so a second caller arriving meanwhile finds the switch done or not begun.
+async function ensureSession($: EngineInterface) {
+  const id = await $.session.id()
+  if (id === sid) return
+  let file = emptySession(cwd)
+  try {
+    file = parseSession(String(await $.fs.read(`${root}\\sessions\\${id}.json`))) ?? file
+  } catch {
+    // a new session
+  }
+  if (id === sid) return
+  sid = id
+  mine = file
+  mainIds.clear()
+  nudged.clear()
 }
 
 // Every session's file; this session's from memory, as it is written.
@@ -119,6 +139,7 @@ async function observe($: EngineInterface, tool: string, input: unknown, agentId
   const ids = detect(tool, input)
   const all = [...ids.products, ...ids.companies]
   if (all.length === 0) return
+  await ensureSession($)
   const fresh = agentId === undefined && all.some(id => !mainIds.has(id))
   if (agentId === undefined) for (const id of all) mainIds.add(id)
   const changed = touch(mine, ids, await iso($))
@@ -144,10 +165,19 @@ type Why = 'start' | 'timer' | 'unknown' | 'pane'
 // permission rule already allows it: a plugin's own tool.check hook never sees its own check, so
 // it cannot approve itself. The pane asks with the user looking. Any failure keeps status.json.
 async function refresh($: EngineInterface, why: Why) {
-  if (busy) return
+  if (busy) {
+    if (why === 'unknown') soon($) // the running one may predate the new id
+    return
+  }
   busy = true
   try {
     const status = await loadStatus($)
+    if (!status && (await $.fs.exists(`${root}\\status.json`))) {
+      // Unreadable, not absent: rewriting it would give every company its slug afresh.
+      log($, 'status.json is unreadable; refresh skipped until it is fixed or deleted')
+      if (why === 'pane') await update($, view, v => ({ ...v, note: 'status.json is unreadable: fix or delete it to refresh.' }))
+      return
+    }
     const now = await $.clock.now()
     if ((why === 'start' || why === 'timer') && status && now - Date.parse(status.checkedAt) < FRESH_MS) return
     if (!(await $.tool.list()).some(t => t.name === SQL_TOOL)) return
@@ -162,7 +192,8 @@ async function refresh($: EngineInterface, why: Why) {
     }
     const fresh = r.isError ? null : parseStatus(String(r.text ?? ''))
     if (!fresh) {
-      log($, `status response unparsable: ${String(r.text ?? '').slice(0, 200)}`)
+      log($, `status ${r.isError ? 'query failed' : 'response unparsable'}: ${String(r.text ?? '').slice(0, 200)}`)
+      if (why === 'pane') await update($, view, v => ({ ...v, note: 'Status refresh failed; showing the last saved status.' }))
       return
     }
     await $.fs.write(`${root}\\status.json`, JSON.stringify(mergeStatus(status, fresh, new Date(now).toISOString()), null, 2))
@@ -197,21 +228,16 @@ const COLOR = { head: '#94a3b8', company: '#38bdf8', product: '#e2e8f0', flag: '
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    // A start (a resume included) begins this session's bookkeeping over.
-    mainIds.clear()
-    nudged.clear()
+    // A start (a new process's resume included) begins this session's bookkeeping over.
     queried.clear()
     busy = false
     debounced = false
+    cwd = e.cwd
+    sid = ''
     try {
       const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${await $.env.get('USERPROFILE')}\\.claude`
       root = `${config.replace(/\//g, '\\')}\\lca-projects`
-      sid = await $.session.id()
-      try {
-        mine = parseSession(String(await $.fs.read(`${root}\\sessions\\${sid}.json`))) ?? emptySession(e.cwd)
-      } catch {
-        mine = emptySession(e.cwd) // a new session
-      }
+      await ensureSession($)
       await $.command.register({ name: 'lca', description: 'Active LCA client projects: products, follow-up state, start a seeded session', immediate: true })
       await $.tool.register({
         name: 'lca_context',
@@ -243,6 +269,7 @@ export const register: Register = on => {
 
   on('tool.call', { tool: CONTEXT_TOOL }, async ($, e) => {
     try {
+      await ensureSession($)
       const q = (e as { company?: unknown }).company
       let status = await loadStatus($)
       if (typeof q === 'string' && q.trim()) {
@@ -271,7 +298,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'lca' }, async $ => {
     await $.ui.open({ id: PANE, title: 'LCA Projects' })
-    void recompute($).then(() => refresh($, 'pane')).catch(err => log($, err))
+    void ensureSession($).then(() => recompute($)).then(() => refresh($, 'pane')).catch(err => log($, err))
     return { text: 'LCA Projects pane opened.' }
   })
 

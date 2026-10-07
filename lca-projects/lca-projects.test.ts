@@ -79,7 +79,7 @@ test('a corrupt session or status file reads as null', () => {
   expect(parseStatusFile('{"checkedAt":"t","companies":{},"products":{}}')).toBeNull()
   expect(parseSession('{"cwd":')).toBeNull()
   expect(parseSession('{"cwd":"x","products":null,"companies":{}}')).toBeNull()
-  expect(parseSession(JSON.stringify(session('C:/w', { [ADP]: '2026-10-07T08:00:00Z' }))))?.toBeDefined()
+  expect(parseSession(JSON.stringify(session('C:/w', { [ADP]: '2026-10-07T08:00:00Z' })))).not.toBeNull()
 })
 
 // ---- status
@@ -112,6 +112,11 @@ test('slugs: kebab case, a collision gets the id prefix, and a slug never moves'
   expect(both.companies[ACME]).toEqual({ name: 'Acme Motors AS', status: 'active', slug: 'acme-motors' })
   expect(both.companies[other]!.slug).toBe('acme-motors-aaaaaa')
   expect(both.checkedAt).toBe('t2')
+  // missing from one answer, then back renamed: the slug holds
+  const without = mergeStatus(both, { companies: { [other]: { name: 'Acme  Motors', status: 'active' } }, products: {}, followups: {} }, 't3')
+  const back = mergeStatus(without, { companies: { [ACME]: { name: 'Acme Industries', status: 'active' } }, products: {}, followups: {} }, 't4')
+  expect(back.companies[ACME]!.slug).toBe('acme-motors')
+  expect(back.companies[other]!.slug).toBe('acme-motors-aaaaaa')
 })
 
 test('unknown ids: neither in status.json nor queried this process', () => {
@@ -195,6 +200,7 @@ test('the band: hidden when empty, counts and flags, stale after 30 minutes', ()
 test('sanitize strips markup, quotes, metacharacters and control characters, and cuts to 80', () => {
   expect(sanitize('Acme <script>"x"</script>; & Co\u0007|%^')).toBe('Acme scriptx/script Co')
   expect(sanitize('a'.repeat(100))).toHaveLength(80)
+  expect(sanitize('Acme\nMotors\tAS')).toBe('Acme Motors AS')
 })
 
 test('seed and launcher hold no separators or quotes from an adversarial name', () => {
@@ -216,6 +222,8 @@ test('nudge, brief frontmatter and company lookup', () => {
   expect(nudge('X', 'B.md', false)).toContain("No brief yet. Run /lca-save once there's something worth keeping.")
   expect(launchCwd('---\ncompany: X\nlaunch_cwd: C:/Users/kmorg/climatepoint-eco-report-builder2 \n---\n## Where it stands')).toBe('C:/Users/kmorg/climatepoint-eco-report-builder2')
   expect(launchCwd('no frontmatter\nlaunch_cwd: C:/x')).toBeUndefined()
+  expect(launchCwd('---\nlaunch_cwd: C:/x; new-tab calc\n---')).toBeUndefined() // wt's separator
+  expect(launchCwd('---\nlaunch_cwd: C:/x" calc\n---')).toBeUndefined()
   const s = status()
   expect(resolveCompany('acme motors', s)).toBe(ACME)
   expect(resolveCompany('acme-motors', s)).toBe(ACME)
@@ -270,6 +278,7 @@ function host(on: On, files: Record<string, string>, { sqlTool = true, verdict =
   const key = (p: string) => p.replace(/\//g, '\\').toLowerCase()
   const disk = new Map(Object.entries(files).map(([p, t]) => [key(p), t]))
   let nudges = 0
+  let id = 'self'
   const sql: string[] = []
   const spawned: string[][] = []
   const logs: string[] = []
@@ -285,7 +294,7 @@ function host(on: On, files: Record<string, string>, { sqlTool = true, verdict =
     return { value: undefined }
   })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('session.id', () => ({ value: 'self' }))
+  on('session.id', () => ({ value: id }))
   on('session.messages', () => ({ value: said.map(text => ({ role: 'user', text, toolUses: [] })) as never }))
   on('command.register', (_, e) => ({ value: { command: `lca-projects:${e.name}` } }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__lca-projects__${e.name}` } }))
@@ -317,7 +326,12 @@ function host(on: On, files: Record<string, string>, { sqlTool = true, verdict =
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   const file = (p: string) => disk.get(key(p))
-  return { clock, logs, nudges: () => nudges, sql, spawned, file }
+  // A /clear: the process goes on under a new session id with an empty conversation.
+  const clear = (next: string) => {
+    id = next
+    said.length = 0
+  }
+  return { clock, logs, nudges: () => nudges, sql, spawned, file, clear }
 }
 
 const statusFile = (checkedAt: string) => JSON.stringify({ ...status(), checkedAt })
@@ -344,9 +358,8 @@ test('a ClimatePoint call tags the session, draws the band and nudges the main l
   await ui.unmount()
 })
 
-test('a subagent call tags the session but never nudges; a seeded session is not nudged', async ($, on) => {
-  const brief = `${S}\\acme-motors\\brief.md`
-  const fake = host(on, { [`${S}\\status.json`]: statusFile('2026-10-07T07:55:00Z'), [brief]: '---\ncompany: Acme Motors\n---\n' }, { said: [`Resume LCA project Acme Motors. Read ${brief} first.`] })
+test('a subagent call tags the session but never nudges; the main loop then does', async ($, on) => {
+  const fake = host(on, { [`${S}\\status.json`]: statusFile('2026-10-07T07:55:00Z') })
   await $.session.start({ cwd: 'C:\\work', surface: 'terminal', isInteractive: true })
   await $.tool.call({ tool: 'mcp__claude_ai_ClimatePoint__climatepoint_followup_guide', product_id: ADP, agentId: 'sub-1' } as never)
   await fake.clock.settle()
@@ -354,7 +367,35 @@ test('a subagent call tags the session but never nudges; a seeded session is not
   expect(fake.nudges()).toBe(0)
   await $.tool.call({ tool: 'mcp__claude_ai_ClimatePoint__climatepoint_followup_guide', product_id: ADP } as never)
   await fake.clock.settle()
+  expect(fake.nudges()).toBe(1)
+  expect(fake.logs).toEqual([])
+})
+
+test('a seeded session is not nudged', async ($, on) => {
+  const brief = `${S}\\acme-motors\\brief.md`
+  const fake = host(on, { [`${S}\\status.json`]: statusFile('2026-10-07T07:55:00Z'), [brief]: '---\ncompany: Acme Motors\n---\n' }, { said: [`Resume LCA project Acme Motors. Read ${brief} first.`] })
+  await $.session.start({ cwd: 'C:\\work', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__claude_ai_ClimatePoint__climatepoint_followup_guide', product_id: ADP } as never)
+  await fake.clock.settle()
   expect(fake.nudges()).toBe(0) // the first message already reads the brief
+})
+
+test('after a /clear the new session is tracked and nudged afresh', async ($, on) => {
+  const fake = host(on, { [`${S}\\status.json`]: statusFile('2026-10-07T07:55:00Z') })
+  await $.session.start({ cwd: 'C:\\work', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__claude_ai_ClimatePoint__climatepoint_followup_guide', product_id: ADP } as never)
+  await fake.clock.settle()
+  expect(fake.nudges()).toBe(1)
+
+  fake.clear('cleared')
+  await $.tool.call({ tool: 'mcp__claude_ai_ClimatePoint__climatepoint_followup_export', product_id: BDP } as never)
+  await fake.clock.settle()
+  expect(fake.nudges()).toBe(2) // same company, new conversation
+  expect(JSON.parse(fake.file(`${S}\\sessions\\cleared.json`)!)).toMatchObject({ cwd: 'C:\\work', products: { [BDP]: {} } })
+  expect(fake.file(`${S}\\sessions\\self.json`)).not.toContain(BDP)
+  const ctx = await $.tool.call({ tool: 'mcp__lca-projects__lca_context' } as never)
+  expect(JSON.parse(String(ctx.result))).toMatchObject({ sessionId: 'cleared', companies: [expect.objectContaining({ id: ACME })] })
+  expect(fake.logs).toEqual([])
 })
 
 const stale = {
@@ -386,6 +427,35 @@ for (const [why, over] of [
     expect(fake.logs).toEqual([])
   })
 }
+
+test('an unknown product refreshes 30 s later where a rule allows it, once for a burst', async ($, on) => {
+  const x = '33333333-0000-4000-8000-000000000000'
+  const y = '44444444-0000-4000-8000-000000000000'
+  const fake = host(on, { [`${S}\\status.json`]: statusFile('2026-10-07T07:55:00Z') }, { verdict: 'allow' })
+  await $.session.start({ cwd: 'C:\\work', surface: 'terminal', isInteractive: true })
+  await fake.clock.settle()
+  expect(fake.sql).toEqual([]) // fresh at start
+  await $.tool.call({ tool: 'mcp__claude_ai_ClimatePoint__climatepoint_get_report', product_id: x } as never)
+  await $.tool.call({ tool: 'mcp__claude_ai_ClimatePoint__climatepoint_get_report', product_id: y } as never)
+  await fake.clock.settle()
+  expect(fake.sql).toEqual([])
+  await fake.clock.advance(30_000)
+  await fake.clock.settle()
+  expect(fake.sql).toEqual([statusQuery({ products: [x, y], companies: [] })])
+  expect(fake.logs).toEqual([])
+})
+
+test('an unreadable status.json is never overwritten, and the pane says so', async ($, on) => {
+  const fake = host(on, { [`${S}\\status.json`]: '{"checkedAt":', [`${S}\\sessions\\other.json`]: stale[`${S}\\sessions\\other.json`] })
+  await $.session.start({ cwd: 'C:\\work', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'lca' })
+  await fake.clock.settle()
+  expect(fake.sql).toEqual([])
+  expect(fake.file(`${S}\\status.json`)).toBe('{"checkedAt":')
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: 'status.json is unreadable: fix or delete it to refresh.' })).toBeDefined()
+  await ui.unmount()
+})
 
 test('a fresh status is not re-queried at start, even where a rule allows it', async ($, on) => {
   const fake = host(on, { ...stale, [`${S}\\status.json`]: statusFile('2026-10-07T07:55:00Z') }, { verdict: 'allow' })
@@ -426,8 +496,9 @@ test('lca_context returns this session\'s companies and pins a named one', async
   const body = JSON.parse(String(named.result)) as { companies: { id: string; slug: string; briefPath: string; briefExists: boolean; status: string }[] }
   expect(body.companies).toEqual([expect.objectContaining({ id: ACME, slug: 'acme-motors', status: 'active', briefPath: `${S}\\acme-motors\\brief.md`, briefExists: false })])
   expect(JSON.parse(fake.file(`${S}\\sessions\\self.json`)!).companies[ACME]).toBeDefined()
+  await $.tool.call({ tool: 'mcp__claude_ai_ClimatePoint__climatepoint_followup_guide', product_id: ADP } as never)
   await fake.clock.settle()
-  expect(fake.nudges()).toBe(0) // pinned by /lca-save: no notice
+  expect(fake.nudges()).toBe(0) // pinned by /lca-save: no notice, the main loop's first call on it included
 
   const unknown = await $.tool.call({ tool: 'mcp__lca-projects__lca_context', company: 'Nobody <b>' } as never)
   expect(unknown.deny).toBe('Unknown company "Nobody b". Known: Acme Motors.')

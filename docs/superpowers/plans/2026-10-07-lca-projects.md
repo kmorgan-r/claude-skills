@@ -54,6 +54,8 @@ So each implementation step **copies** the verified file and checks it is byte-i
 
 ### Task 1: The `lca-projects` mod
 
+> Task review amended the code below after it was copied, in the commit `fix(lca-projects): follow the session across /clear; keep slugs; fence the main-loop nudge`: `register.tsx`, `core.ts` and the test file differ from these blocks, and that commit is authoritative.
+
 **Files:**
 - Create: `lca-projects/.claude-plugin/plugin.json`
 - Create: `lca-projects/tsconfig.json`

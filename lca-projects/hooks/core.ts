@@ -183,10 +183,11 @@ export const kebab = (name: string) =>
     .replace(/^-+|-+$/g, '') || 'company'
 
 // A company keeps the slug it was first given (its brief folder never moves, a rename included);
-// a newcomer whose name collides gets -<first 6 chars of its id>.
+// a newcomer whose name collides gets -<first 6 chars of its id>. A company missing from one answer
+// stays as it was, so it keeps its slug when it comes back.
 export function mergeStatus(prev: Status | null, fresh: Fresh, now: string): Status {
   const taken = new Set(Object.values(prev?.companies ?? {}).map(c => c.slug))
-  const companies: Status['companies'] = {}
+  const companies: Status['companies'] = { ...prev?.companies }
   for (const [id, c] of Object.entries(fresh.companies)) {
     let slug = prev?.companies[id]?.slug
     if (!slug) {
@@ -203,7 +204,8 @@ export function mergeStatus(prev: Status | null, fresh: Fresh, now: string): Sta
 // no markup, quotes, cmd/wt metacharacters or control characters, at most 80 characters.
 export const sanitize = (s: string) =>
   s
-    .replace(/[<>"'`;%^&|\u0000-\u001f\u007f]/g, '')
+    .replace(/\p{Cc}/gu, ' ')
+    .replace(/[<>"'`;%^&|]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 80)
@@ -331,10 +333,12 @@ export function resolveCompany(q: string, status: Status | null): string | undef
   return Object.entries(status?.companies ?? {}).find(([, c]) => c.slug === k || c.name.toLowerCase() === k)?.[0]
 }
 
-// The brief's launch_cwd frontmatter field, when set.
+// The brief's launch_cwd frontmatter field, when set. The model writes the brief, and wt reads `;`
+// as its command separator: a value holding one, or a quote, is ignored.
 export function launchCwd(brief: string): string | undefined {
   const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(brief)?.[1]
-  return front ? /^launch_cwd:\s*(.+?)\s*$/m.exec(front)?.[1] : undefined
+  const v = front ? /^launch_cwd:\s*(.+?)\s*$/m.exec(front)?.[1] : undefined
+  return v && !/[;"]/.test(v) ? v : undefined
 }
 
 export const ago = (ms: number) =>
