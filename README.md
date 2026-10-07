@@ -20,6 +20,7 @@ follows at runtime) plus any bundled scripts, references, and evals.
 | [`orchestrate`](./orchestrate) | One session coordinates N peer Claude Code sessions on a repo, each a real Windows Terminal tab in its own git worktree that the operator can read and type into. The orchestrator merges only under an explicit grant, verifies CI against head SHAs, reads review bodies, relays what moved, and surfaces every decision that belongs to the human. **Windows-only** (`wt.exe`). |
 | [`lca-projects`](./lca-projects) | A Claude Code **mod**, not a skill: notices when a session works on a ClimatePoint product, lists the Active client companies those sessions touched with live follow-up state (a band under the prompt and an `/lca` pane), nudges each session once to keep a per-company brief, and opens a new Windows Terminal tab seeded with that brief. **Windows-only** (`wt.exe`). |
 | [`lca-save`](./lca-save) | Writes or updates an LCA client project's brief from the current conversation, at the path the `lca-projects` mod's `lca_context` tool gives. |
+| [`outlook-draft`](./outlook-draft) | Turns the current conversation into an Outlook draft (a new email, or a reply / reply-all inside a thread, with attachments, your signature and writing voice) through Microsoft Graph and your own Entra app. Drafts only: the app is never granted `Mail.Send`, so it cannot send. |
 
 ## Install
 
@@ -306,3 +307,13 @@ A mod, loaded from the folders `CLAUDE_CODE_PLUGIN_DIRS` lists (`~/.claude/setti
 
 Junction into `~/.claude/skills/lca-save`. Needs the `lca-projects` mod loaded: it calls
 `lca_context` for the company and the brief's path.
+
+### outlook-draft
+- **Needs** a Microsoft 365 work account, an Entra app registration in your tenant
+  (tenant admin consent for `Mail.ReadWrite` and `People.Read`; the skill's Setup
+  section walks through it), and `python -m pip install msal msal-extensions`.
+- **Drafts only, by construction:** the app holds no `Mail.Send`, and the script has
+  no delete or move command.
+- **Nothing personal in the repo:** config, the DPAPI-encrypted token cache, your
+  signature and voice notes live in `~/.claude/outlook-draft/`.
+- **Tests:** `python -m pytest outlook-draft/tests -q` (offline; `msal` not required).
