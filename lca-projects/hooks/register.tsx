@@ -306,7 +306,7 @@ export const register: Register = on => {
   }).catch(() => ({ deny: 'lca_context timed out' }))
 
   on('command.run', { command: 'lca' }, async $ => {
-    await $.ui.open({ id: PANE, title: 'LCA Projects' })
+    await $.ui.open({ id: PANE, title: 'LCA Projects', focus: true }) // keys go straight to the picker
     void recompute($).then(() => refresh($, 'pane')).catch(err => log($, err))
     return { text: 'LCA Projects pane opened.' }
   })
@@ -342,7 +342,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" width={e.props.bodyColumns}>
         {Select && v.projects.length > 0 && (
-          <Select key="lca-launch" label="Start session: " options={v.projects.map(p => ({ value: p.id, label: p.name }))} onSelect={() => {}} />
+          <Select key="lca-launch" autoFocus label="Start session: " options={v.projects.map(p => ({ value: p.id, label: p.name }))} onSelect={() => {}} />
         )}
         {v.note && <Text color={COLOR.flag}>{v.note}</Text>}
         {paneRows(v.projects, v.checkedAt, now).map((r, i) => (
