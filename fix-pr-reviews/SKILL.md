@@ -129,6 +129,14 @@ If no review from `$REVIEW_BOT` is found, check other common bot logins (`claude
 
 The review typically contains structured sections. Extract items from these patterns:
 
+**This repo's reviewer (`.github/workflows/claude-code-review.yml`):**
+```
+## Critical
+## High
+## Medium
+```
+Each section lists findings as `path:line`, a one-line defect and a failure scenario. Empty sections are omitted.
+
 **Critical Issues Pattern:**
 ```
 ## 🔴 Critical Issues
@@ -162,11 +170,13 @@ Using the TodoWrite tool, create a prioritized list of items to address.
 **Default scope (what gets addressed):**
 1. **Critical/Blockers** - Must fix before merge
 2. **High Priority** - Should fix before merge
-3. **Bug fixes** - Any identified bugs regardless of priority section
-4. **Recommended tests** - Test coverage items mentioned in the review
+3. **Bug fixes** - Bugs the review lists outside any severity section (older review formats only)
+4. **Recommended tests** - Test items the review lists outside any severity section (older review formats only)
+
+**The section decides, not the wording.** An item under a Medium, Low, Suggestions or Nitpicks heading is skipped even when it describes a bug, a race, a null dereference or a missing test. This repo's reviewer gives every finding a failure scenario, Medium ones included, so every Medium reads like a bug. Picking them up by wording makes each round a Medium-fixing round, and since every push re-runs the review (which finds new Mediums each time), the loop never converges. Only `--all` brings Medium items in.
 
 **Skipped by default:**
-- Medium priority / Suggestions (nice-to-have improvements)
+- Medium priority / Suggestions (nice-to-have improvements), including bugs and test gaps listed there
 - Low priority / Nitpicks (minor optional changes)
 - Documentation-only suggestions
 - Code style preferences
@@ -962,9 +972,11 @@ Rather than relying on fragile grep patterns, Claude should **parse the review b
 2. **Identify structured sections** (## headings with priority indicators)
 3. **Count issues per category** based on section headers and content:
    - Critical: Sections with "Critical", "Blocker", "MUST FIX"
-   - High: Sections with "High Priority", "Should Fix"
-   - Bugs: Items mentioning "bug", "race condition", "memory leak", etc.
+   - High: Sections headed "High" (this repo's reviewer), "High Priority", "Should Fix"
+   - Bugs: Items mentioning "bug", "race condition", "memory leak", etc., **only outside any severity section**. Never count an item under a Medium, Low, Suggestions or Nitpicks heading, however it is worded.
 4. **Validate the review is non-empty** before analysis
+
+A review whose only findings are Medium has an urgent count of 0, so the loop exits with success. Don't start another round for it.
 
 This approach is more reliable than regex matching because:
 - It handles variations in review formatting
@@ -1003,7 +1015,11 @@ else
   # are the PRIMARY and SAFER method for analyzing review content. This shell fallback
   # exists only for edge cases where LLM parsing is unavailable.
   # Use sed for clearer, more auditable quote removal
-  SAFE_BODY=$(printf '%s' "$REVIEW_BODY" | tr -d '`$(){}[];<>|&\\*?~!#' | sed "s/['\"]//g")
+  # '#' is NOT stripped: every heading check below matches "^## ", and SAFE_BODY is
+  # only ever read through a quoted printf '%s' pipe, where '#' starts no comment.
+  # Stripping it made HAS_STRUCTURE 0 on every review, so this fallback always
+  # returned -1 (hard stop) and could never report a count.
+  SAFE_BODY=$(printf '%s' "$REVIEW_BODY" | tr -d '`$(){}[];<>|&\\*?~!' | sed "s/['\"]//g")
 
   # Trim whitespace and check for meaningful content
   TRIMMED=$(printf '%s' "$SAFE_BODY" | tr -d '[:space:]')
@@ -1026,7 +1042,9 @@ else
       # while grep -c still outputs the correct count (0 for no matches).
       # SECURITY NOTE: Patterns are hardcoded, not user-controlled.
       CRITICAL_COUNT=$(printf '%s' "$SAFE_BODY" | { grep -ciE "^## .*(Critical|Blocker|MUST FIX)" || true; })
-      HIGH_COUNT=$(printf '%s' "$SAFE_BODY" | { grep -ciE "^## .*(High Priority)" || true; })
+      # Matches "## High" (this repo's reviewer), "## High Priority" and "## High-Priority",
+      # but not "## Highlights". The old "(High Priority)" pattern missed plain "## High".
+      HIGH_COUNT=$(printf '%s' "$SAFE_BODY" | { grep -ciE "^## .*High([^a-z]|$)" || true; })
       BUG_COUNT=$(printf '%s' "$SAFE_BODY" | { grep -ciE "^### .*(Bug|Potential Bug)" || true; })
       URGENT_TOTAL=$((CRITICAL_COUNT + HIGH_COUNT + BUG_COUNT))
     fi
@@ -1324,6 +1342,7 @@ The review may specify file locations in several formats:
 | Critical Issues | Highest | `[CRITICAL]` | Yes |
 | Blockers | Highest | `[CRITICAL]` | Yes |
 | MUST FIX BEFORE MERGE | Highest | `[CRITICAL]` | Yes |
+| High | High | `[HIGH]` | Yes |
 | High Priority | High | `[HIGH]` | Yes |
 | Should Fix | High | `[HIGH]` | Yes |
 | Potential Bugs | Bug | `[BUG]` | Yes |
@@ -1331,6 +1350,7 @@ The review may specify file locations in several formats:
 | Test Coverage | Test | `[TEST]` | Yes |
 | Missing Tests | Test | `[TEST]` | Yes |
 | Recommended Tests | Test | `[TEST]` | Yes |
+| Medium | Medium | `[MEDIUM]` | **No** |
 | Medium Priority | Medium | `[MEDIUM]` | **No** |
 | Suggestions | Medium | `[MEDIUM]` | **No** |
 | Nice to Have | Low | `[LOW]` | **No** |
@@ -1338,7 +1358,7 @@ The review may specify file locations in several formats:
 
 ### Bug Detection Patterns
 
-Also extract items that mention bugs, even if not in a "Critical" section:
+For a review written without severity sections, also extract items that mention bugs. Never apply these patterns to an item under a Medium, Low, Suggestions or Nitpicks heading (see "The section decides, not the wording" in Step 4):
 
 | Pattern | Example |
 |---------|---------|
@@ -1351,7 +1371,7 @@ Also extract items that mention bugs, even if not in a "Critical" section:
 
 ### Test Detection Patterns
 
-Extract test recommendations from these patterns:
+Extract test recommendations from these patterns, except under a Medium, Low, Suggestions or Nitpicks heading:
 
 | Pattern | Example |
 |---------|---------|
@@ -1367,7 +1387,7 @@ Extract test recommendations from these patterns:
 Do not create todos for:
 - Items already marked with `[x]` (completed)
 - Items under "Positive Observations" or "Strengths" sections
-- Medium priority / Suggestions (use `--all` to include)
+- Medium priority / Suggestions, including bugs and test gaps listed there (use `--all` to include)
 - Low priority / Nitpicks (use `--all` to include)
 - Documentation-only suggestions (use `--include-docs` to include)
 - Code style preferences without functional impact
