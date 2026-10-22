@@ -1,0 +1,8 @@
+# Run artifacts. The lead list holds named business contacts, so the
+# exports stay out of git.
+reports/
+data/
+
+__pycache__/
+*.pyc
+.pytest_cache/
