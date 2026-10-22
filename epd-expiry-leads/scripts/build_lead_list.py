@@ -265,16 +265,6 @@ def _person(email=None, name=None, org=None, source=None):
     return {"email": email or "", "name": name or "", "org": org or "", "source": source or ""}
 
 
-def _split_person_line(line):
-    """'Thomas P. Gloria, PhD (Chair), Industrial Ecology Consultants'."""
-    em = EMAIL_RE.search(line)
-    head = line[:em.start()].strip(" ,:-") if em else line
-    parts = [p.strip() for p in head.split(",") if p.strip()]
-    name = parts[0] if parts else ""
-    org = parts[-1] if len(parts) > 1 else ""
-    return (em.group(0) if em else ""), name, org
-
-
 def _lines_after(text, position, limit=8):
     """The next few non-empty lines after a match position.
 
@@ -433,12 +423,16 @@ def parse_pdf(pdf_bytes):
             break
     out["verifier"] = verifier
 
+    # The PCR reviewer field names a panel, not one person, so it is kept
+    # as a block of text rather than split into a name and an employer.
     reviewer = None
-    m = re.search(r"PCR review was conducted by[ \t]*:[ \t]*\n?[ \t]*([^\n]{2,160})", text, re.I)
+    m = re.search(r"PCR review was conducted by[ \t]*:", text, re.I)
     if m:
-        email, name, org = _split_person_line(" ".join(m.group(1).split()))
-        if email:
-            reviewer = _person(email, name, org, "PCR review")
+        lines = _lines_after(text, m.end(), limit=4)
+        found = EMAIL_RE.search(" ".join(lines))
+        if found:
+            who = " ".join(lines)[:found.start()].strip(" ,")
+            reviewer = _person(found.group(0), who, None, "PCR review")
     out["pcr_reviewer"] = reviewer
 
     # --- the manufacturer's own contact --------------------------------
