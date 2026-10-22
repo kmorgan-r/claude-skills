@@ -15,6 +15,7 @@ follows at runtime) plus any bundled scripts, references, and evals.
 | [`ship-fleet`](./ship-fleet) | Runs up to 10 `/ship` pipelines in parallel: one headless Claude Code instance per GitHub issue, each in its own git worktree, coordinated by a fleet manifest and a polling monitor with crash recovery. Human gates (merge, DB acks) stay human. **Windows-only** (PowerShell). |
 | [`reviewing-plans`](./reviewing-plans) | Reviews a written implementation plan before execution: dispatches 2–5 domain-specific reviewer agents in parallel, consolidates findings, and applies approved fixes to the plan file. |
 | [`esg-longitudinal`](./esg-longitudinal) | Tracks a company's ESG / CSR / sustainability commitments over time using **free** public data: finds sustainability/annual report PDFs, extracts targets and metrics into a tidy time-series with source + period + verbatim quote per value, saves a timestamped snapshot, and diffs against earlier snapshots to surface what changed. Re-runnable next year; scales from one company toward tens of thousands. |
+| [`epd-expiry-leads`](./epd-expiry-leads) | Finds manufacturers whose Environmental Product Declarations are about to expire and turns them into a ranked sales list. Reads the NSF listings API and the EPD PDFs, applies the Buy Clean rubric per manufacturer, and exports a workbook with the first-party contact each PDF names, plus a handoff file for `find-cold-leads`. |
 | [`ollama-workers`](./ollama-workers) | Lets an Anthropic-model orchestrator hand short-turn implementer tasks to an Ollama cloud model (GLM, Kimi) running in a separate headless Claude Code process. `/ollama-workers on\|off\|status` is the whole interface; reviewers stay on Anthropic. **Windows-only** (PowerShell). |
 | [`advisor-bridge`](./advisor-bridge) | Lets a Claude Code session running on a non-Anthropic backend (`ollama launch claude` — GLM, Kimi) reach an Anthropic model for advice, by rendering the session's own transcript into a scrubbed `claude -p` child process. The built-in `advisor` tool is disabled there and would be GLM advising GLM anyway. **Windows-only** (PowerShell). |
 | [`orchestrate`](./orchestrate) | One session coordinates N peer Claude Code sessions on a repo, each a real Windows Terminal tab in its own git worktree that the operator can read and type into. The orchestrator merges only under an explicit grant, verifies CI against head SHAs, reads review bodies, relays what moved, and surfaces every decision that belongs to the human. **Windows-only** (`wt.exe`). |
@@ -151,6 +152,35 @@ cp -r find-cold-leads ~/.claude/skills/
   load-bearing.
 - Invoke by asking to track a company's ESG/CSR/sustainability targets over time
   (e.g. "pull Philips' circular-economy targets over the last 10 years, with sources").
+### epd-expiry-leads
+- **A licensing boundary, not a data gap.** NSF's listings API and its public PDF
+  storage are the only EPD registries readable without a licence, so the list is
+  complete for what NSF lists and silent on what it does not. Flat glass, rebar and
+  structural steel EPDs live in EC3 (free tier forbids commercial use), EPD
+  International (terms forbid data products), and UL/ASTM/SCS (block scripted
+  access). See [`references/sources.md`](./epd-expiry-leads/references/sources.md)
+  before promising coverage of them.
+- **The EPD PDF is the lead source.** The listing gives a name and an expiry date;
+  the PDF gives the declaration holder, who prepared it, the verifier, the PCR
+  reviewer and a first-party contact. The preparer decides the pitch: an in-house
+  preparer is an LCA team to sell to, a consultancy or a supplier who also sells
+  the manufacturer admixtures is not.
+- **Every domain in the list has a recorded source.** NSF leaves `companyURL` null
+  for many registrants, so the domain often comes from the PDF or from
+  `references/company-domains.csv`, which records the URL each was verified
+  against. The `domain_source` column says which.
+- **Rubric is per manufacturer, not per EPD.** +3 California Buy Clean material
+  with a facility-specific EPD, +2 another state's Buy Clean programme, +2 for
+  five or more EPDs expiring, +2 prepared in-house, -2 for a known consultant or
+  a supplier who wrote it, industry-wide EPDs excluded. See
+  [`references/ranking-rubric.md`](./epd-expiry-leads/references/ranking-rubric.md).
+- **Needs** Python with `requests`-free stdlib HTTP, `PyMuPDF` (`fitz`) and
+  `openpyxl`. No keys, no credentials.
+- **Tests:** `python epd-expiry-leads/tests/test_build_lead_list.py` (offline,
+  deterministic). The date parser has its own check because reading the US
+  month-first certification period as day-first silently selects the wrong rows.
+- Invoke by asking for an EPD expiry lead list, or for manufacturers whose
+  EPDs are about to expire.
 ### ollama-workers
 - **Why a child process, not a subagent.** A Claude Code process serves exactly one
   provider: `ollama launch claude` exports `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`
