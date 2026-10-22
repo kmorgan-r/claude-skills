@@ -65,8 +65,7 @@ jobs:
 
             IMPORTANT: Only review files shown in the PR diff. Do NOT review unrelated files in the repository.
             Use CLAUDE.md for project conventions. Do NOT run npm, npx, or any build/test commands. Static review only.
-        show_full_output: true
-
+          show_full_output: true
           claude_args: '--allowed-tools "Write,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*)"'
 
       - name: Post review comment
