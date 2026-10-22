@@ -484,6 +484,7 @@ def fetch_and_parse(record, cache_dir, refresh=False):
         parsed = parse_pdf(get_bytes(record["pdf_url"]))
     except Exception as exc:  # one dead PDF must not sink the run
         parsed = {"error": str(exc)[:120], "emails": []}
+    parsed["pdf_ok"] = "error" not in parsed
     os.makedirs(cache_dir, exist_ok=True)
     with open(cached, "w", encoding="utf-8") as fh:
         json.dump(parsed, fh, indent=1)
@@ -700,11 +701,12 @@ def score_company(records):
 
 
 # ------------------------------------------------------------------ output
-CSV_COLUMNS = ["company", "score", "us_based", "epds_expiring", "earliest_expiry",
-               "latest_expiry", "days_to_expiry", "contact_by", "timing", "materials",
-               "ca_buy_clean", "buy_clean_states", "scope", "developer", "domain",
-               "domain_source", "website", "phone", "address", "contacts",
-               "lca_preparer", "lca_preparer_email", "epd_numbers", "reasons", "source_url"]
+CSV_COLUMNS = ["company", "score", "us_based", "epds_expiring", "pdfs_missing",
+               "earliest_expiry", "latest_expiry", "days_to_expiry", "contact_by",
+               "timing", "materials", "ca_buy_clean", "buy_clean_states", "scope",
+               "developer", "domain", "domain_source", "website", "phone", "address",
+               "contacts", "lca_preparer", "lca_preparer_email", "epd_numbers",
+               "reasons", "source_url"]
 
 
 def days_until(date_text, today=None):
@@ -813,11 +815,16 @@ def build(start, end, cache_dir, refresh, with_pdfs, overlay):
         preparer = preparers[0] if preparers else {}
         earliest = min(r["expires"] for r in records)
         days = days_until(earliest)
+        missing = [r["epd_number"] for r in records if r.get("pdf_ok") is False]
+        if missing:
+            reasons.append("PDF unavailable for " + ", ".join(missing)
+                           + " - the listing is there, the document is not")
         rows.append({
             "company": company,
             "score": total,
             "us_based": "yes" if is_us_address(info.get("address")) else "no",
             "epds_expiring": len(records),
+            "pdfs_missing": len(missing),
             "earliest_expiry": earliest,
             "latest_expiry": max(r["expires"] for r in records),
             "days_to_expiry": days if days is not None else "",
@@ -897,7 +904,7 @@ def write_xlsx(rows, details, watch, path):
               "lca_preparer_email": 28, "epd_numbers": 40, "reasons": 90,
               "source_url": 40, "earliest_expiry": 15, "latest_expiry": 15,
               "contact_by": 13, "epds_expiring": 13, "days_to_expiry": 13,
-              "timing": 20}
+              "timing": 20, "pdfs_missing": 12}
     for index, name in enumerate(CSV_COLUMNS, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = widths.get(name, 14)
     for row in sheet.iter_rows(min_row=2):
@@ -911,7 +918,7 @@ def write_xlsx(rows, details, watch, path):
                    "material", "issued", "expires", "scope", "scope_evidence",
                    "developer", "declaration_holder", "lca_preparer", "lca_preparer_email",
                    "verifier", "pcr_reviewer", "company_contact", "lca_software",
-                   "emails", "pdf_url"]
+                   "pdf_ok", "emails", "pdf_url"]
     detail.append(detail_cols)
     for cell in detail[1]:
         cell.font = Font(bold=True, color="FFFFFF")
@@ -931,6 +938,7 @@ def write_xlsx(rows, details, watch, path):
             prep.get("name", ""), prep.get("email", "") or "",
             ver.get("email", "") or "", rev.get("email", "") or "",
             con.get("email", "") or "", record.get("lca_software", "") or "",
+            "yes" if record.get("pdf_ok", True) else "no",
             ", ".join(record.get("emails") or []), record.get("pdf_url", ""),
         ])
     for index, name in enumerate(detail_cols, start=1):

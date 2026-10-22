@@ -119,6 +119,14 @@ def test_shift_months():
     assert b.shift_months("2027-03-31", 1) == "2027-02-28"
 
 
+def test_timing_for():
+    assert b.timing_for(-5) == "expired"
+    assert b.timing_for(100) == "overdue - contact now"
+    assert b.timing_for(300) == "contact now"
+    assert b.timing_for(400) == "later"
+    assert b.timing_for(None) == "unknown"
+
+
 def test_us_address():
     assert b.is_us_address("1110 Harding Street Janesville, Wisconsin, 53545 United States")
     assert not b.is_us_address("SE Zone main building. Km 114 Kattemeya, Ain El Sokhna Egypt")
