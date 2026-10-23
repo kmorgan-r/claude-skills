@@ -135,6 +135,10 @@ THIRD_PARTY_DOMAINS = {
     "wapsustainability.com", "intertek.com", "sphera.com", "quantis.com",
     "truenorthcollective.net", "ramboll.com", "sustainablesolutionscorporation.com",
     "ul.com", "ulprospector.com", "buildingtransparency.org",
+    # Registry and LCA software domains: they appear in a document's
+    # own field, and they are never the manufacturer's site.
+    "epdhub.com", "oneclicklca.com", "epdportal.org",
+    "environdec.com", "sphera.com",
 }
 
 # Known EPD consultancies. The rubric penalises an EPD developed by one of
@@ -197,6 +201,33 @@ def empty_search():
             "standPrgGrp": "EPD", "standPrgGrpName": None, "company": None,
             "companyCode": None, "location": None, "searchParameters": [],
             "exclusiveSearchParameters": [], "region": None, "country": None}
+
+
+def safe_cache_name(name):
+    """A remote identifier turned into a filename, safely.
+
+    The EPD number comes from a registry, so it is remote input, and it
+    becomes a filename. Anything outside a plain name is replaced, and a
+    name that could still point somewhere other than the cache is
+    refused rather than sanitised into something that looks fine.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", (name or "").strip())
+    cleaned = cleaned.strip(".")
+    if not cleaned or cleaned in (".", ".."):
+        return None
+    return cleaned
+
+
+def cell_safe(value):
+    """Neutralise a spreadsheet formula in remote content.
+
+    A company name or product title that starts with =, +, - or @ is run
+    as a formula when the workbook is opened, so it is written with a
+    leading quote instead.
+    """
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@"):
+        return "'" + value
+    return value
 
 
 def domain_of(value):
@@ -492,7 +523,10 @@ def parse_pdf(pdf_bytes):
 
 # --------------------------------------------------------------- enrichment
 def fetch_and_parse(record, cache_dir, refresh=False):
-    number = record["epd_number"]
+    number = safe_cache_name(record["epd_number"])
+    if not number:
+        record["pdf_ok"] = False
+        return record
     cached = os.path.join(cache_dir, number + ".json")
     if os.path.exists(cached) and not refresh:
         with open(cached, encoding="utf-8") as fh:
@@ -586,7 +620,15 @@ def resolve_domain(company, info, records, overlay):
     # so the domain is matched on the document's own name.
     for record in records:
         website = domain_of(record.get("website"))
-        if website and not is_third_party(website):
+        if not website or is_third_party(website) or is_third_party_author(website):
+            continue
+        # The website comes out of a remote document, so it is not
+        # evidence of anything until it agrees with the manufacturer's
+        # own name. A document that names someone else's site must not
+        # become the outreach target.
+        base = website.split(".")[0]
+        doc_tokens = name_tokens(record.get("company") or "")
+        if base in doc_tokens or any(t in base for t in doc_tokens):
             return website, "registry document"
     return None, None
 
@@ -790,6 +832,9 @@ def epdhub_records(start, end, cache_dir, refresh=False, with_pdfs=True):
     os.makedirs(cache, exist_ok=True)
 
     def parse(url, number):
+        number = safe_cache_name(number)
+        if not number:
+            return {"error": "unusable EPD number", "expires": ""}
         cached = os.path.join(cache, number + ".json")
         if os.path.exists(cached) and not refresh:
             with open(cached, encoding="utf-8") as fh:
@@ -993,7 +1038,11 @@ def build(start, end, cache_dir, refresh, with_pdfs, overlay):
             "phone": info.get("phone") or "",
             "address": address,
             "contacts": ", ".join(contacts),
-            "lca_preparer": preparer.get("name", ""),
+            # The organisation matters as much as the person: an EPD
+            # written by a consultancy is a different lead from one
+            # written in-house, and the consultancy is what the score
+            # uses.
+            "lca_preparer": preparer.get("name") or preparer.get("org", ""),
             "lca_preparer_email": preparer.get("email", "") or "",
             "epd_numbers": ", ".join(sorted({r["epd_number"] for r in records})),
             "reasons": " | ".join(reasons),
@@ -1010,7 +1059,7 @@ def write_csv(rows, path):
         writer = csv.DictWriter(fh, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         for row in rows:
-            writer.writerow({k: row.get(k, "") for k in CSV_COLUMNS})
+            writer.writerow({k: cell_safe(row.get(k, "")) for k in CSV_COLUMNS})
     return path
 
 
@@ -1030,7 +1079,7 @@ def write_handoff(rows, path, limit=50, us_only=True):
         writer.writerow(["company", "domain", "score", "timing", "earliest_expiry",
                          "contacts", "materials", "reasons"])
         for row in picked:
-            writer.writerow([row.get(k, "") for k in
+            writer.writerow([cell_safe(row.get(k, "")) for k in
                              ("company", "domain", "score", "timing", "earliest_expiry",
                               "contacts", "materials", "reasons")])
     return path, len(picked)
@@ -1049,7 +1098,7 @@ def write_xlsx(rows, details, watch, path):
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="404040")
     for row in rows:
-        sheet.append([row.get(k, "") for k in CSV_COLUMNS])
+        sheet.append([cell_safe(row.get(k, "")) for k in CSV_COLUMNS])
     widths = {"company": 36, "score": 7, "us_based": 9, "materials": 16,
               "ca_buy_clean": 14, "buy_clean_states": 18, "scope": 16, "developer": 18,
               "domain": 22, "domain_source": 20, "website": 26, "phone": 15,
@@ -1082,13 +1131,13 @@ def write_xlsx(rows, details, watch, path):
         rev = record.get("pcr_reviewer") or {}
         con = record.get("company_contact") or {}
         detail.append([
-            record.get("epd_number", ""), record.get("company", ""),
+            cell_safe(record.get("epd_number", "")), cell_safe(record.get("company", "")),
             record.get("domain", ""), record.get("product", ""),
             record.get("product_category", ""), record.get("material", ""),
             record.get("issued", ""), record.get("expires", ""),
             record.get("scope", ""), record.get("scope_evidence", ""),
             record.get("developer", ""), record.get("declaration_holder", "") or "",
-            prep.get("name", ""), prep.get("email", "") or "",
+            prep.get("name") or prep.get("org", ""), prep.get("email", "") or "",
             ver.get("email", "") or "", rev.get("email", "") or "",
             con.get("email", "") or "", record.get("lca_software", "") or "",
             "yes" if record.get("pdf_ok", True) else "no",
@@ -1109,7 +1158,7 @@ def write_xlsx(rows, details, watch, path):
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="404040")
     for record in watch:
-        ca.append([record.get(k, "") for k in ca_cols])
+        ca.append([cell_safe(record.get(k, "")) for k in ca_cols])
     for index, name in enumerate(ca_cols, start=1):
         ca.column_dimensions[get_column_letter(index)].width = 40 if name == "product_category" else 18
     ca.freeze_panes = "A2"
