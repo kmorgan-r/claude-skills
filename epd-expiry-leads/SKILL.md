@@ -137,7 +137,9 @@ it travels with the domain and Apollo adds named people on top.
 
 Then run the `find-cold-leads` skill with those domains and the theme
 "environmental product declaration renewal" or similar. It needs the
-Apollo MCP, which is not connected by default.
+Apollo MCP, which is not connected by default. See
+`references/apollo-handoff.md` for how to get Apollo working and for the
+two pipeline settings that matter here.
 
 Do not skip the `us_based` column. Ecobat's registrant is in Egypt and
 Teknion's in Canada, and they are in the list because NSF lists them, not
