@@ -802,7 +802,7 @@ Then the loop continues as usual: Loop Steps 3-6, then the next round. If urgent
 
 **IMPORTANT: Claude MUST track modified files during the fix phase.**
 
-**Implementation:** At the START of fix phase, initialize an empty list, and record the untracked files that already exist: `UNTRACKED_BEFORE=$(git ls-files --others --exclude-standard)`. Each time you use the Edit or Write tool, append the file path to the list. A new file you create, such as a new test file, goes on the list too, and so does a file a command writes for the fix (such as `type-baseline.json` at the repo root, from `npm run baseline:types`):
+**Implementation:** At the START of fix phase, initialize an empty list. Each time you use the Edit or Write tool, append the file path to the list. A new file you create, such as a new test file, goes on the list too, and so does a file a command writes for the fix (such as `type-baseline.json` at the repo root, from `npm run baseline:types`):
 
 ```
 ## Internal File Tracking (maintain during fix phase)
@@ -831,18 +831,21 @@ MODIFIED_FILES:
 After fixing all items in the current iteration:
 
 ```bash
-# MODIFIED_FILES is the list tracked during the fix phase (Edit AND Write).
-# Fallback only if no list was kept: changed tracked files plus the untracked
-# files that appeared during this fix phase. `git diff --name-only` never lists a
-# new file (e.g. a new test), so the untracked list is compared with
-# UNTRACKED_BEFORE (recorded at the start of the fix phase); files that were
-# already untracked before it are not part of the fix and are left out.
-# The loop's own state files are never committed, ignored or not.
+# Bash tool calls do NOT share shell variables, so set MODIFIED_FILES in THIS
+# call, from the tracked list above (Edit AND Write files, new test files and
+# type-baseline.json included), one path per line:
+#   MODIFIED_FILES=$'src/lib/parser.ts\nsrc/lib/__tests__/parser.test.ts'
+# Fallback only if no list was kept: changed TRACKED files only. The fallback
+# never stages an untracked file: it lists them, and a new file is committed only
+# when it is on the tracked list. (Sweeping in untracked files would commit
+# scratch notes, dumps or a non-ignored .env file.)
 if [ -z "$MODIFIED_FILES" ]; then
-  NEW_FILES=$(comm -13 <(printf '%s\n' "$UNTRACKED_BEFORE" | sort) \
-    <(git ls-files --others --exclude-standard | sort))
-  MODIFIED_FILES=$( { git diff --name-only; printf '%s\n' "$NEW_FILES"; } \
-    | grep -v -E '^\.claude-pr-fix-state' | grep -v '^$' | sort -u )
+  MODIFIED_FILES=$(git diff --name-only)
+  UNTRACKED=$(git ls-files --others --exclude-standard | grep -v -E '^\.claude-pr-fix-state')
+  if [ -n "$UNTRACKED" ]; then
+    echo "⚠️ Untracked files NOT staged (put them on the tracked list if they belong to the fix):"
+    printf '%s\n' "$UNTRACKED"
+  fi
 fi
 
 # Validate we have files to commit
@@ -896,7 +899,7 @@ printf 'fix: address PR review feedback (iteration %s)\n\n' "$ITERATION" > "$COM
 printf '%s' "$FIX_DESCRIPTIONS" | tr -d '`$(){}[];<>|&\\' | sed "s/['\"]//g" | head -c 500 >> "$COMMIT_MSG_FILE"
 # Trailer: the commit attribution lines this session's harness or the repo's
 # instructions give (a Co-Authored-By line naming the CURRENT model, often plus a
-# session line). Set COMMIT_TRAILER to them verbatim. Never copy a model name from
+# session line). Set COMMIT_TRAILER to them verbatim, in this same call. Never copy a model name from
 # an older commit or from this file. With no attribution given, use the generic line.
 COMMIT_TRAILER="${COMMIT_TRAILER:-Co-Authored-By: Claude <noreply@anthropic.com>}"
 printf '\n\n%s\n' "$COMMIT_TRAILER" >> "$COMMIT_MSG_FILE"
