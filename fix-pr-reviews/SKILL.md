@@ -66,7 +66,7 @@ The skill supports configuration via environment variables or command arguments:
 |--------|---------|-------------|
 | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `40` (recommended) | Context % at which auto-compaction triggers. **Required for loop mode.** |
 | `REVIEW_WORKFLOW` | `claude-code-review.yml` | GitHub Actions workflow that runs the review bot |
-| `REVIEW_BOT` | `github-actions` | Login the review bot posts under. A workflow step posting via `GITHUB_TOKEN` (`gh pr comment`) appears as `github-actions`; only an app posting directly appears under its own name (e.g. `claude`). |
+| `REVIEW_BOT` | `github-actions` | Login the review bot posts under. A workflow step posting via `GITHUB_TOKEN` (`gh pr comment`) posts as the GitHub Actions bot: `gh pr view --json` (GraphQL) reports it as `github-actions`, the REST API as `github-actions[bot]`. The fetch matches both forms, so either value works. Only an app posting directly appears under its own name (e.g. `claude`). The author check is what makes a comment the review: a body marker such as `<!-- claude-code-review -->` alone never does, because any commenter could paste it. |
 | `MAX_LOOP_ITERATIONS` | `5` | Maximum fix iterations **per session** (per-invocation cap; resets on each new `--loop`) |
 | `MAX_TOTAL_ROUNDS` | `6` | Maximum **total rounds across all sessions** on a PR (session-independent; only `--reset` clears it) |
 | `LOOP_WAIT_TIMEOUT` | `15` | Minutes to wait for GitHub Action completion (this repo's review run typically finishes in 3–4 min; the timeout is a safety ceiling, not the expected wait) |
@@ -116,8 +116,12 @@ if ! [[ "$REVIEW_BOT" =~ $REVIEW_BOT_RE ]]; then
   echo "❌ Invalid REVIEW_BOT login: $REVIEW_BOT"
   exit 1
 fi
+# Match the bot under both login forms: GraphQL (gh pr view --json) reports a bot
+# as `github-actions`, REST as `github-actions[bot]`. Strip any [bot] suffix, then
+# accept either. Matching only one form silently fetches no review at all.
+REVIEW_BOT_BASE="${REVIEW_BOT%\[bot\]}"
 gh pr view "$PR_NUMBER" --json comments --jq "
-  [.comments[] | select(.author.login == \"$REVIEW_BOT\")]
+  [.comments[] | select(.author.login == \"$REVIEW_BOT_BASE\" or .author.login == \"${REVIEW_BOT_BASE}[bot]\")]
   | sort_by(.createdAt)
   | last
   | {body: .body, createdAt: .createdAt, url: .url}
@@ -1081,9 +1085,10 @@ if ! [[ "$REVIEW_BOT" =~ $REVIEW_BOT_RE ]]; then
   echo "❌ Invalid REVIEW_BOT login: $REVIEW_BOT"
   exit 1
 fi
+REVIEW_BOT_BASE="${REVIEW_BOT%\[bot\]}"   # both login forms, as in Step 2
 gh pr view "$PR_NUMBER" --json comments --jq "
   [.comments[]
-   | select(.author.login == \"$REVIEW_BOT\")
+   | select(.author.login == \"$REVIEW_BOT_BASE\" or .author.login == \"${REVIEW_BOT_BASE}[bot]\")
    | select(.createdAt > \"$PUSH_TIME\")]
   | sort_by(.createdAt)
   | last
@@ -1150,7 +1155,7 @@ if [ -z "$REVIEW_BODY" ] || [ "$REVIEW_BODY" == "null" ] || [ "$REVIEW_BODY" == 
     # means OUR fetch filter is wrong (REVIEW_BOT login or PUSH_TIME filter) —
     # do NOT assume clean. Re-check the author filter before anything else.
     echo "⚠️ Workflow succeeded but no comment matched the fetch filter"
-    echo "   Check REVIEW_BOT (expected: github-actions) and the timestamp filter"
+    echo "   Check REVIEW_BOT (expected: github-actions; github-actions[bot] also matches) and the timestamp filter"
     URGENT_TOTAL=-1  # Signal unknown state - NOT clean
   elif [ "$WORKFLOW_STATUS" == "failure" ] || [ "$WORKFLOW_STATUS" == "cancelled" ]; then
     echo "❌ Workflow $WORKFLOW_STATUS - review may not have run (this includes the missing-verdict-artifact guard failing the run)"
