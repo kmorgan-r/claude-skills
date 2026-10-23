@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 
 import build_lead_list as b
+import caltrans_aml
 
 
 def test_parse_period_is_month_first():
@@ -93,12 +94,17 @@ def test_industry_wide_is_excluded():
 def test_california_bonus_needs_facility_scope():
     """+3 fires only for a facility-specific EPD on a CA material.
 
-    Insulation also draws +2 for Minnesota, which is a tier 2 material
-    there, so the totals include that.
+    Mineral wool board is the Buy Clean Act's insulation product, and it
+    also draws +2 for Minnesota, which is a tier 2 material there, so the
+    totals include that. Plain insulation is Minnesota only.
     """
     records = [{"scope": "product", "material": "insulation", "developer": "in_house"}]
     assert b.score_company(records)[0] == 4  # +2 Minnesota, +2 in-house
     records = [{"scope": "facility", "material": "insulation", "developer": "in_house"}]
+    assert b.score_company(records)[0] == 4  # no CA: not mineral wool board
+    records = [{"scope": "product", "material": "mineral wool", "developer": "in_house"}]
+    assert b.score_company(records)[0] == 4  # +2 Minnesota, +2 in-house
+    records = [{"scope": "facility", "material": "mineral wool", "developer": "in_house"}]
     assert b.score_company(records)[0] == 7  # +3 CA, +2 Minnesota, +2 in-house
 
 
@@ -130,6 +136,69 @@ def test_timing_for():
 def test_us_address():
     assert b.is_us_address("1110 Harding Street Janesville, Wisconsin, 53545 United States")
     assert not b.is_us_address("SE Zone main building. Km 114 Kattemeya, Ain El Sokhna Egypt")
+
+
+def test_insulation_is_not_automatically_california():
+    """The Buy Clean Act's insulation product is mineral wool board.
+
+    NSF's insulation categories are thermal, spray foam, continuous wall
+    and roof insulation, so scoring them as California Buy Clean would
+    pitch a roof-insulation renewal as a Buy Clean problem.
+    """
+    assert not b.MATERIALS["insulation"]["ca"]
+    assert b.MATERIALS["mineral wool"]["ca"]
+    assert b.CATEGORY_MATERIAL["roof insulation"] == "insulation"
+    assert b.CATEGORY_MATERIAL["mineral wool board"] == "mineral wool"
+    # The other states still cover insulation, so it keeps its +2.
+    assert "MN" in b.MATERIALS["insulation"]["states"]
+
+
+def test_author_is_own():
+    """EPD Hub names the author; only the manufacturer's own person counts.
+
+    "on behalf of" is how an outside preparer signs, and the name in the
+    author line is not the company, so WholeTrees' declaration is not
+    in-house.
+    """
+    assert b._author_is_own("Prabhu Megharaj", "LuxWall Inc.", "LuxWall Inc.")
+    assert not b._author_is_own("Travis Dahl, Dahl Management Inc.", "",
+                                "REGEN Fiber")
+    assert not b._author_is_own("Aurimas Bukauskas on behalf of WholeTrees.", "",
+                                "WholeTrees Structures")
+
+
+AML_HTML = """
+<table>
+<tr><td>Material Category: carbon steel rebar</td></tr>
+<tr><td>Nucor Steel, Incorporated - Auburn</td><td>1 Steel Road, Auburn AL</td>
+    <td>4790112345.101.1</td><td>1/1/2022 - 1/1/2027</td></tr>
+<tr><td>Nucor-Yamato Steel - Arkansas</td><td>1 Yato Road, Blytheville AR</td>
+    <td>4790112346.101.1</td><td>1/1/2022 - 1/1/2027</td></tr>
+<tr class="expiredclass"><td>Gerdau Long Mill</td><td>1 Mill Rd, Long Beach CA</td>
+    <td>4790112347.101.1</td><td>1/1/2020 - 1/1/2025</td></tr>
+</table>
+"""
+
+
+def test_caltrans_aml_rows():
+    """The AML rows, the company split and the live filter.
+
+    "Nucor-Yamato Steel" is a different company from "Nucor Steel", and
+    splitting on any hyphen would merge them and lose a lead.
+    """
+    rows = caltrans_aml.parse_aml(AML_HTML)
+    assert len(rows) == 3, rows
+    assert caltrans_aml.canonical_company("Nucor Steel, Incorporated - Auburn") == \
+        "Nucor Steel, Incorporated"
+    assert caltrans_aml.canonical_company("Nucor-Yamato Steel - Arkansas") == \
+        "Nucor-Yamato Steel"
+    assert caltrans_aml.parent_company("Gerdau Long Mill") == "Gerdau Long Mill"
+    # The expired row is not a renewal lead.
+    import datetime
+    live = caltrans_aml.live_rows(rows, datetime.date(2026, 1, 1),
+                                  datetime.date(2027, 12, 31))
+    assert len(live) == 2, live
+    assert live[0]["material"] == "rebar"
 
 
 def main():

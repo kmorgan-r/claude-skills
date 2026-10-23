@@ -15,8 +15,7 @@ your customer's bid are better than a routine renewal.
 
 ## Sources
 
-NSF is the only EPD registry that can be read programmatically without a
-licence. The JSON API behind <https://listings.nsf.org> is the source:
+NSF is the base. The JSON API behind <https://listings.nsf.org> gives:
 
 | What | Endpoint |
 |---|---|
@@ -30,7 +29,41 @@ Both endpoints take the same empty search body, which is in
 Do not use `info.nsf.org`. That host is unreachable from every network we
 tried, and the EPD PDFs it served now live in the blob storage above.
 
-Other registries are not scriptable, and the reasons are in
+**NSF's published terms need written permission for this use.** They
+prohibit "any form of data extraction or data mining, or other commercial
+exploitation of any kind" without prior written permission. The lead list
+is not republished as a dataset and uses no NSF mark, but it is a
+commercial list built from extraction. Ask info@nsf.org. Until that
+answer comes back, keep the request volume small and keep the script's
+identifying User-Agent truthful. The full reasoning is in
+`references/sources.md`.
+
+**The Caltrans Authorized Materials List is where the California Buy
+Clean materials live.** <https://mets.dot.ca.gov/aml/EnvironmentalProductDeclarations.php>
+is a plain HTML table of the EPDs the state accepts, with the company,
+the facility address, the declaration number and the exact validity
+range. Caltrans' conditions of use put the site's information in the
+public domain, and there is no robots.txt. NSF has no rebar or
+structural steel category at all, so without this list the Buy Clean
+half of the rubric scores nothing.
+
+Two more registries are readable and are worth adding when the coverage
+matters more than the source count:
+
+- **EPD Hub** (`manage.epdhub.com`) - a separate operator from Building
+  Transparency, so EC3's licence does not govern it. Serves its own JSON
+  listing with exact expiry dates, and its PDFs carry the EPD author,
+  which is what the rubric needs. Its terms are the most permissive of
+  any registry here, though the licence grant runs to the customer
+  rather than to a third-party reader, so ask before making it
+  commercial.
+- **EPD Portal** (`epdportal.org`) - a multi-source search with a
+  documented free API and a read-only MCP endpoint, built openly for
+  agents. But it shows validity as a **year**, not a date, and it indexes
+  European operators, not the US ones. It is a second pass: a worklist
+  for a human, not a scored source.
+
+The rest are not scriptable, and the reasons are in
 `references/sources.md`:
 
 - **EC3 / openEPD** has the data we want, including validity end dates and
@@ -41,9 +74,12 @@ Other registries are not scriptable, and the reasons are in
 - **UL, ASTM, SCS** block scripted access. Manual lookups only.
 - **Smart EPD** sends its EPDs to EC3, and its terms ban scripted retrieval.
 
-So the material gaps in this list, flat glass and rebar, are real and they
-are in the non-NSF registries. See `references/sources.md` before promising
-coverage of them.
+So the material gaps in this list are **flat glass and mineral wool board
+insulation**, and crawling more of the public web will not close them:
+those are US programme EPDs, and the US programme operators are the ones
+that block scripted access or charge for a licence. Rebar and structural
+steel are no longer a gap. See `references/sources.md` before promising
+coverage of the other two.
 
 ## Running it
 
@@ -137,12 +173,44 @@ it travels with the domain and Apollo adds named people on top.
 
 Then run the `find-cold-leads` skill with those domains and the theme
 "environmental product declaration renewal" or similar. It needs the
-Apollo MCP, which is not connected by default.
+Apollo MCP, which is not connected by default. See
+`references/apollo-handoff.md` for how to get Apollo working and for the
+two pipeline settings that matter here.
 
 Do not skip the `us_based` column. Ecobat's registrant is in Egypt and
 Teknion's in Canada, and they are in the list because NSF lists them, not
 because they are US Buy Clean prospects. CASL applies to the Canadian
 contact, not just CAN-SPAM. The handoff file excludes them.
+
+## Finding the people
+
+The registries name a company and sometimes a contact address. They do
+not name the person who renews the declaration, so that comes from a
+people search.
+
+- **Apollo** has the deeper index for large manufacturers. The people
+  search is free; the bulk match that returns the LinkedIn profile URL
+  and the business email costs 2 lead credits per person, against a
+  75-credit monthly plan.
+- **Lusha** has the better index for the small mills, which is most of
+  the Caltrans list. One credit per company search, one per resolved
+  person, six per contact enrich. Some of its person lookups return a
+  compliance error, so a person can come back with a name and a title
+  but no profile URL.
+
+LinkedIn is the first channel, so the profile URL is the thing to
+collect. Where there is no URL, the name and title are enough for a
+person to find the profile, and a search string is worth carrying in the
+workbook rather than leaving the row blank.
+
+Both providers are B2B data brokers, so the first message carries a
+source notice and a right to object, and a request to stop is honoured
+within 10 business days. See `references/outreach.md`.
+
+**The EPD's own contact is often the better first approach.** A
+declaration that names an address names the person who wrote it, and for
+a company whose EPD was written by a consultant, that consultant is the
+one who has to be called for the renewal to happen at all.
 
 ## Outreach
 

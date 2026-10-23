@@ -20,16 +20,27 @@ industry-wide EPDs and multi-plant averages, so an EPD of unknown scope
 cannot be assumed to qualify, and an unknown scope scores 0 rather than
 +3.
 
-**The gap.** NSF's registry carries no flat glass, rebar or structural
-steel product category. Its only California material is thermal
-insulation, and those EPDs expire 2028 to 2031, not in the current
-window. So in the 2026-11 to 2027-10 window this rule fires for nothing,
-and the "California watch" sheet in the workbook lists every California
-material EPD in the registry with its expiry date.
+**Where this rule fires, and where it does not.** The rebar and
+structural steel declarations come from Caltrans' own Authorized
+Materials List, not from a registry. The state lists each declaration
+against a named facility, which is the evidence that it is
+facility-specific, and in the 2026-11 to 2027-10 window that is 24 rows
+across 9 companies and 23 facilities. All nine score 5.
 
-The reason is terms, not effort. Flat glass, rebar and structural steel
-EPDs live in the registries we cannot read programmatically. See
-`sources.md`.
+**The remaining gap is two products, not a category.** The Buy Clean Act
+covers structural steel, rebar, flat glass and mineral wool board
+insulation. Caltrans' list carries the first two. Flat glass is treated
+by Caltrans as informational, so its EPD goes to the Engineer and never
+appears on the list, and mineral wool board is not on the list either.
+Both live in UL, SCS, Smart EPD and EC3, which is the EC3 licence
+question in `sources.md`.
+
+**Insulation is not automatically a California material.** The Act's
+insulation product is mineral wool *board*. The insulation categories
+in the registries we can read are thermal, spray foam, continuous wall
+and roof insulation, which are not mineral wool board, so they score for
+the other states and not for California. Scoring a roof-insulation
+renewal as a Buy Clean problem would waste the call.
 
 ## +2 Material covered by another state's Buy Clean programme
 
