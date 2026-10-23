@@ -307,7 +307,7 @@ Loop mode uses `.claude-pr-fix-state.json` to track progress and issue history a
    - If `attempts.length >= 3` → auto-skip, set `status: "skipped"`, reason: "3 attempts exhausted"
    - If has prior attempts → must articulate a **different** approach or skip
    - If no history → fix normally
-   - **Exception, panel round:** when item 4 applies, a finding skipped for exhausted attempts gets one more attempt if the panel plan covers it (Loop Step 2a, Step E)
+   - **Exception, panel round:** when item 4 applies, a finding skipped for exhausted attempts gets one more attempt if the panel plan covers it. Loop Step 2a, Step D sets it back to `"pending"` before the all-skipped check
 4. If the outsider panel is due, or already ran for this round (Loop Step 2a), run it if due, then take this round's approaches from its plan
 
 **Before attempting EACH fix (CRITICAL for auto-compaction recovery):**
@@ -751,7 +751,9 @@ An approach already recorded for that finding in `issue_history` is not eligible
 
 A finding that two or more seats list under DISPUTED is not fixed: set its `status: "skipped"`, reason `"outsider panel disputes finding: <evidence>"`. A finding that a seat lists under OUTSIDE PR, with no in-PR approach from any other seat, is not fixed either: set its `status: "skipped"`, reason `"outsider panel: fix needs <file>, outside this PR"`. Both kinds land in the Human Review Needed list. A dispute from a single seat is printed but does not stop the fix.
 
-Write the panel to the state file BEFORE any code edit, by appending an entry to `outsider_panels`:
+A finding that was skipped because its attempts were exhausted, and that the plan now covers, gets one more attempt: set its `status` back to `"pending"` here, in Step D. This must happen before Loop Step 2's all-skipped check (check 3) runs. If the reset waited for Step E, that check would still see every exhausted finding as skipped and exit before the plan is carried out. A finding the panel itself skipped (disputed, outside PR) stays skipped.
+
+Write the panel, and these status changes, to the state file BEFORE any code edit, by appending an entry to `outsider_panels`:
 
 ```json
 {
@@ -788,7 +790,7 @@ Starting round 3 with the panel plan...
 **Step E — The panel round.** Run Steps 4-5 as usual, with these differences:
 - Each todo's approach is the plan step that covers it. Match a plan step's `covers` entries to the review's findings the way Loop Step 5 reconciles findings with `issue_history`: same file first, then the closest line and the description, because line numbers shift between rounds. The attempt goes on the finding's existing `issue_history` key (re-keying would reset its attempt count). Record the attempt with `"source": "outsider-panel"`.
 - A step that covers several findings is implemented once, and the same attempt is recorded on each finding it covers.
-- A finding skipped because its attempts were exhausted gets one more attempt in this round when the plan covers it: set its status back to `"pending"`. A finding the panel itself skipped (disputed, outside PR) stays skipped.
+- An exhausted finding the plan covers was already set back to `"pending"` in Step D, so it is fixed like any other covered finding. The 3-attempt auto-skip in Step 5 does not apply to it in this round.
 - A finding that takes its approach from Step 5 instead of the plan (no eligible panel approach) gets no `source` tag.
 - The commit's first line marks the panel round: in the Loop Step 3 snippet, the first `printf` becomes `printf 'fix: address PR review feedback (iteration %s, outsider panel)\n\n' "$ITERATION"`.
 
