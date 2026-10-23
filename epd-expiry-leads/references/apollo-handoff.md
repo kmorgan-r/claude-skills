@@ -89,11 +89,52 @@ compliance), then a broader one (quality, QA, QC, product data, product
 line, product development, product manager, procurement, technical,
 engineering).
 
+## Filter the region, or do not claim one
+
+`source-compliance.md` says to tag region at search time, from the
+`person_locations` filter, not from the enrich `country` - because most
+rows are never enriched. If the search was not location-filtered, the
+region is unknown for every row and the honest posture is the conservative
+EU one.
+
+The first run searched by company domain only, with no location filter, and
+then described the list as US-only. That was wrong: 7 of the 50 enriched
+people were outside the US (Italy, UK, China, Australia, Belgium). Filtering
+by *company* country says nothing about the *person's* country, and a
+contact in Varese working for a US company is still an EU contact under
+GDPR and Italian ePrivacy.
+
+Two options, and pick one deliberately:
+
+- Filter the search with `person_locations` and lose the non-US people
+  entirely, which is right if the outreach is US-only.
+- Do not filter, and split the export by the enrich country: US contacts in
+  the Leads sheet, everyone else in a review-gated sheet, with the region
+  and the posture on every row.
+
+Either way, do not write "US only" in the run summary unless the search
+actually filtered on location.
+
+## Check the company, not just the person
+
+An email-level suppression check does not catch a company that is already
+in the CRM under a different contact. Search the 23 domains by company
+domain and by company name across `res.partner`, `crm.lead` and
+`mailing.contact` as well, and say in the summary whether any of them is
+already known.
+
 ## The Odoo suppression check
 
 Before exporting, check every business email against `mail.blacklist`,
 `mailing.contact`, `res.partner` and `crm.lead`. A row that hits any
 source is not importable, whatever the duplicate check says.
+
+Use `ilike` on the email rather than `in` on an exact list. `in` with a
+list of addresses misses a row where the address differs in case, and it
+misses `crm.lead` rows whose `email_from` holds a display-name form. And
+do not filter on `active` - an archived `mailing.contact` that opted out
+still suppresses. The 59 business emails in this run were checked with
+`ilike` across all four models with no active filter, and 0 hit.
 
 The `climatepoint-odoo` MCP's `search_read` tool cannot take a domain with
 a leaf condition - it fails with `unhashable type: 'dict'` on any
@@ -102,8 +143,10 @@ JSON-RPC endpoint directly instead. Credentials are already in the
 environment as `ODOO_LOGIN` and `ODOO_API_KEY`, the same ones the MCP
 server uses. Send a browser `User-Agent` or Cloudflare answers 403.
 
-Field names differ per model: `mail.blacklist` has `email`, and passing
-`email_normalized` to it is a hard error, so use a per-model field list.
+Field names differ per model: `mail.blacklist` has `email` and no
+`email_normalized` or `is_blacklisted`, `mailing.contact` has no `active`,
+and `crm.lead` has no `company_name`. Passing an unknown field is a hard
+error, so use a per-model field list.
 
 A runnable client that does all of this is in the run scripts under
 `reports/run-scripts/` after a run. It is a run artifact, not part of the
