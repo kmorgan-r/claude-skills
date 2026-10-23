@@ -680,7 +680,7 @@ With the default ceiling of 6 rounds, the panel runs at most twice on a PR: befo
 - the latest review has at least one urgent issue (skipped ones count)
 - `total_rounds >= 2` and `total_rounds` is even (so the next round, `total_rounds + 1`, is 3, 5, 7, …)
 - `total_rounds < total_rounds_ceiling` (no panel for a round the ceiling forbids)
-- `outsider_panels` has no entry whose `before_round == total_rounds + 1` (a resumed session does not run the same panel twice)
+- `outsider_panels` has no entry whose `before_round == total_rounds + 1` (a resumed session does not run the same panel twice; a missing field counts as `[]`)
 
 **Step A — Collect the brief.** Gather these facts, and only these:
 1. `gh pr view "$PR_NUMBER" --json title,body,baseRefName`: the PR's title, intent and base branch.
@@ -696,7 +696,7 @@ The brief carries no diagnosis of your own, no preferred next approach, and no t
 | Root-cause architect | Treat the findings as symptoms. Which design choice in this PR produces them? Propose the structural change, inside the PR's files, that makes the whole class of finding impossible. |
 | Reviewer's advocate | Read each finding as its author meant it. Why did each earlier attempt satisfy the letter but not the intent? What will the reviewer flag on the next push? |
 | Simplifier | Can the code behind the findings be deleted, narrowed, or replaced by a helper that already exists in this repo? Find the smallest diff that removes each finding. |
-| Domain specialist | `supabase/migrations/` or RLS: Postgres / RLS expert. `supabase/functions/`: Deno edge-function expert. `.tsx` or hooks: React expert. `.py`: Python service expert. Test files only: test-design expert. Otherwise: TypeScript expert. |
+| Domain specialist | `supabase/migrations/` or RLS: Postgres / RLS expert. `supabase/functions/`: Deno edge-function expert. `.tsx`, `src/hooks/` or a `use*.ts` file: React expert. `.py`: Python service expert. Test files only: test-design expert. Otherwise: TypeScript expert. |
 
 **Step C — Dispatch all four in ONE message** (parallel Agent tool calls), with `subagent_type: "Plan"` (read-only). If the `Plan` type is not available, use `general-purpose`; the prompt's read-only rule still applies. Each prompt is the template below with the seat's lens filled in:
 
@@ -783,7 +783,8 @@ Starting round 3 with the panel plan...
 - Each todo's approach is the plan step that covers it. Match a plan step's `covers` entries to the review's findings the way Loop Step 5 reconciles findings with `issue_history`: same file first, then the closest line and the description, because line numbers shift between rounds. Record the attempt with `"source": "outsider-panel"`.
 - A step that covers several findings is implemented once, and the same attempt is recorded on each finding it covers.
 - A finding skipped because its attempts were exhausted gets one more attempt in this round when the plan covers it: set its status back to `"pending"`. A finding the panel itself skipped (disputed, outside PR) stays skipped.
-- The first line of the commit message reads `fix: address PR review feedback (iteration N, outsider panel)`.
+- A finding that takes its approach from Step 5 instead of the plan (no eligible panel approach) gets no `source` tag.
+- The commit's first line marks the panel round: in the Loop Step 3 snippet, the first `printf` becomes `printf 'fix: address PR review feedback (iteration %s, outsider panel)\n\n' "$ITERATION"`.
 
 Then the loop continues as usual: Loop Steps 3-6, then the next round. If urgent issues remain after round 4, the panel is due again before round 5.
 
