@@ -24,6 +24,7 @@ Usage:
 import argparse
 import concurrent.futures
 import csv
+import datetime
 import json
 import os
 import re
@@ -39,18 +40,30 @@ PDF_BASE = "https://nsfpubliclistingsprodeu.blob.core.windows.net/prod/Sustain/P
 UA = "Mozilla/5.0 (compatible; epd-expiry-leads/1.0)"
 
 # ---------------------------------------------------------------- materials
-# Grounded in the product categories NSF itself publishes (see
+# Grounded in the product categories the registries themselves publish (see
 # references/buy-clean-materials.md for the evidence and the limits).
 #
 #   ca:      covered by the California Buy Clean Act
 #   states:  other state Buy Clean programmes that cover the material
 #
-# Only "Thermal Insulation" maps to a California category. NSF's registry
-# carries no flat glass, rebar or structural steel product category, so
-# those leads have to come from the non-NSF registries, which are
-# terms-gated (see references/sources.md).
+# NSF's registry carries no flat glass, rebar or structural steel product
+# category, so those two materials arrive from the Caltrans Authorized
+# Materials List instead, which is the state's own list of the EPDs it
+# accepts for Buy Clean work. Flat glass and mineral wool board insulation
+# are BCCA materials that no readable registry carries yet.
+#
+# The insulation split matters. The Buy Clean Act's insulation product is
+# mineral wool *board*, and the Caltrans list of accepted EPDs carries no
+# insulation at all. NSF's insulation categories are thermal, spray foam,
+# continuous wall and roof insulation, which are not mineral wool board,
+# so scoring them as California Buy Clean would pitch a roof-insulation
+# renewal as a Buy Clean problem. They still score for the other states.
 MATERIALS = {
-    "insulation": {"ca": True, "states": ["MN", "TX"]},
+    "insulation": {"ca": False, "states": ["MN", "TX"]},
+    "mineral wool": {"ca": True, "states": ["MN", "TX"]},
+    "rebar": {"ca": True, "states": ["CO", "MA", "MD", "MN", "NJ", "NY", "OR", "WA", "WI", "IL"]},
+    "structural steel": {"ca": True, "states": ["CO", "MA", "MD", "MN", "NJ", "NY", "OR", "WA", "WI", "IL"]},
+    "flat glass": {"ca": True, "states": ["CO", "MA", "MN", "NY"]},
     "concrete": {"ca": False, "states": ["CO", "MA", "MD", "MN", "NJ", "NY", "OR", "WA", "WI", "IL"]},
     "precast": {"ca": False, "states": ["CO", "WA"]},
     "asphalt": {"ca": False, "states": ["CO", "MA", "MD", "NY"]},
@@ -72,6 +85,13 @@ CATEGORY_MATERIAL = {
     "spf insulation": "insulation",
     "continuous wall insulation": "insulation",
     "roof insulation": "insulation",
+    # Mineral wool board is the Buy Clean Act's insulation product. No
+    # registry we can read carries a category for it yet, so this mapping
+    # is here for the day one does rather than to score a guess.
+    "mineral wool": "mineral wool",
+    "mineral wool insulation": "mineral wool",
+    "mineral wool board": "mineral wool",
+    "rockwool": "mineral wool",
     "concrete": "concrete",
     "precast concrete": "precast",
     "articulating concrete block": "concrete",
@@ -131,6 +151,9 @@ CONSULTANT_ORGS = (
     "ecoform", "industrial ecology", "athena sustainability", "wap sustainability",
     "sphera", "quantis", "ramboll", "true north", "sustainable solutions corporation",
     "eric blond", "3e verification", "intertek",
+    # Dahl Management writes the EPD Hub declarations for REGEN Fiber
+    # and Lingrove.
+    "dahl management",
 )
 
 # Bodies that author other manufacturers' EPDs while supplying them. They
@@ -218,7 +241,8 @@ def is_us_address(address):
     low = (address or "").lower()
     if "united states" in low:
         return True
-    return not re.search(r"\b(egypt|saudi|canada|mexico|china|india|germany)\b", low)
+    return not re.search(r"\b(egypt|saudi|canada|mexico|china|india|germany|"
+                         r"korea|japan|brasil|brazil|turkey|poland|spain|italy)\b", low)
 
 
 # ------------------------------------------------------------------ listing
@@ -555,6 +579,15 @@ def resolve_domain(company, info, records, overlay):
             counts[domain_of(email)] += 1
     if counts:
         return counts.most_common(1)[0][0], "PDF company contact"
+
+    # EPD Hub names the manufacturer's own website in the document, and
+    # its listing spells the company differently from the document
+    # ("Tarkett Inc" against "Tarkett Inc" with a trailing period, say),
+    # so the domain is matched on the document's own name.
+    for record in records:
+        website = domain_of(record.get("website"))
+        if website and not is_third_party(website):
+            return website, "registry document"
     return None, None
 
 
@@ -664,9 +697,17 @@ def score_company(records):
         reasons.append("+2 material covered by another state's Buy Clean programme: "
                        + ", ".join(sorted(states)))
 
-    if len(live) >= 5:
+    # The count is declarations, not rows. One declaration can cover many
+    # facilities, and a companywide EPD listed against nine mills is one
+    # document to renew, not nine.
+    declarations = {r.get("epd_number") or "#" + str(i) for i, r in enumerate(live)}
+    if len(declarations) >= 5:
         total += 2
-        reasons.append(f"+2 {len(live)} EPDs expiring")
+        reasons.append(f"+2 {len(declarations)} EPDs expiring")
+
+    facilities = {r.get("facility_address") for r in live if r.get("facility_address")}
+    if len(facilities) > len(declarations):
+        reasons.append(f"({len(facilities)} facilities, {len(declarations)} declarations)")
 
     developers = {r["developer"] for r in live}
     if "in_house" in developers:
@@ -694,8 +735,95 @@ def score_company(records):
     return total, reasons, facts
 
 
+# ------------------------------------------------------------- other sources
+def _author_is_own(author, org, manufacturer):
+    """Is the EPD author the manufacturer's own person?
+
+    EPD Hub names the author as "Prabhu Megharaj (LuxWall Inc.)" or
+    "Travis Dahl, Dahl Management Inc.". Only the first is the
+    manufacturer's own. The consultant in the middle is not, and giving
+    that declaration the manufacturer's contact address would make it
+    score as an in-house declaration.
+
+    "Aurimas Bukauskas on behalf of WholeTrees" is the trap: the
+    manufacturer's name is in the author line, but "on behalf of" is how
+    an outside preparer signs, and WholeTrees' EPD was written by
+    Aocene Consulting. So the phrase is not evidence of authorship and
+    the row scores as somebody else's declaration.
+    """
+    who = f"{author} {org}".lower()
+    if "on behalf of" in who:
+        return False
+    tokens = [t for t in re.sub(r"[^a-z]+", " ", (manufacturer or "").lower()).split()
+              if len(t) > 3]
+    return any(token in who for token in tokens)
+
+
+def caltrans_records(start, end):
+    """The Caltrans Authorized Materials List, as lead-list records.
+
+    These are the rebar and structural steel declarations that NSF's
+    registry carries no category for, and they come with the state's own
+    facility address against each one, which is the evidence California
+    needs. The list is a table of declarations, not of companies, so the
+    company is resolved here rather than from a company record.
+    """
+    import caltrans_aml
+    start = datetime.date.fromisoformat(start) if start else None
+    end = datetime.date.fromisoformat(end) if end else None
+    return caltrans_aml.lead_records(start, end)
+
+
+def epdhub_records(start, end, cache_dir, refresh=False, with_pdfs=True):
+    """EPD Hub listings, as lead-list records.
+
+    Only the US ones, and only the ones expiring in the window. The PDF
+    is fetched and parsed because EPD Hub publishes the EPD author in it,
+    and the author is what the in-house and consultant rules need.
+    """
+    import extra_registries
+    rows = extra_registries.fetch_epdhub(country="US", date_from=start, date_to=end)
+    if not with_pdfs:
+        return extra_registries.hub_records(rows)
+
+    cache = os.path.join(cache_dir, "epdhub")
+    os.makedirs(cache, exist_ok=True)
+
+    def parse(url, number):
+        cached = os.path.join(cache, number + ".json")
+        if os.path.exists(cached) and not refresh:
+            with open(cached, encoding="utf-8") as fh:
+                return json.load(fh)
+        parsed = extra_registries.parse_hub_pdf(get_bytes(url))
+        with open(cached, "w", encoding="utf-8") as fh:
+            json.dump(parsed, fh, indent=1)
+        return parsed
+
+    records = extra_registries.hub_records(rows, parse=parse)
+    for record in records:
+        author = record.get("author_name") or ""
+        org = record.get("author_org") or ""
+        # The PDF's E-mail field is a general contact for the manufacturer,
+        # not the author. Using it as the preparer's address makes every
+        # declaration look in-house, so it is only used when the author
+        # is the manufacturer's own person.
+        own = _author_is_own(author, org, record.get("manufacturer"))
+        record["preparer"] = {
+            "email": (record.get("contact_email") or "") if own else "",
+            "name": author, "org": org, "source": "EPD Author"} if author else None
+        record["emails"] = record.get("emails", [])
+        record["company_contact"] = (
+            {"email": record.get("contact_email") or "", "name": "",
+             "org": org or "", "source": "EPD contact"} if record.get("contact_email") else None)
+        record["holder_email"] = ""
+        record["urls"] = record.get("urls", [])
+        record["pdf_ok"] = record.get("pdf_ok", True)
+    return records
+
+
 # ------------------------------------------------------------------ output
-CSV_COLUMNS = ["company", "score", "us_based", "epds_expiring", "pdfs_missing",
+CSV_COLUMNS = ["company", "score", "us_based", "sources", "epds_expiring",
+               "pdfs_missing",
                "earliest_expiry", "latest_expiry", "days_to_expiry", "contact_by",
                "timing", "materials", "ca_buy_clean", "buy_clean_states", "scope",
                "developer", "domain", "domain_source", "website", "phone", "address",
@@ -741,41 +869,59 @@ def shift_months(date_text, months):
     return f"{year:04d}-{month:02d}-{min(day, last):02d}"
 
 
-def california_watch(listings):
-    """Every California Buy Clean material EPD in the registry, by expiry.
+def california_watch(records):
+    """Every California Buy Clean material EPD we can see, by expiry.
 
     The +3 California rule only fires when a CA material is in the window.
-    NSF's registry carries thermal insulation and no flat glass, rebar or
-    structural steel category, so the CA material EPDs expire on their own
-    schedule. Listing them all here means the gap is visible rather than
+    NSF's registry carries no flat glass, rebar or structural steel
+    category, and its insulation is not the mineral wool board the Buy
+    Clean Act covers, so the rebar and steel declarations come from
+    Caltrans' own list. Listing them all here means the remaining gap,
+    flat glass and mineral wool board insulation, is visible rather than
     looking like a scoring failure.
     """
     rows = []
-    for record in listings:
-        category = (record.get("product_category") or "").lower()
-        material = "other"
-        for needle, value in CATEGORY_MATERIAL.items():
-            if needle in category:
-                material = value
-                break
+    for record in records:
+        material = record.get("material")
+        if not material:
+            category = (record.get("product_category") or "").lower()
+            material = "other"
+            for needle, value in CATEGORY_MATERIAL.items():
+                if needle in category:
+                    material = value
+                    break
         if not MATERIALS.get(material, {}).get("ca"):
             continue
         rows.append({
-            "epd_number": record["epd_number"],
-            "company": record["company"],
-            "product_category": record["product_category"],
-            "expires": record["expires"],
-            "source_url": "https://listings.nsf.org/certified-products-systems",
+            "epd_number": record.get("epd_number", ""),
+            "company": record.get("company", ""),
+            "product_category": record.get("product_category", ""),
+            "material": material,
+            "expires": record.get("expires", ""),
+            "source": record.get("source") or "NSF",
+            "source_url": record.get("source_url")
+            or "https://listings.nsf.org/certified-products-systems",
         })
     rows.sort(key=lambda r: (r["expires"] or ""))
     return rows
 
 
 def build(start, end, cache_dir, refresh, with_pdfs, overlay):
+    """The lead list, from every registry we can read.
+
+    NSF is the base. Caltrans' Authorized Materials List adds the rebar
+    and structural steel declarations that NSF's registry has no category
+    for, and EPD Hub adds what its own catalogue carries. Each record
+    keeps its source so a lead can be traced back to the document.
+    """
     listings = fetch_listings()
     companies = fetch_companies()
     window = [r for r in listings if r["expires"] and start <= r["expires"] <= end]
-    watch = california_watch(listings)
+
+    # The Caltrans list is read once: the whole list feeds the California
+    # watch sheet, and the rows in the window feed the lead list.
+    caltrans = caltrans_records(None, None)
+    watch = california_watch(listings + caltrans)
     if not window:
         return [], [], watch
 
@@ -784,16 +930,22 @@ def build(start, end, cache_dir, refresh, with_pdfs, overlay):
             window = list(pool.map(
                 lambda r: fetch_and_parse(r, cache_dir, refresh), window))
 
+    window.extend(r for r in caltrans if start <= r["expires"] <= end)
+    window.extend(epdhub_records(start, end, cache_dir, refresh, with_pdfs))
+
     by_company = {}
     for record in window:
         category = (record.get("product_category") or "").lower()
-        material = "other"
-        for needle, value in CATEGORY_MATERIAL.items():
-            if needle in category:
-                material = value
-                break
+        material = record.get("material")
+        if not material:
+            material = "other"
+            for needle, value in CATEGORY_MATERIAL.items():
+                if needle in category:
+                    material = value
+                    break
         record["material"] = material
-        record["scope"], record["scope_evidence"] = classify_scope(record)
+        if not record.get("scope"):
+            record["scope"], record["scope_evidence"] = classify_scope(record)
         by_company.setdefault(record["company"], []).append(record)
 
     rows = []
@@ -813,11 +965,17 @@ def build(start, end, cache_dir, refresh, with_pdfs, overlay):
         if missing:
             reasons.append("PDF unavailable for " + ", ".join(missing)
                            + " - the listing is there, the document is not")
+        sources = sorted({r.get("source") or "NSF" for r in records})
+        # A company that is not in NSF's company records still has an
+        # address, from the registry that listed it.
+        address = info.get("address") or next(
+            (r.get("address") for r in records if r.get("address")), "")
         rows.append({
             "company": company,
             "score": total,
-            "us_based": "yes" if is_us_address(info.get("address")) else "no",
-            "epds_expiring": len(records),
+            "us_based": "yes" if is_us_address(address) else "no",
+            "sources": ", ".join(sources),
+            "epds_expiring": len({r["epd_number"] for r in records}),
             "pdfs_missing": len(missing),
             "earliest_expiry": earliest,
             "latest_expiry": max(r["expires"] for r in records),
@@ -833,13 +991,14 @@ def build(start, end, cache_dir, refresh, with_pdfs, overlay):
             "domain_source": domain_source or "",
             "website": info.get("website") or "",
             "phone": info.get("phone") or "",
-            "address": info.get("address") or "",
+            "address": address,
             "contacts": ", ".join(contacts),
             "lca_preparer": preparer.get("name", ""),
             "lca_preparer_email": preparer.get("email", "") or "",
-            "epd_numbers": ", ".join(r["epd_number"] for r in records),
+            "epd_numbers": ", ".join(sorted({r["epd_number"] for r in records})),
             "reasons": " | ".join(reasons),
-            "source_url": "https://listings.nsf.org/certified-products-systems",
+            "source_url": "; ".join(sorted({r.get("source_url") or "" for r in records
+                                            if r.get("source_url")})),
         })
     rows.sort(key=lambda r: (r["us_based"] != "yes", -r["score"], r["earliest_expiry"]))
     return rows, window, watch
@@ -943,7 +1102,8 @@ def write_xlsx(rows, details, watch, path):
     detail.freeze_panes = "A2"
 
     ca = book.create_sheet("California watch")
-    ca_cols = ["epd_number", "company", "product_category", "expires", "source_url"]
+    ca_cols = ["epd_number", "company", "product_category", "material", "expires",
+               "source", "source_url"]
     ca.append(ca_cols)
     for cell in ca[1]:
         cell.font = Font(bold=True, color="FFFFFF")

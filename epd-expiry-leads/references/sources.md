@@ -11,23 +11,32 @@ means the "not readable" list is shorter than it was.
 | Registry | Readable | Expiry date | US coverage | Terms |
 |---|---|---|---|---|
 | NSF | yes, JSON API | exact date | the base of the list | needs written permission, see below |
+| Caltrans AML | yes, plain HTML | exact date | 24 rows, 9 companies in window | public domain |
 | EPD Hub | yes, JSON + PDFs | exact date | 101 EPDs, 6 in window | most permissive of the lot |
-| EPD Portal | yes, documented API + MCP | **year only** | 77 EPDs | source terms govern |
+| EPD Portal | yes, documented API + MCP | **year only** | 67 EPDs after dedupe | source terms govern |
 | EPD International | HTML + API, list embedded | on the PDF | large | forbids data products |
 | EC3 | paid tier only | exact date | large | paid tier required |
 | UL, ASTM, SCS | no - they block scripted access | | | |
 | Smart EPD | no - scripted retrieval banned, data is EC3's | | | |
 
-**None of them closes the California Buy Clean gap.** The missing
-materials - structural steel, rebar, flat glass - are US programme EPDs
-living in NSF, UL, ASTM and SCS, and of those only NSF is scriptable. The
-European registries have plenty of rebar and steel, but they are European
-EPDs for European projects, not the US EPDs a California buyer needs.
+**The California Buy Clean gap is half closed, by Caltrans itself.**
+Structural steel and rebar are not in NSF, and they are not in any
+European registry. They are in the state's own Authorized Materials List,
+which is a plain HTML table on a public-domain site. 24 rows, 9
+companies, 23 facilities in the current window, each with a facility
+address and an exact validity range.
 
-What the extra sources buy is coverage of US manufacturers who publish
-through a European programme operator. That is a real, if small, addition:
-6 more US companies in the expiry window from EPD Hub, 12 more US EPDs
-expiring in 2027 from EPD Portal.
+What is still open is narrower than "flat glass and rebar": **flat glass
+and mineral wool board insulation.** Flat glass is a Buy Clean Act
+material that Caltrans treats as informational, so its EPD goes to the
+Engineer rather than onto the list. Mineral wool board is a Buy Clean Act
+material that is not on the list either. Both live in the registries we
+cannot read, which is what the EC3 question below is about.
+
+What the European registries buy is coverage of US manufacturers who
+publish through a European programme operator. That is a real, if small,
+addition: 6 more US companies in the expiry window from EPD Hub, and 6
+US EPDs flagged for 2027 from EPD Portal.
 
 ## Readable: NSF (with a licensing caveat - read this)
 
@@ -111,6 +120,53 @@ a substitute for permission:
   `company-domains.csv`.
 - **Some PDFs.** A handful of listings point at a document that is not
   in blob storage. The listing stays, the document is missing.
+
+## Readable: the Caltrans Authorized Materials List
+
+<https://mets.dot.ca.gov/aml/EnvironmentalProductDeclarations.php> is
+the state's own list of the EPDs it accepts for Buy Clean work. It is a
+plain HTML table: company, facility address, declaration number, and the
+validity range, in US date order.
+
+This is where the California Buy Clean materials live. NSF has no flat
+glass, rebar or structural steel product category, and the European
+operators publish EPDs for European projects, so until this page turned
+up the steel and rebar EPDs California actually accepts were unreadable.
+
+**Terms.** Caltrans' conditions of use say that information on the site
+is "considered to be in the public domain" and "may be distributed or
+copied as permitted by law". There is no clause against automated
+retrieval, and there is no robots.txt on mets.dot.ca.gov. The list is
+published for contractors and manufacturers to use, and the point of it
+is that people find out which declarations qualify.
+
+What the page gives is better than a registry's, in one respect: the
+facility address. California rejects anything that is not
+facility-specific, so a declaration the state lists against a named
+facility is facility-specific by the state's own listing. That is the
+evidence the +3 rule uses.
+
+What it does not give is a person, a website, an email, or the EPD
+author. So the developer field on these rows is `unknown` - that is the
+data, not a parse failure - and the contact has to come from a people
+search on the company domain.
+
+Two filters matter when reading the table. Rows in the `expiredclass`
+style have expired, and rows under "Not Valid for projects awarded after
+12/31/2024" have been superseded. Neither is a renewal lead, so both are
+dropped: nobody renews an EPD that is no longer accepted.
+
+Scale: 59 rows, of which 4 are superseded, in two material categories -
+carbon steel rebar, and structural steel (plate, hollow structural
+sections, hot-rolled sections). No concrete, asphalt, glass or
+insulation rows, which is why the Buy Clean Act's other two products
+are still a gap.
+
+The company is listed as the mill, not the group: "Nucor Steel,
+Incorporated - Auburn" is one of Nucor's rebar mills and the pitch is to
+Nucor. The mill name is split off before scoring, and "Nucor-Yamato
+Steel - Arkansas" is a different company, so the split needs a space
+before the dash to survive.
 
 ## Readable: EPD Hub
 
@@ -338,12 +394,15 @@ retrieval. Its robots.txt is permissive but its terms are not.
 
 ## What this means for coverage
 
-The lead list is complete for what NSF lists, plus 6 more US companies
-from EPD Hub and 12 US EPDs flagged for 2027 from EPD Portal. It is still
-not complete for California Buy Clean materials, and no crawl of the
-public web will change that: **the missing materials are US programme
-EPDs, and the US programme operators are the ones that block scripted
-access or charge for a licence.**
+The lead list is complete for what NSF lists, for what the Caltrans
+Authorized Materials List lists, plus 6 more US companies from EPD Hub
+and 6 US EPDs flagged for 2027 from EPD Portal. For California Buy Clean
+it is complete for rebar and structural steel, which is most of the
+commercial value. What it is not complete for is flat glass and mineral
+wool board insulation, and no crawl of the public web will change that:
+**the missing materials are US programme EPDs, and the US programme
+operators are the ones that block scripted access or charge for a
+licence.**
 
 Crawling more sites does not close this gap. It adds European EPDs for
 European projects, which is not what a California buyer needs.
@@ -356,11 +415,10 @@ Two ways to close it, in order of effort:
    validity dates and developer fields, and an API that would make this
    script better rather than longer. Notification before integration is
    required either way.
-2. **Use a headless browser on the manual-lookup registries.** The
-   terms permit a person reading a page, so a browser session that
-   behaves like a person is defensible where a scraper is not. This is
-   slower and more fragile than the API, and the output cannot be
-   republished.
+2. **Look up flat glass and mineral wool board by hand** in UL, SCS and
+   Smart EPD. The declarations exist and are publicly downloadable; they
+   are just not reachable by script, and the count of manufacturers is
+   small enough for a person to work through.
 
 The headless browser route is also the only way to see EPD type,
 facility-specificity and developer fields for the non-NSF registries
@@ -373,3 +431,36 @@ author and scope, so a browser is only needed for UL, ASTM and SCS.
 Separately from EC3, NSF's own terms need written permission for what
 this skill already does. See the caveat at the top of this file. That
 email should go out regardless of which other source is used.
+
+## The contacts: Apollo and Lusha
+
+The EPD registries name a manufacturer and sometimes a contact address.
+They do not name the person who renews the declaration. That comes from
+a people search, and the skill hands the company domains to
+`find-cold-leads` for exactly this.
+
+Two providers are in use, and they cover different companies.
+
+- **Apollo** has the deeper index for large manufacturers. The people
+  search is free; the bulk match that returns the LinkedIn profile URL
+  and the business email costs 2 lead credits per person, against a
+  75-credit monthly plan.
+- **Lusha** has the better index for the small mills, which is most of
+  the Caltrans list. One credit per company search, one per resolved
+  person, six per contact enrich. Its person-level lookup returns a
+  compliance error for some contacts, so a person can come back with a
+  name and a title but no profile URL.
+
+Both are B2B data providers, so the first message carries a source
+notice and a right to object, and a request to stop is honoured within
+10 business days. Neither needs to be contacted before the list is
+built; the licence question is the one to watch, and both are ordinary
+commercial subscriptions rather than the redistribution problem NSF and
+EC3 raise.
+
+**The EPD's own contact is often the better first approach.** A
+declaration that names an address names the person who wrote it, and for
+a company whose EPD was written by a consultant, that consultant is the
+one who has to be called for the renewal to happen at all. The
+"Company targets" sheet of the contacts workbook carries that address
+next to every company.
