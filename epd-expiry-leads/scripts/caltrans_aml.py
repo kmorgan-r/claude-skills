@@ -27,6 +27,7 @@ Usage:
     python caltrans_aml.py --start 2026-11-01 --end 2027-10-31
 """
 import argparse
+import csv
 import datetime
 import html
 import json
@@ -214,6 +215,40 @@ def group_by_company(rows):
     return companies
 
 
+def declarations():
+    """The declarations whose documents have been read, keyed by family.
+
+    The Caltrans list gives a declaration number but no author, so who
+    wrote the declaration is only known by reading the document. The
+    documents for the HSS producers are published by the Steel Tube
+    Institute at <https://steeltubeinstitute.org/hollow-structural-sections/hss-facility-specific-epds/>
+    and by the manufacturers themselves, so they are readable.
+
+    UL revises declarations, and the number in the state's list is not
+    always the number on the current document: the Caltrans row for Vest
+    carries 4790434237.101.1 and the document is 4790434237.101.3. So
+    the lookup is on the declaration family, the number without its
+    revision suffix, and the first two parts of the number.
+    """
+    path = os.path.join(SKILL, "references", "declarations.csv")
+    out = {}
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8-sig") as fh:
+        for row in csv.DictReader(fh):
+            number = (row.get("declaration") or "").strip()
+            if not number:
+                continue
+            out[_family(number)] = row
+    return out
+
+
+def _family(number):
+    """The declaration family, without the revision suffix."""
+    parts = number.split(".")
+    return ".".join(parts[:2]) if len(parts) > 2 else number
+
+
 def lead_records(start=None, end=None, page_html=None):
     """AML rows in the shape the lead list expects.
 
@@ -230,9 +265,10 @@ def lead_records(start=None, end=None, page_html=None):
         by_declaration.setdefault(row["declaration_number"], set()).add(
             row["facility_address"])
 
+    known = declarations()
     out = []
     for row in live:
-        out.append({
+        record = {
             "source": "Caltrans AML",
             "epd_number": row["declaration_number"],
             "company": canonical_company(row["company"]),
@@ -251,7 +287,19 @@ def lead_records(start=None, end=None, page_html=None):
                                  + row["facility_address"],
             "pdf_url": "",
             "source_url": AML_URL,
-        })
+        }
+        doc = known.get(_family(row["declaration_number"]))
+        if doc:
+            record["preparer"] = {
+                "email": (doc.get("contact_email") or "").strip(),
+                "name": (doc.get("preparer_name") or "").strip(),
+                "org": (doc.get("preparer_org") or "").strip(),
+                "source": "EPD document",
+            }
+            record["declaration_document"] = doc.get("source_url", "")
+            record["declaration_note"] = doc.get("note", "")
+            record["pdf_url"] = doc.get("source_url", "")
+        out.append(record)
     return out
 
 

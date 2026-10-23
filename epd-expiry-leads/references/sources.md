@@ -12,6 +12,7 @@ means the "not readable" list is shorter than it was.
 |---|---|---|---|---|
 | NSF | yes, JSON API | exact date | the base of the list | needs written permission, see below |
 | Caltrans AML | yes, plain HTML | exact date | 24 rows, 9 companies in window | public domain |
+| Steel Tube Institute | yes, public PDFs | 5 years from issue | HSS producers | member's own EPD, public document |
 | EPD Hub | yes, JSON + PDFs | exact date | 101 EPDs, 6 in window | most permissive of the lot |
 | EPD Portal | yes, documented API + MCP | **year only** | 67 EPDs after dedupe | source terms govern |
 | EPD International | HTML + API, list embedded | on the PDF | large | forbids data products |
@@ -167,6 +168,47 @@ Incorporated - Auburn" is one of Nucor's rebar mills and the pitch is to
 Nucor. The mill name is split off before scoring, and "Nucor-Yamato
 Steel - Arkansas" is a different company, so the split needs a space
 before the dash to survive.
+
+## Readable: the Steel Tube Institute's EPD page
+
+UL's own site answers 405 to everything, so the UL Environment
+declarations for the HSS producers are, in practice, unreadable. The
+**Steel Tube Institute** publishes the same documents:
+<https://steeltubeinstitute.org/hollow-structural-sections/hss-facility-specific-epds/>
+
+It is a trade association, not a registry, and it links the members'
+own facility-specific EPDs:
+
+| Manufacturer | Document |
+|---|---|
+| Maruichi Oregon Steel Tube | `101.2_EPD_2022_Maruichi-Oregon-Steel-Tube-FHSS.pdf` |
+| Searing Industries | `101.4_EPD_Searing_2022-FHSS.pdf` |
+| Vest, Inc. | `101.3_EPD_Vest-Inc_2022-FHSS.pdf` |
+| Maruichi American Corp. | `101.2_EPD_2022_Maruichi-America-FHSS-.pdf` |
+| Nucor Tubular Products | `Nucor_EPD_HSS_v5.0.pdf` |
+| Bull Moose Tube | `SCS-EPD-07425_...pdf` |
+
+These are the same documents UL Environment hosts, and they carry
+everything the lead list needs: the declaration number, the date of
+issue, the period of validity, the LCA practitioner, the verifier and
+the declared product. For Maruichi Oregon Steel Tube, Searing and Vest
+the practitioner is **Sphera Solutions Inc**, which is the consultant
+the rubric penalises, so reading the document changes their score.
+
+Terms: these are the manufacturers' own declarations, published for
+public download by a trade association, and there is no clause against
+retrieval on steeltubeinstitute.org. UL Environment's programme rules
+still govern the EPD itself - it is their Part A document and it carries
+their programme mark - so attribute the document and do not imply any
+partnership.
+
+**The number in the state's list is not always the number on the
+document.** UL revises declarations, and the Caltrans row for Vest
+carries 4790434237.101.1 while the current document is
+4790434237.101.3. So the lookup is on the declaration family, the
+number without its revision suffix. `references/declarations.csv` holds
+what was read, and `scripts/caltrans_aml.py` merges it into the
+Caltrans rows.
 
 ## Readable: EPD Hub
 
@@ -418,7 +460,9 @@ Two ways to close it, in order of effort:
 2. **Look up flat glass and mineral wool board by hand** in UL, SCS and
    Smart EPD. The declarations exist and are publicly downloadable; they
    are just not reachable by script, and the count of manufacturers is
-   small enough for a person to work through.
+   small enough for a person to work through. The HSS producers' own
+   declarations are the exception, and they are readable through the
+   Steel Tube Institute.
 
 The headless browser route is also the only way to see EPD type,
 facility-specificity and developer fields for the non-NSF registries
