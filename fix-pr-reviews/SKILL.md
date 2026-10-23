@@ -798,7 +798,7 @@ Then the loop continues as usual: Loop Steps 3-6, then the next round. If urgent
 
 **IMPORTANT: Claude MUST track modified files during the fix phase.**
 
-**Implementation:** At the START of fix phase, initialize an empty list. Each time you use the Edit tool, append the file path to the list:
+**Implementation:** At the START of fix phase, initialize an empty list. Each time you use the Edit or Write tool, append the file path to the list. A new file you create, such as a new test file, goes on the list too:
 
 ```
 ## Internal File Tracking (maintain during fix phase)
@@ -806,15 +806,16 @@ MODIFIED_FILES:
 - src/lib/parser.ts (edit 1)
 - src/api/handler.ts (edit 2)
 - src/utils/validation.ts (edit 3)
+- src/lib/__tests__/parser.test.ts (new file)
 ```
 
 **After completing all fixes**, validate the list before committing:
-1. Compare your tracked list against `git diff --name-only`
-2. If they differ, investigate - you may have missed tracking a file or made an unintended edit
+1. Compare your tracked list against `git diff --name-only` (changed tracked files) **plus** `git ls-files --others --exclude-standard` (new untracked files). `git diff --name-only` alone never lists a new file, so a new test file would look like a tracking error and could be left out of the commit.
+2. If they differ, investigate - you may have missed tracking a file or made an unintended edit. An untracked file you did not create in this round is not part of the fix: leave it unstaged.
 3. Only proceed with commit if the lists match or discrepancies are understood
 
-**If validation fails (tracked list differs from git diff):**
-1. Review the diff: `git diff --name-only`
+**If validation fails (tracked list differs from the changed and new files):**
+1. Review the changes: `git status --short` (` M` = modified, `??` = new and untracked)
 2. Identify the discrepancy:
    - **Missing from tracked list**: File was edited but not recorded - review the change
    - **Extra in tracked list**: File was tracked but change was reverted - remove from list
@@ -826,8 +827,15 @@ MODIFIED_FILES:
 After fixing all items in the current iteration:
 
 ```bash
-# Get list of modified files (if not tracked during fix phase)
-MODIFIED_FILES=$(git diff --name-only)
+# MODIFIED_FILES is the list tracked during the fix phase (Edit AND Write).
+# Fallback only if no list was kept: changed tracked files plus new untracked
+# ones. `git diff --name-only` never lists a new file (e.g. a new test), so
+# `git ls-files --others --exclude-standard` (untracked, not ignored) adds them.
+# The loop's own state files are never committed, ignored or not.
+if [ -z "$MODIFIED_FILES" ]; then
+  MODIFIED_FILES=$( { git diff --name-only; git ls-files --others --exclude-standard; } \
+    | grep -v -E '^\.claude-pr-fix-state' | sort -u )
+fi
 
 # Validate we have files to commit
 if [ -z "$MODIFIED_FILES" ]; then
@@ -878,10 +886,12 @@ printf 'fix: address PR review feedback (iteration %s)\n\n' "$ITERATION" > "$COM
 # SECURITY: Use sed with bracket expression for clearer, auditable quote removal
 # This is more readable than complex quote escaping: tr -d '"'"'"
 printf '%s' "$FIX_DESCRIPTIONS" | tr -d '`$(){}[];<>|&\\' | sed "s/['\"]//g" | head -c 500 >> "$COMMIT_MSG_FILE"
-cat >> "$COMMIT_MSG_FILE" << 'COMMIT_EOF'
-
-Co-Authored-By: Claude <noreply@anthropic.com>
-COMMIT_EOF
+# Trailer: the commit attribution lines this session's harness or the repo's
+# instructions give (a Co-Authored-By line naming the CURRENT model, often plus a
+# session line). Set COMMIT_TRAILER to them verbatim. Never copy a model name from
+# an older commit or from this file. With no attribution given, use the generic line.
+COMMIT_TRAILER="${COMMIT_TRAILER:-Co-Authored-By: Claude <noreply@anthropic.com>}"
+printf '\n\n%s\n' "$COMMIT_TRAILER" >> "$COMMIT_MSG_FILE"
 
 # Create commit using file (avoids all shell escaping issues)
 # IMPORTANT: Check for commit failure before proceeding
@@ -1302,7 +1312,17 @@ fi
 npm run lint && npm run check:types
 ```
 
-**If lint/type checks fail after fixes:**
+**First, classify a `check:types` failure.** Some repos gate types with a ratchet that also exits non-zero when strict errors go DOWN (the builder repo's `scripts/type-ratchet.ts`). That exit is good news, not a regression. Read the check's full output, stdout and stderr (the ratchet prints its verdict to stderr):
+
+| Output of `npm run check:types` | Meaning | Action |
+|---|---|---|
+| Contains `Type errors decreased` and not `TYPE RATCHET REGRESSION` | A fix removed strict errors | Do NOT revert. Run `npm run baseline:types`, add `type-baseline.json` to `MODIFIED_FILES`, then run `npm run check:types` again. The `&&` chain stopped at the ratchet, so the checks after it have not run yet. Only a failure on this second run goes to the recovery below. |
+| `npm run baseline:types` prints `REFUSING TO WRITE BASELINE` | The integrity gate suspects the compiler stopped checking files | Do NOT pass `--allow-collapse`. Stop the loop with state saved and show the output; a human decides. |
+| Anything else, including `TYPE RATCHET REGRESSION` | Regression | Follow the recovery below. |
+
+A repo without a ratchet never prints these phrases, so its failures always take the last row.
+
+**If lint/type checks fail after fixes (a regression):**
 
 The code got WORSE. Do NOT commit. Follow this recovery procedure:
 
@@ -1907,10 +1927,10 @@ Quick reference for all error states and their recovery procedures.
 | Error | Detection | Recovery |
 |-------|-----------|----------|
 | **Lint failure** | `npm run lint` exits non-zero | Revert file, mark issue [SKIP-MANUAL], continue |
-| **Type check failure** | `npm run check:types` exits non-zero | Revert file, mark issue [SKIP-MANUAL], continue |
+| **Type check failure** | `npm run check:types` exits non-zero | Ratchet improvement (`Type errors decreased`): re-baseline with `npm run baseline:types`, commit `type-baseline.json`, re-run. Otherwise: revert file, mark issue [SKIP-MANUAL], continue |
 | **Commit failure** | `git commit` exits non-zero | Check for empty staging, hooks failure; fix and retry |
 | **Push failure** | `git push` exits non-zero | Check for conflicts, auth issues; manual intervention |
-| **Staging mismatch** | Tracked files != `git diff --name-only` | Review discrepancy, discard or include |
+| **Staging mismatch** | Tracked files != `git diff --name-only` + `git ls-files --others --exclude-standard` | Review discrepancy, discard or include |
 
 ### Workflow/CI Errors
 
