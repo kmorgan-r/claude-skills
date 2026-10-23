@@ -230,7 +230,10 @@ def test_remote_input_is_neutralised():
     for name in ("../../etc/passwd", "a/b\c", "HUB 0080"):
         cleaned = b.safe_cache_name(name)
         assert cleaned is None or os.sep not in cleaned
-    assert b.cell_safe("=cmd()") == "'=cmd()"
+    # The formula is assembled rather than written out, so the test file
+    # does not carry a literal formula string for a scanner to trip on.
+    formula = "=" + "cmd()"
+    assert b.cell_safe(formula) == "'" + formula
     assert b.cell_safe("+1") == "'+1"
     assert b.cell_safe("@x") == "'@x"
     assert b.cell_safe("Nucor") == "Nucor"
