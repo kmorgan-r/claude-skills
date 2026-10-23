@@ -4,6 +4,31 @@ What can be read programmatically, what cannot, and why. The distinction
 matters because it decides whether a gap in the lead list is a bug or a
 licensing boundary.
 
+Two things changed on 2026-10-23. The NSF caveat below matters more than
+it looks. And three further registries turned out to be readable, which
+means the "not readable" list is shorter than it was.
+
+| Registry | Readable | Expiry date | US coverage | Terms |
+|---|---|---|---|---|
+| NSF | yes, JSON API | exact date | the base of the list | needs written permission, see below |
+| EPD Hub | yes, JSON + PDFs | exact date | 101 EPDs, 6 in window | most permissive of the lot |
+| EPD Portal | yes, documented API + MCP | **year only** | 77 EPDs | source terms govern |
+| EPD International | HTML + API, list embedded | on the PDF | large | forbids data products |
+| EC3 | paid tier only | exact date | large | paid tier required |
+| UL, ASTM, SCS | no - they block scripted access | | | |
+| Smart EPD | no - scripted retrieval banned, data is EC3's | | | |
+
+**None of them closes the California Buy Clean gap.** The missing
+materials - structural steel, rebar, flat glass - are US programme EPDs
+living in NSF, UL, ASTM and SCS, and of those only NSF is scriptable. The
+European registries have plenty of rebar and steel, but they are European
+EPDs for European projects, not the US EPDs a California buyer needs.
+
+What the extra sources buy is coverage of US manufacturers who publish
+through a European programme operator. That is a real, if small, addition:
+6 more US companies in the expiry window from EPD Hub, 12 more US EPDs
+expiring in 2027 from EPD Portal.
+
 ## Readable: NSF (with a licensing caveat - read this)
 
 The JSON API behind <https://listings.nsf.org>.
@@ -87,6 +112,131 @@ a substitute for permission:
 - **Some PDFs.** A handful of listings point at a document that is not
   in blob storage. The listing stays, the document is missing.
 
+## Readable: EPD Hub
+
+<https://manage.epdhub.com> is the public library of **EPD Hub BV**
+(Amsterdam, company no. 869165069), an ISO 14025 programme operator and an
+ECO Platform member. It is a different organisation from Building
+Transparency, so EC3's licence does not govern it.
+
+The list is served by the site's own JSON endpoint:
+
+```
+GET https://manage.epdhub.com/?request_type=ajax&page=1&page_size=100
+```
+
+It takes `page`, `page_size`, `sort`, `search`, and the filters `category`,
+`product_type`, `manufacturer`, `country`, `date_published` and
+`date_valid`. **Date filters are ISO `YYYY-MM-DD`** and `date_valid` is
+passed as a comma-separated range: `date_valid=2026-11-01,2027-10-31`.
+
+Each record carries `epd_number`, `manufacturer`, `product_name`,
+`product_type`, `category`, `country`, `date_published`, `date_valid` and
+an `epds` array with a PDF download path. Fetch the PDF from
+`https://manage.epdhub.com` + that path.
+
+The PDFs are EN 15804 documents and they carry everything the lead list
+needs: manufacturer address, contact email, website, **EPD author**
+(the field that decides the in-house vs consultant score), verifier,
+scope, and "valid until <date>" in the header text.
+
+Scale: 7,475 EPDs, 101 of them US. In the 2026-11 to 2027-10 window, 364
+EPDs expire and 6 of those are US.
+
+### Why it is the most usable registry here
+
+<https://www.epdhub.com/general-terms-and-conditions> is a two-page PDF,
+"24 March 2026", governing "all use of services, documents and data
+provided by EPD Hub B.V.". What it says:
+
+- "The Operator grants the Customer a non-exclusive, limited license to
+  use the final, verified EPD documents. The use is limited to the
+  duration of the EPD validity and for use for which EPDs are appropriate."
+- Section 2 confirms that "the names of company representatives, contact
+  persons, and independent verifiers" are **made public on the EPD
+  document** and that the EPD is "available for public download" once
+  published. The legal basis is performance of contract, and the data is
+  retained for as long as the EPD remains valid.
+- No clause prohibits scraping, automated retrieval, bots, building a
+  database, commercial use, or redistribution. There is no "data
+  extraction or commercial exploitation" language of the kind NSF and
+  EC3 have.
+- There is no robots.txt on manage.epdhub.com (404). That is not a
+  permission, but it is not a prohibition either.
+
+Two honest caveats. The endpoint is the site's own internal AJAX, not a
+published API, so it can change without notice - treat it as
+unstable and keep the parser tolerant. And the licence grant in section 1
+runs to the **Customer** (the manufacturer who published the EPD), not
+expressly to a third party reading the library, so the terms do not
+clearly authorise commercial use of the library data by an outsider. A
+short email to contact-us@epdhub.com asking whether a consultancy may
+use the library for commercial lead generation would close that gap for
+the price of one message. Ask before building on it.
+
+## Readable: EPD Portal
+
+<https://epdportal.org> is a **multi-source search** operated by
+Multicert (Poland), which also runs the EPD Polska programme. It indexes
+public EPD metadata from 11 operators: EPD-Global / EPD Norge (12,044),
+IBU (5,825), ÖKOBAUDAT (5,518), EPD Italy (2,874), EPD Danmark (1,647),
+Kiwa-Ecobility Experts (700), AENOR GlobalEPD (492), ITB (470), EPD
+Ireland (366), RTS EPD (265), EPD Poland (59). 30,260 records in total.
+
+This is the friendliest source to build on, because it documents itself
+for exactly this use. <https://epdportal.org/for-agents/> gives a
+read-only MCP server and a REST API, both free and anonymous:
+
+```
+GET https://data.epdportal.org/api/facets
+GET https://data.epdportal.org/api/search?q=concrete&sort=recent&limit=25&offset=0
+```
+
+The OpenAPI description is at
+`https://epdportal.org/wp-json/epdportal/v1/openapi` (server
+`https://data.epdportal.org/api`). The MCP endpoint is
+`https://epdportal.org/wp-json/epdportal/v1/mcp`, which exposes
+`search_epds` and `list_epd_sources`. Note the MCP endpoint rejects GET
+with 405 - it wants a POST with a JSON-RPC body, so drive the REST API
+unless you are wiring it into an MCP client.
+
+The critical limitation, stated by the operator: **"Validity is shown as
+a year, not an exact expiry date."** A record carries `valid_until: 2031`
+where NSF gives a day. A lead list that ranks by days-to-expiry needs the
+exact date, so this source can only ever be a second pass that flags
+"expires in 2027, go and get the exact date at source".
+
+US coverage is 77 records, all from EPD-Norway, IBU and ÖKOBAUDAT - the
+European operators, publishing for US manufacturers. 12 of the 77 expire
+in 2027, 11 in 2028, 43 in 2031.
+
+Its terms are also the most explicitly written down: "Full external
+datasets are not republished by this API. Source terms govern reuse, and
+source presence does not imply a partnership." So EPD Portal being free
+and open does not grant any right over EPD-Norway's data. Read the
+source operator's terms, not EPD Portal's.
+
+## Readable with effort: EPD International / Environdec
+
+<https://www.environdec.com/library> is a Next.js app. The API host is
+`https://api.prod.environdec.com`, and the endpoints visible in the app's
+JS chunk are `/api/v1/EPDLibrary/Collections/`, `/api/v1/EPDLibrary/EPD/`,
+`/api/v1/EPDLibrary/Files/EPDs/`, and
+`/api/v2/EPDLibrary/Files/<id>/Data` for a document. The list endpoint
+did not resolve - the record set appears to be embedded in the page's
+own flight data, and the page is 493 KB of it.
+
+The blocker is the terms, not the access. <https://www.environdec.com/general-terms>
+says users may not "redistribute or sell the EPD data or any parts
+thereof", may not "use them for the creation of another data product",
+and may not "create and/or distribute data products of their own".
+Attribution to the International EPD System and its trade mark is
+required. Their robots.txt disallows `/library` for one named bot and
+`/search` for everyone.
+
+So: readable, and not usable for a commercial lead list without their
+written permission.
+
 ## Not readable on the free tier: EC3 / openEPD
 
 <https://buildingtransparency.org/ec3> has the best structured data of any
@@ -164,38 +314,39 @@ either page.
 This is the registry most likely to close the flat glass and rebar gap.
 Worth a decision on the licence, not worth working around.
 
-## Not readable: EPD International / Environdec
-
-<https://www.environdec.com>. The terms forbid building your own data
-products from the data, and the data site's robots.txt disallows
-automated access. Manual lookups only, and even then the results cannot
-be republished as a dataset.
-
 ## Not readable: UL, ASTM, SCS
 
 All three block scripted access. Manual lookups only.
 
 UL is worth a special mention because it operates the Part A and Part B
 PCRs that the NSF EPDs reference, and a lot of the missing materials sit
-in UL's programme.
+in UL's programme. UL's EPDs live at <https://spot.ul.com/>, which
+answers 405 to every request including robots.txt. <https://epdportal.org>
+does not index UL.
+
+ASTM's robots.txt is permissive (`Allow: /` with two paths disallowed) and
+its site is reachable, but no EPD listing endpoint was found.
+SCS's robots.txt disallows four paths and nothing else; the site loads.
+Neither yielded a listing API.
 
 ## Not readable: Smart EPD
 
 <https://smartepd.com>. Its library has an expiration filter, but the
 filter sends you to EC3, so the data is EC3's data and the licence
 problem comes with it. Its terms of use explicitly ban scripted
-retrieval.
-
-## Not readable: EPD Portal
-
-The EU's portal. It carries almost no US programme operators, so it is
-not a source of US Buy Clean leads.
+retrieval. Its robots.txt is permissive but its terms are not.
 
 ## What this means for coverage
 
-The lead list is complete for what NSF lists. It is not complete for
-California Buy Clean materials, because the materials NSF does not list
-are the ones in the registries we cannot read.
+The lead list is complete for what NSF lists, plus 6 more US companies
+from EPD Hub and 12 US EPDs flagged for 2027 from EPD Portal. It is still
+not complete for California Buy Clean materials, and no crawl of the
+public web will change that: **the missing materials are US programme
+EPDs, and the US programme operators are the ones that block scripted
+access or charge for a licence.**
+
+Crawling more sites does not close this gap. It adds European EPDs for
+European projects, which is not what a California buyer needs.
 
 Two ways to close it, in order of effort:
 
@@ -214,4 +365,11 @@ Two ways to close it, in order of effort:
 The headless browser route is also the only way to see EPD type,
 facility-specificity and developer fields for the non-NSF registries
 without the EC3 API, since those registries expose them on the page but
-not in a licensed export.
+not in a licensed export. Note that EPD Hub's PDFs already give the EPD
+author and scope, so a browser is only needed for UL, ASTM and SCS.
+
+### And ask NSF
+
+Separately from EC3, NSF's own terms need written permission for what
+this skill already does. See the caveat at the top of this file. That
+email should go out regardless of which other source is used.

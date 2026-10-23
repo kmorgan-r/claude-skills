@@ -15,8 +15,7 @@ your customer's bid are better than a routine renewal.
 
 ## Sources
 
-NSF is the only EPD registry that can be read programmatically without a
-licence. The JSON API behind <https://listings.nsf.org> is the source:
+NSF is the source. The JSON API behind <https://listings.nsf.org> gives:
 
 | What | Endpoint |
 |---|---|
@@ -30,7 +29,29 @@ Both endpoints take the same empty search body, which is in
 Do not use `info.nsf.org`. That host is unreachable from every network we
 tried, and the EPD PDFs it served now live in the blob storage above.
 
-Other registries are not scriptable, and the reasons are in
+**NSF's published terms need written permission for this use.** They
+prohibit "any form of data extraction or data mining, or other commercial
+exploitation of any kind" without prior written permission. The lead list
+is not republished as a dataset and uses no NSF mark, but it is a
+commercial list built from extraction. Ask info@nsf.org. Until that
+answer comes back, keep the request volume small and keep the script's
+identifying User-Agent truthful. The full reasoning is in
+`references/sources.md`.
+
+Two more registries are readable and are worth adding when the coverage
+matters more than the source count:
+
+- **EPD Hub** (`manage.epdhub.com`) - a separate operator from Building
+  Transparency, so EC3's licence does not govern it. Serves its own JSON
+  listing with exact expiry dates, and its PDFs carry the EPD author,
+  which is what the rubric needs. Its terms are the most permissive of
+  any registry here.
+- **EPD Portal** (`epdportal.org`) - a multi-source search with a
+  documented free API and a read-only MCP endpoint, built openly for
+  agents. But it shows validity as a **year**, not a date, and it indexes
+  European operators, not the US ones.
+
+The rest are not scriptable, and the reasons are in
 `references/sources.md`:
 
 - **EC3 / openEPD** has the data we want, including validity end dates and
@@ -41,9 +62,11 @@ Other registries are not scriptable, and the reasons are in
 - **UL, ASTM, SCS** block scripted access. Manual lookups only.
 - **Smart EPD** sends its EPDs to EC3, and its terms ban scripted retrieval.
 
-So the material gaps in this list, flat glass and rebar, are real and they
-are in the non-NSF registries. See `references/sources.md` before promising
-coverage of them.
+So the material gaps in this list, flat glass and rebar, are real, and
+crawling more of the public web will not close them: those are US
+programme EPDs, and the US programme operators are the ones that block
+scripted access or charge for a licence. See `references/sources.md`
+before promising coverage of them.
 
 ## Running it
 
