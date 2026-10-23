@@ -303,7 +303,8 @@ Loop mode uses `.claude-pr-fix-state.json` to track progress and issue history a
    - If `attempts.length >= 3` → auto-skip, set `status: "skipped"`, reason: "3 attempts exhausted"
    - If has prior attempts → must articulate a **different** approach or skip
    - If no history → fix normally
-4. If the outsider panel is due (Loop Step 2a), run it before fixing; its plan supplies the approaches for this round
+   - **Exception, panel round:** when item 4 applies, a finding skipped for exhausted attempts gets one more attempt if the panel plan covers it (Loop Step 2a, Step E)
+4. If the outsider panel is due, or already ran for this round (Loop Step 2a), run it if due, then take this round's approaches from its plan
 
 **Before attempting EACH fix (CRITICAL for auto-compaction recovery):**
 1. Create or update `issue_history["file:line"]` with priority, description, and status
@@ -508,7 +509,7 @@ if [ -f ".claude-pr-fix-state.json" ]; then
         # Reset per-session iteration, but PRESERVE session-independent total_rounds AND
         # total_rounds_ceiling. (--reset is the only path that zeroes total_rounds; it
         # deletes the file entirely.) The ceiling is raise-only here: a plain --loop
-        # (default MAX_ROUNDS=8) must not clobber a previously-raised ceiling, yet an
+        # (default MAX_ROUNDS=6) must not clobber a previously-raised ceiling, yet an
         # explicit --max-rounds=<higher> must still raise it — so take max(stored, requested).
         # Mirrors how max_iterations is intentionally left untouched by these reset blocks.
         jq --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -530,7 +531,7 @@ if [ -f ".claude-pr-fix-state.json" ]; then
         # Reset per-session iteration, but PRESERVE session-independent total_rounds AND
         # total_rounds_ceiling. (--reset is the only path that zeroes total_rounds; it
         # deletes the file entirely.) The ceiling is raise-only here: a plain --loop
-        # (default MAX_ROUNDS=8) must not clobber a previously-raised ceiling, yet an
+        # (default MAX_ROUNDS=6) must not clobber a previously-raised ceiling, yet an
         # explicit --max-rounds=<higher> must still raise it — so take max(stored, requested).
         # Mirrors how max_iterations is intentionally left untouched by these reset blocks.
         jq --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -657,7 +658,7 @@ Run the standard fix workflow (Steps 1-5 above). Between Step 3 (parse the revie
 The PR is ready for merge from a code quality perspective.
 ```
 
-**2. Outsider panel due** → run Loop Step 2a before Step 4. Its plan is this round's source of fix approaches.
+**2. Outsider panel due** → run Loop Step 2a before Step 4. Its plan is this round's source of fix approaches. **Panel already run for this round** (an `outsider_panels` entry has `before_round == total_rounds + 1`, as after a compaction or a `--continue` mid-round) → do not run it again; that entry's plan is this round's source of fix approaches, and Step E applies.
 
 **3. All skipped** → if ALL flagged issues have `status: "skipped"` in `issue_history` (as the panel left them, when one ran), exit the loop:
 
@@ -678,6 +679,7 @@ With the default ceiling of 6 rounds, the panel runs at most twice on a PR: befo
 - `--no-panel` was not passed
 - the latest review has at least one urgent issue (skipped ones count)
 - `total_rounds >= 2` and `total_rounds` is even (so the next round, `total_rounds + 1`, is 3, 5, 7, …)
+- `total_rounds < total_rounds_ceiling` (no panel for a round the ceiling forbids)
 - `outsider_panels` has no entry whose `before_round == total_rounds + 1` (a resumed session does not run the same panel twice)
 
 **Step A — Collect the brief.** Gather these facts, and only these:
@@ -739,7 +741,7 @@ OUTSIDE PR: <F# — file it needs — why> | none
 2. Next, prefer the approach whose WHY EARLIER ATTEMPTS FAILED line explains the re-flags with file:line evidence.
 3. Break remaining ties by the smaller diff.
 
-An approach already recorded for that finding in `issue_history` is not eligible. A finding left with no eligible approach is handled as in Step 5: a genuinely different approach of your own, or skip.
+An approach already recorded for that finding in `issue_history` is not eligible. A finding left with no eligible approach gets no panel attempt: if it is already skipped or has 3+ attempts it stays skipped; otherwise it is handled as in Step 5 (a genuinely different approach of your own, or skip).
 
 A finding that two or more seats list under DISPUTED is not fixed: set its `status: "skipped"`, reason `"outsider panel disputes finding: <evidence>"`. A finding that a seat lists under OUTSIDE PR, with no in-PR approach from any other seat, is not fixed either: set its `status: "skipped"`, reason `"outsider panel: fix needs <file>, outside this PR"`. Both kinds land in the Human Review Needed list. A dispute from a single seat is printed but does not stop the fix.
 
@@ -778,7 +780,7 @@ Starting round 3 with the panel plan...
 ```
 
 **Step E — The panel round.** Run Steps 4-5 as usual, with these differences:
-- Each todo's approach is the plan step that covers it. Record the attempt with `"source": "outsider-panel"`.
+- Each todo's approach is the plan step that covers it. Match a plan step's `covers` entries to the review's findings the way Loop Step 5 reconciles findings with `issue_history`: same file first, then the closest line and the description, because line numbers shift between rounds. Record the attempt with `"source": "outsider-panel"`.
 - A step that covers several findings is implemented once, and the same attempt is recorded on each finding it covers.
 - A finding skipped because its attempts were exhausted gets one more attempt in this round when the plan covers it: set its status back to `"pending"`. A finding the panel itself skipped (disputed, outside PR) stays skipped.
 - The first line of the commit message reads `fix: address PR review feedback (iteration N, outsider panel)`.
@@ -1922,7 +1924,7 @@ Quick reference for all error states and their recovery procedures.
 |-------|-----------|----------|
 | **Max iterations** | `iteration >= max_iterations` | Stop, save state for `--continue` |
 | **Regression** | `current_count > previous_count` | Revert last iteration, blacklist file |
-| **Recurring issue** | `issue_history[key].attempts.length >= 3` or `status == "skipped"` | Auto-skip, notify user |
+| **Recurring issue** | `issue_history[key].attempts.length >= 3` or `status == "skipped"` | Auto-skip, notify user. In a panel round, a covered exhausted issue gets one more attempt (Loop Step 2a) |
 | **Auto-compaction mid-fix** | Context compaction occurs | Re-read state file, resume from saved state |
 
 ### Recovery Commands Cheat Sheet
