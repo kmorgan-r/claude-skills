@@ -798,7 +798,7 @@ Then the loop continues as usual: Loop Steps 3-6, then the next round. If urgent
 
 **IMPORTANT: Claude MUST track modified files during the fix phase.**
 
-**Implementation:** At the START of fix phase, initialize an empty list. Each time you use the Edit or Write tool, append the file path to the list. A new file you create, such as a new test file, goes on the list too:
+**Implementation:** At the START of fix phase, initialize an empty list, and record the untracked files that already exist: `UNTRACKED_BEFORE=$(git ls-files --others --exclude-standard)`. Each time you use the Edit or Write tool, append the file path to the list. A new file you create, such as a new test file, goes on the list too, and so does a file a command writes for the fix (such as `type-baseline.json` at the repo root, from `npm run baseline:types`):
 
 ```
 ## Internal File Tracking (maintain during fix phase)
@@ -828,13 +828,17 @@ After fixing all items in the current iteration:
 
 ```bash
 # MODIFIED_FILES is the list tracked during the fix phase (Edit AND Write).
-# Fallback only if no list was kept: changed tracked files plus new untracked
-# ones. `git diff --name-only` never lists a new file (e.g. a new test), so
-# `git ls-files --others --exclude-standard` (untracked, not ignored) adds them.
+# Fallback only if no list was kept: changed tracked files plus the untracked
+# files that appeared during this fix phase. `git diff --name-only` never lists a
+# new file (e.g. a new test), so the untracked list is compared with
+# UNTRACKED_BEFORE (recorded at the start of the fix phase); files that were
+# already untracked before it are not part of the fix and are left out.
 # The loop's own state files are never committed, ignored or not.
 if [ -z "$MODIFIED_FILES" ]; then
-  MODIFIED_FILES=$( { git diff --name-only; git ls-files --others --exclude-standard; } \
-    | grep -v -E '^\.claude-pr-fix-state' | sort -u )
+  NEW_FILES=$(comm -13 <(printf '%s\n' "$UNTRACKED_BEFORE" | sort) \
+    <(git ls-files --others --exclude-standard | sort))
+  MODIFIED_FILES=$( { git diff --name-only; printf '%s\n' "$NEW_FILES"; } \
+    | grep -v -E '^\.claude-pr-fix-state' | grep -v '^$' | sort -u )
 fi
 
 # Validate we have files to commit
@@ -1340,6 +1344,8 @@ The code got WORSE. Do NOT commit. Follow this recovery procedure:
    # Revert ONLY the specific file that caused lint failure
    git checkout HEAD -- src/problematic-file.ts
    ```
+
+   A new file you created this round is untracked, so `git checkout` cannot revert it: delete it instead (`rm <file>`) and drop it from `MODIFIED_FILES`.
 
    **WARNING:** Do NOT use `git checkout -- .` here - it would discard ALL fixes made this iteration, not just the problematic one. Only revert the specific file(s) that caused the lint/type failure.
 
@@ -1927,7 +1933,7 @@ Quick reference for all error states and their recovery procedures.
 | Error | Detection | Recovery |
 |-------|-----------|----------|
 | **Lint failure** | `npm run lint` exits non-zero | Revert file, mark issue [SKIP-MANUAL], continue |
-| **Type check failure** | `npm run check:types` exits non-zero | Ratchet improvement (`Type errors decreased`): re-baseline with `npm run baseline:types`, commit `type-baseline.json`, re-run. Otherwise: revert file, mark issue [SKIP-MANUAL], continue |
+| **Type check failure** | `npm run check:types` exits non-zero | Ratchet improvement (`Type errors decreased`): re-baseline with `npm run baseline:types`, re-run `npm run check:types`, then commit `type-baseline.json` with the fix. Otherwise: revert file, mark issue [SKIP-MANUAL], continue |
 | **Commit failure** | `git commit` exits non-zero | Check for empty staging, hooks failure; fix and retry |
 | **Push failure** | `git push` exits non-zero | Check for conflicts, auth issues; manual intervention |
 | **Staging mismatch** | Tracked files != `git diff --name-only` + `git ls-files --others --exclude-standard` | Review discrepancy, discard or include |
