@@ -4,7 +4,7 @@ What can be read programmatically, what cannot, and why. The distinction
 matters because it decides whether a gap in the lead list is a bug or a
 licensing boundary.
 
-## Readable: NSF
+## Readable: NSF (with a licensing caveat - read this)
 
 The JSON API behind <https://listings.nsf.org>.
 
@@ -26,6 +26,52 @@ backwards silently selects the wrong rows.
 headless Chromium and four proxy routes all failed, and the Wayback
 Machine has no snapshot of the listing pages. The API replaced it and
 works.
+
+### The caveat: NSF's published terms are narrower than "it's a public API"
+
+<https://www.nsf.org/privacy-copyright> is the operative terms document
+for the listings (there is no separate API or bulk-data licence published).
+Two clauses matter:
+
+- "These materials may not be copied for **commercial use or
+  distribution**, nor may these materials be modified or **reposted to
+  other sites**, without the prior express written permission of NSF
+  International."
+- "Any use of materials on this site, including reproduction... any form of
+  **data extraction or data mining, or other commercial exploitation of any
+  kind**, without prior written permission of NSF is strictly prohibited."
+
+The second clause covers reading the listing and building a lead list
+from it. This is not a grey area the way a robots.txt is: the terms name
+"data extraction" and "commercial exploitation" explicitly.
+
+**How this was read, and what it does and does not permit.** The lead list
+identifies companies to contact about renewing their own EPD. It is not
+republished as a dataset, it is not a substitute for the listings site,
+and it uses no NSF mark. But it is a commercial list built from data
+extraction, so on a literal reading of the clause it needs NSF's written
+permission.
+
+**Get the permission.** One email to info@nsf.org, or data.protection@nsf.org
+for anything touching the data itself, asking for written permission to
+use the certified-products listings for lead generation. Cost: an email.
+Benefit: the whole lead list stops being a compliance question, and the
+answer is likely to be a yes, because EPDs are published precisely so
+that people can find them.
+
+Two things that reduce the exposure in the meantime, neither of which is
+a substitute for permission:
+
+- The script identifies itself honestly. `UA = "Mozilla/5.0 (compatible;
+  epd-expiry-leads/1.0)"`. Do not change this to a browser string to hide
+  the traffic. If NSF asks who is calling, a truthful answer is a much
+  better position than a disguised one, and the identifying UA is also
+  what makes the permission request credible.
+- The volume is small. A full run is 2 listing API POSTs plus one GET
+  per EPD, about 119 requests. That is a person clicking through the
+  listings site, not a crawler. The PDF cache means a re-run costs 2
+  requests. Keep it that way - do not add a multi-registry crawler, and
+  do not run it in a loop.
 
 ### What the API does not give
 
