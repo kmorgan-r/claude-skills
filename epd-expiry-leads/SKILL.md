@@ -47,6 +47,15 @@ public domain, and there is no robots.txt. NSF has no rebar or
 structural steel category at all, so without this list the Buy Clean
 half of the rubric scores nothing.
 
+**The Steel Tube Institute publishes the UL Environment EPDs for the HSS
+producers**, at
+<https://steeltubeinstitute.org/hollow-structural-sections/hss-facility-specific-epds/>.
+UL's own site blocks scripted access, so this is where the author of
+those declarations comes from - and for Maruichi Oregon Steel Tube,
+Searing and Vest the author is Sphera, a consultant, which is worth
+knowing before the call. `references/declarations.csv` records what has
+been read; the code merges it into the Caltrans rows.
+
 Two more registries are readable and are worth adding when the coverage
 matters more than the source count:
 

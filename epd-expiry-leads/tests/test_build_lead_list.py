@@ -153,6 +153,21 @@ def test_insulation_is_not_automatically_california():
     assert "MN" in b.MATERIALS["insulation"]["states"]
 
 
+def test_declaration_family_lookup():
+    """UL revises declarations, so the lookup is on the family.
+
+    The Caltrans list carries 4790434237.101.1 for Vest and the document
+    is 4790434237.101.3. A lookup on the whole number would miss it and
+    leave the developer unknown, which is the thing the lookup exists to
+    fix.
+    """
+    assert caltrans_aml._family("4790434237.101.1") == "4790434237.101"
+    assert caltrans_aml._family("4790434237.101.3") == "4790434237.101"
+    known = caltrans_aml.declarations()
+    assert "4790434237.101" in known
+    assert known["4790434237.101"]["preparer_org"] == "Sphera Solutions Inc"
+
+
 def test_author_is_own():
     """EPD Hub names the author; only the manufacturer's own person counts.
 
