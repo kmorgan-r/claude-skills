@@ -696,9 +696,9 @@ The brief carries no diagnosis of your own, no preferred next approach, and no t
 | Root-cause architect | Treat the findings as symptoms. Which design choice in this PR produces them? Propose the structural change, inside the PR's files, that makes the whole class of finding impossible. |
 | Reviewer's advocate | Read each finding as its author meant it. Why did each earlier attempt satisfy the letter but not the intent? What will the reviewer flag on the next push? |
 | Simplifier | Can the code behind the findings be deleted, narrowed, or replaced by a helper that already exists in this repo? Find the smallest diff that removes each finding. |
-| Domain specialist | `supabase/migrations/` or RLS: Postgres / RLS expert. `supabase/functions/`: Deno edge-function expert. `.tsx`, `src/hooks/` or a `use*.ts` file: React expert. `.py`: Python service expert. Test files only: test-design expert. Otherwise: TypeScript expert. |
+| Domain specialist | Lens: "Judge the findings and the code behind them as a {specialty}. Which idiom or guarantee of that stack fixes them properly, rather than guarding around them?" Specialty: `supabase/migrations/` or RLS: Postgres / RLS expert. `supabase/functions/`: Deno edge-function expert. `.tsx`, `src/hooks/` or a `use*.ts` file: React expert. `.py`: Python service expert. Test files only: test-design expert. Otherwise: TypeScript expert. |
 
-**Step C — Dispatch all four in ONE message** (parallel Agent tool calls), with `subagent_type: "Plan"` (read-only). If the `Plan` type is not available, use `general-purpose`; the prompt's read-only rule still applies. Each prompt is the template below with the seat's lens filled in:
+**Step C — Dispatch all four in ONE message** (parallel Agent tool calls), with `subagent_type: "Plan"` (read-only). If the `Plan` type is not available, use `general-purpose`; the prompt's read-only rule still applies. If no Agent tool is available at all, print `Outsider panel skipped: no subagent tool` and run the round as a plain fix round; record nothing in `outsider_panels`. Each prompt is the template below with the seat's lens filled in:
 
 ````
 You are an outside expert ({seat}) called in on PR #{pr} after {total_rounds} fix rounds did not clear the review findings below. You have not seen this PR before. Investigate it yourself, then propose the approach you would take.
@@ -741,6 +741,8 @@ OUTSIDE PR: <F# — file it needs — why> | none
 2. Next, prefer the approach whose WHY EARLIER ATTEMPTS FAILED line explains the re-flags with file:line evidence.
 3. Break remaining ties by the smaller diff.
 
+Choose steps only for the urgent findings. A step is never chosen, or widened, to fix a Medium or Low item, even when an expert notices one.
+
 An approach already recorded for that finding in `issue_history` is not eligible. A finding left with no eligible approach gets no panel attempt: if it is already skipped or has 3+ attempts it stays skipped; otherwise it is handled as in Step 5 (a genuinely different approach of your own, or skip).
 
 A finding that two or more seats list under DISPUTED is not fixed: set its `status: "skipped"`, reason `"outsider panel disputes finding: <evidence>"`. A finding that a seat lists under OUTSIDE PR, with no in-PR approach from any other seat, is not fixed either: set its `status: "skipped"`, reason `"outsider panel: fix needs <file>, outside this PR"`. Both kinds land in the Human Review Needed list. A dispute from a single seat is printed but does not stop the fix.
@@ -780,7 +782,7 @@ Starting round 3 with the panel plan...
 ```
 
 **Step E — The panel round.** Run Steps 4-5 as usual, with these differences:
-- Each todo's approach is the plan step that covers it. Match a plan step's `covers` entries to the review's findings the way Loop Step 5 reconciles findings with `issue_history`: same file first, then the closest line and the description, because line numbers shift between rounds. Record the attempt with `"source": "outsider-panel"`.
+- Each todo's approach is the plan step that covers it. Match a plan step's `covers` entries to the review's findings the way Loop Step 5 reconciles findings with `issue_history`: same file first, then the closest line and the description, because line numbers shift between rounds. The attempt goes on the finding's existing `issue_history` key (re-keying would reset its attempt count). Record the attempt with `"source": "outsider-panel"`.
 - A step that covers several findings is implemented once, and the same attempt is recorded on each finding it covers.
 - A finding skipped because its attempts were exhausted gets one more attempt in this round when the plan covers it: set its status back to `"pending"`. A finding the panel itself skipped (disputed, outside PR) stays skipped.
 - A finding that takes its approach from Step 5 instead of the plan (no eligible panel approach) gets no `source` tag.
