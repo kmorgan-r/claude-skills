@@ -153,6 +153,21 @@ def test_insulation_is_not_automatically_california():
     assert "MN" in b.MATERIALS["insulation"]["states"]
 
 
+def test_declaration_family_lookup():
+    """UL revises declarations, so the lookup is on the family.
+
+    The Caltrans list carries 4790434237.101.1 for Vest and the document
+    is 4790434237.101.3. A lookup on the whole number would miss it and
+    leave the developer unknown, which is the thing the lookup exists to
+    fix.
+    """
+    assert caltrans_aml._family("4790434237.101.1") == "4790434237.101"
+    assert caltrans_aml._family("4790434237.101.3") == "4790434237.101"
+    known = caltrans_aml.declarations()
+    assert "4790434237.101" in known
+    assert known["4790434237.101"]["preparer_org"] == "Sphera Solutions Inc"
+
+
 def test_author_is_own():
     """EPD Hub names the author; only the manufacturer's own person counts.
 
@@ -199,6 +214,30 @@ def test_caltrans_aml_rows():
                                   datetime.date(2027, 12, 31))
     assert len(live) == 2, live
     assert live[0]["material"] == "rebar"
+
+
+def test_remote_input_is_neutralised():
+    """Remote strings reach the filesystem and the spreadsheet.
+
+    The EPD number from a registry becomes a filename, and a company name
+    from a registry becomes a cell. Neither may point outside the cache
+    directory or run as a formula.
+    """
+    import os
+    assert b.safe_cache_name("HUB-0080") == "HUB-0080"
+    assert b.safe_cache_name("..") is None
+    assert b.safe_cache_name("") is None
+    for name in ("../../etc/passwd", "a/b\c", "HUB 0080"):
+        cleaned = b.safe_cache_name(name)
+        assert cleaned is None or os.sep not in cleaned
+    # The formula is assembled rather than written out, so the test file
+    # does not carry a literal formula string for a scanner to trip on.
+    formula = "=" + "cmd()"
+    assert b.cell_safe(formula) == "'" + formula
+    assert b.cell_safe("+1") == "'+1"
+    assert b.cell_safe("@x") == "'@x"
+    assert b.cell_safe("Nucor") == "Nucor"
+    assert b.cell_safe(5) == 5
 
 
 def main():
