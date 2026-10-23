@@ -216,6 +216,27 @@ def test_caltrans_aml_rows():
     assert live[0]["material"] == "rebar"
 
 
+def test_remote_input_is_neutralised():
+    """Remote strings reach the filesystem and the spreadsheet.
+
+    The EPD number from a registry becomes a filename, and a company name
+    from a registry becomes a cell. Neither may point outside the cache
+    directory or run as a formula.
+    """
+    import os
+    assert b.safe_cache_name("HUB-0080") == "HUB-0080"
+    assert b.safe_cache_name("..") is None
+    assert b.safe_cache_name("") is None
+    for name in ("../../etc/passwd", "a/b\c", "HUB 0080"):
+        cleaned = b.safe_cache_name(name)
+        assert cleaned is None or os.sep not in cleaned
+    assert b.cell_safe("=cmd()") == "'=cmd()"
+    assert b.cell_safe("+1") == "'+1"
+    assert b.cell_safe("@x") == "'@x"
+    assert b.cell_safe("Nucor") == "Nucor"
+    assert b.cell_safe(5) == 5
+
+
 def main():
     tests = [value for name, value in sorted(globals().items())
              if name.startswith("test_") and callable(value)]
