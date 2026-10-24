@@ -10,7 +10,7 @@ follows at runtime) plus any bundled scripts, references, and evals.
 | [`climatepoint-contact-intelligence`](./climatepoint-contact-intelligence) | Turns a raw contact CSV into a scored sales map: enriches contacts via web research (Title, LinkedIn, Company, Summary, Headline), classifies by persona/need/score, and emits a sales-ready output file. The scorer that `find-cold-leads` hands off to. |
 | [`find-cold-leads`](./find-cold-leads) | Finds and **qualifies** B2B cold leads on free signals, spends scarce Apollo enrichment credits only on rows that fit the ICP, tags each with a region-aware compliance posture, and exports a classifier-ready / Odoo-ready sheet. |
 | [`linkedin-outreach-odoo`](./linkedin-outreach-odoo) | Picks up where `find-cold-leads` leaves off: reads eligible `mailing.contact` leads from Odoo, drafts a personalized LinkedIn connection note per lead, sends connection requests via the ConnectSafely API (dry-run by default), and writes outreach state back to Odoo. |
-| [`fix-pr-reviews`](./fix-pr-reviews) | Fetches the most recent GitHub PR review comments and systematically addresses each one — no copy-pasting from the PR. Supports a `--loop` mode. |
+| [`fix-pr-reviews`](./fix-pr-reviews) | Fetches the most recent GitHub PR review comments and systematically addresses each one — no copy-pasting from the PR. Supports a `--loop` mode that, before rounds 3 and 5, calls in a panel of four fresh-context expert subagents to plan a better approach instead of retrying the same fix. |
 | [`ship`](./ship) | Conductor that drives the post-brainstorm dev pipeline hands-off — spec-review, plan, plan-review, implementation, PR, then the `fix-pr-reviews` loop — resuming across `/clear` via a state file, stopping only on failure or final merge. |
 | [`ship-fleet`](./ship-fleet) | Runs up to 10 `/ship` pipelines in parallel: one headless Claude Code instance per GitHub issue, each in its own git worktree, coordinated by a fleet manifest and a polling monitor with crash recovery. Human gates (merge, DB acks) stay human. **Windows-only** (PowerShell). |
 | [`reviewing-plans`](./reviewing-plans) | Reviews a written implementation plan before execution: dispatches 2–5 domain-specific reviewer agents in parallel, consolidates findings, and applies approved fixes to the plan file. |
@@ -97,6 +97,8 @@ cp -r find-cold-leads ~/.claude/skills/
 ### fix-pr-reviews
 - **Needs** the GitHub CLI (`gh`) authenticated.
 - Invoke `/fix-pr-reviews` (optionally `--loop`) inside a repo with an open PR.
+- **Loop mode stops at 6 total rounds** by default (`--max-rounds=<N>` raises it). Before rounds 3 and 5 it runs an outsider panel (four read-only `Plan` subagents); `--no-panel` turns that off.
+- **Synced from** `climatepoint-eco-report-builder/.claude/skills/fix-pr-reviews/SKILL.md`. The backend repo carries the same file. Change it there and copy it here, so the three stay identical.
 
 ### ship
 - **Part of the [superpowers](https://github.com/obra/superpowers) pipeline.** Delegates
