@@ -302,7 +302,7 @@ Loop mode uses `.claude-pr-fix-state.json` to track progress and issue history a
 - `checks` — the commands that must pass before a fix is committed, each with the directory it runs in. Read from the repo's own instructions (Loop Step 1, "Repo checks and review reach").
 - `incremental_review` — whether the review workflow reads only the commits pushed since an earlier review. Decides what a finding's absence from a review proves (Loop Step 5).
 - `confirmed_shas` — commits a confirmation review has re-read in full (Loop Step 5), so a resumed session never re-runs one twice.
-- `confirming` — the confirmation review in flight (`{"sha", "run_id", "rerun_time"}`), written before the re-run starts and cleared when its review is read, so a session that stops mid-wait resumes by watching that run rather than starting another. `null` when none is in flight.
+- `confirming` — the confirmation review in flight (`{"sha", "run_id", "attempt", "rerun_time"}`, `attempt` being the run's attempt number before the re-run), written before the re-run starts and cleared whenever the confirmation ends, so a session that stops mid-wait resumes by watching that run rather than starting another. `null` when none is in flight.
 
 **Session-independent fields** (survive re-invocation; only `--reset` clears):
 - `total_rounds` — count of completed rounds across **every** session on this PR. Never reset when `--loop` restarts. In the example above it is `11` while `iteration` is only `2` — the PR was re-driven across many sessions, and `total_rounds` (unlike `iteration`) captures the true effort.
@@ -1200,7 +1200,17 @@ With 1 and 2 but a skipped issue left, the loop exits with the "Human Review Nee
 
 **Confirmation review (only when `incremental_review` is true).** So when a review of only new commits has an urgent count of 0, re-run the review on that same commit before deciding. A workflow that reviews only new commits reads the whole PR when the commit it last reviewed is this one, which is what a re-run is.
 
-**Before the re-run, write `confirming`** to the state file with the Write tool: `sha` = the PR's head commit, `run_id` = `RUN_ID`, and `rerun_time` = the current UTC time (`date -u +%Y-%m-%dT%H:%M:%SZ`). Then run the snippet with `RERUN_TIME` set to that same `rerun_time`. **On a resume with `confirming` set for the PR's head commit,** do not re-run: watch that `run_id` (skip the snippet's `gh run rerun` and attempt wait) and fetch with its `rerun_time`. With `confirming` set for an older commit, clear it and start again.
+**Start it in this order:**
+1. Read the run's attempt number: `gh run view "$RUN_ID" --json attempt --jq '.attempt'`.
+2. Write `confirming` to the state file with the Write tool: `sha` = the PR's head commit, `run_id` = `RUN_ID`, `attempt` = that number, and `rerun_time` = the current UTC time (`date -u +%Y-%m-%dT%H:%M:%SZ`).
+3. Run the snippet below with `RUN_ID`, `ATTEMPT` and `RERUN_TIME` set from `confirming`.
+
+**On a resume with `confirming` set,** read the run's current `attempt` and `status` (`gh run view "$RUN_ID" --json attempt,status`) and decide:
+- **`confirming` is for an older commit, or the attempt has not moved past `confirming.attempt`** (the re-run never started, or `gh run rerun` failed): clear `confirming` and start again from step 1.
+- **The attempt has moved and the run is still going:** do not re-run. Watch it (the snippet from `gh run watch` on), then fetch with `confirming.rerun_time`.
+- **The attempt has moved and the run has finished:** fetch the bot review posted after `confirming.rerun_time`. If there is none (the run failed, or the workflow's job limit stopped it), clear `confirming` and stop with the "Human Review Needed" heading, as for a confirmation that could not read the whole PR (below).
+
+**Clear `confirming` whenever the confirmation ends**, however it ends: its review read, Human Review Needed, an abort, or the `URGENT_TOTAL=-1` stop. It stays set only after a watch that timed out while the run still goes, when the user chose to resume later.
 
 ```bash
 # RUN_ID: the review run for the PR's head commit (Loop Step 4). In a new
@@ -1211,16 +1221,16 @@ if ! [[ "$RUN_ID" =~ ^[0-9]+$ ]]; then
   echo "❌ Invalid run ID: $RUN_ID"
   exit 1
 fi
-ATTEMPT=$(gh run view "$RUN_ID" --json attempt --jq '.attempt')
+# ATTEMPT and RERUN_TIME: confirming's attempt and rerun_time, set in THIS call.
 if ! [[ "$ATTEMPT" =~ ^[0-9]+$ ]]; then
-  echo "❌ Cannot read the run's attempt number: $ATTEMPT"
+  echo "❌ ATTEMPT is not set to confirming's attempt: $ATTEMPT"
   exit 1
 fi
-# RERUN_TIME: the rerun_time just written to confirming, set in THIS call.
 if ! [[ "$RERUN_TIME" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
   echo "❌ RERUN_TIME is not set to confirming's rerun_time: $RERUN_TIME"
   exit 1
 fi
+# A failed rerun leaves the attempt unmoved, so a resume clears confirming and starts again.
 gh run rerun "$RUN_ID" || exit 1
 # The rerun returns before its new attempt starts, and watching then would see
 # the finished attempt and return at once. Wait for the attempt number to move.
@@ -1236,6 +1246,7 @@ timeout $((CONFIRM_MINUTES * 60)) gh run watch "$RUN_ID" --exit-status
 WATCH_STATUS=$?
 if [ "$WATCH_STATUS" -eq 124 ]; then
   echo "⚠️ Confirmation review still running after $CONFIRM_MINUTES min (run $RUN_ID)"
+  exit 124   # do NOT fetch: the review is not posted yet (see "If the watch times out")
 fi
 # Then fetch the review exactly as above, with RERUN_TIME in place of PUSH_TIME.
 ```
@@ -1244,7 +1255,7 @@ fi
 
 Then:
 - **It read the whole PR:** add the commit to `confirmed_shas`, clear `confirming`, and reconcile again, under the whole-PR rule. Count its urgent findings. With 0, the loop exits by the rule above: All Clear, or Human Review Needed while a skipped issue is left. With more, it goes on as after any review: Loop Step 6, where all skipped means Human Review Needed, else the next round.
-- **It still read only new commits, or no run exists to re-run:** stop with the "Human Review Needed" heading. List every `pending` and `skipped` issue as `not confirmed: the reviewer reads only new commits`.
+- **It still read only new commits, no run exists to re-run, or the re-run posted no review:** clear `confirming` and stop with the "Human Review Needed" heading. List every `pending` and `skipped` issue as `not confirmed: no whole-PR review read them`.
 - **The commit is already in `confirmed_shas`** (a resumed session): do not re-run. Use the newest bot review posted after that commit's first review.
 
 The confirmation review is not a fix round: it does not advance `iteration` or `total_rounds`. **Nor is its count compared for regression** (Loop Step 6 item 3). It read the whole PR, while the review before it read only new commits, so a higher count is not a regression. Record its count as `previous_urgent_count`, and append it to `urgent_count_history`.
