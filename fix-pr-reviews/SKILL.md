@@ -172,19 +172,18 @@ Each section lists findings as `path:line`, a one-line defect and a failure scen
 
 Using the TodoWrite tool, create a prioritized list of items to address.
 
-**Default scope (what gets addressed):**
+**Scope (what gets addressed): the Critical and High sections, and nothing else.**
 1. **Critical/Blockers** - Must fix before merge
 2. **High Priority** - Should fix before merge
-3. **Bug fixes** - Bugs the review lists outside any severity section (older review formats only)
-4. **Recommended tests** - Test items the review lists outside any severity section (older review formats only)
 
-**The section decides, not the wording.** An item under a Medium, Low, Suggestions or Nitpicks heading is skipped even when it describes a bug, a race, a null dereference or a missing test. This repo's reviewer gives every finding a failure scenario, Medium ones included, so every Medium reads like a bug. Picking them up by wording makes each round a Medium-fixing round, and since every push re-runs the review (which finds new Mediums each time), the loop never converges. Only `--all` brings Medium items in.
+**The section decides, not the wording.** The todo list holds exactly the items listed under a Critical or High heading. An item under any other heading (Medium, Low, Suggestions, Nitpicks, Potential Bugs, Test Coverage), or under no severity heading at all, is not fixed, even when it describes a bug, a race, a null dereference or a missing test. This repo's reviewer gives every finding a failure scenario, Medium ones included, so every Medium reads like a bug. Picking them up by wording makes each round a Medium-fixing round, and since every push re-runs the review (which finds new Mediums each time), the loop never converges. No flag brings Medium items in.
 
-**Skipped by default:**
-- Medium priority / Suggestions (nice-to-have improvements), including bugs and test gaps listed there
-- Low priority / Nitpicks (minor optional changes)
-- Documentation-only suggestions
-- Code style preferences
+**Each fix changes only what its Critical or High item needs.** A fix is never widened to also clear a Medium or Low item in the same code, even when it sits on the next line.
+
+**Never fixed:**
+- Medium priority / Suggestions, including bugs and test gaps listed there
+- Low priority / Nitpicks
+- Bugs, test gaps, documentation and style items listed outside a Critical or High section (older review formats' bug and test lists included)
 
 Example todo structure:
 ```
@@ -192,9 +191,6 @@ Example todo structure:
 ☐ [CRITICAL] Add missing analytics label in src/utils/reportAnalytics.ts
 ☐ [HIGH] Add UUID validation to downloadPdf.ts:23-32
 ☐ [HIGH] Remove duplicate table definition in types.ts
-☐ [BUG] Fix race condition in PDF download - downloadPdf.ts:184-195
-☐ [TEST] Add unit tests for isoReportContent.ts helper functions
-☐ [TEST] Add integration tests for downloadIsoReportPdf
 ```
 
 ### Step 5: Address Issues Incrementally (Context-Aware)
@@ -208,7 +204,7 @@ Before starting any fixes, create a plan summary:
 
 **PR:** #2806 - feat: Add ISO 14067 report frontend integration
 **Review date:** 2026-01-15T12:39:34Z
-**Total items:** 13 (4 critical, 4 high, 2 bugs, 3 tests)
+**Total items:** 8 (4 critical, 4 high)
 
 ### Items to Address:
 1. [CRITICAL] Remove duplicate table definition - types.ts
@@ -233,13 +229,13 @@ Before starting any fixes, create a plan summary:
 
 **After completing each item, output a brief checkpoint:**
 ```
-✅ [1/13] Fixed duplicate table definition in types.ts
+✅ [1/8] Fixed duplicate table definition in types.ts
    → Approach: Removed lines 1696-1785 (duplicate iso_report_content)
 ```
 
 For skipped items:
 ```
-⏭️ [3/13] Skipped: src/handler.ts:80 — "Add input validation"
+⏭️ [3/8] Skipped: src/handler.ts:80 — "Add input validation"
    → Reason: 2 prior attempts failed, cannot determine different approach without domain context
 ```
 
@@ -397,7 +393,7 @@ Use `/fix-pr-reviews --loop` when:
 ┌─────────────────────────────────────────────────────────┐
 │  1. FIX PHASE                                           │
 │     - Fetch latest review from bot                      │
-│     - Parse CRITICAL + HIGH + BUG items                 │
+│     - Parse CRITICAL + HIGH items                       │
 │     - If no urgent items found → EXIT SUCCESS           │
 │     - Before rounds 3, 5, …: OUTSIDER PANEL             │
 │       (4 fresh experts → one plan; Loop Step 2a)        │
@@ -424,7 +420,7 @@ Use `/fix-pr-reviews --loop` when:
 ┌─────────────────────────────────────────────────────────┐
 │  4. CHECK PHASE                                         │
 │     - Fetch NEW review (must be newer than push)        │
-│     - Count remaining CRITICAL/HIGH/BUG items           │
+│     - Count remaining CRITICAL/HIGH items               │
 │     - If urgent_count == 0 → EXIT SUCCESS               │
 │     - If urgent_count > 0 → continue to safety check    │
 └─────────────────────────────────────────────────────────┘
@@ -657,7 +653,7 @@ Run the standard fix workflow (Steps 1-5 above). Between Step 3 (parse the revie
 ## Loop Complete - No Urgent Issues
 
 **Iterations:** 0 (no fixes needed)
-**Status:** PR review has no critical, high, or bug items
+**Status:** PR review has no critical or high items
 
 The PR is ready for merge from a code quality perspective.
 ```
@@ -688,7 +684,7 @@ With the default ceiling of 6 rounds, the panel runs at most twice on a PR: befo
 
 **Step A — Collect the brief.** Gather these facts, and only these:
 1. `gh pr view "$PR_NUMBER" --json title,body,baseRefName`: the PR's title, intent and base branch.
-2. The open urgent findings from the latest review, quoted verbatim, numbered F1…Fn. Medium, Low and other skipped-by-default items stay out.
+2. The open urgent findings from the latest review, quoted verbatim, numbered F1…Fn: the items under its Critical and High headings, and no others.
 3. For each finding, its `issue_history` attempts as one line each: round, approach, outcome.
 
 The brief carries no diagnosis of your own, no preferred next approach, and no theory of why the earlier attempts failed. The experts get the code, the findings and the facts. A brief that carries the fixer's hypothesis gets that hypothesis back, confirmed.
@@ -1102,7 +1098,7 @@ gh pr view "$PR_NUMBER" --json comments --jq "
 
 **Reconcile review with issue_history:**
 
-After fetching the new review, compare each flagged issue against `issue_history`:
+After fetching the new review, compare each of its Critical and High findings against `issue_history`. Its Medium, Low and other findings take no part:
 
 1. **Issues in new review that match a `file:line` in `issue_history`:**
    - Update `status` from `"pending"` to `"re-flagged"`
@@ -1112,7 +1108,9 @@ After fetching the new review, compare each flagged issue against `issue_history
    - Update `status` to `"resolved"`
    - The previous approach worked
 
-3. **New issues not in `issue_history`:**
+   - This includes a pending issue the new review lists only under Medium or Low: it is no longer urgent, so it is not fixed again
+
+3. **New Critical or High issues not in `issue_history`:**
    - These are genuinely new findings (possibly regressions from fixes)
    - Add to `issue_history` with empty `attempts` array
 
@@ -1135,10 +1133,10 @@ Rather than relying on fragile grep patterns, Claude should **parse the review b
 3. **Count issues per category** based on section headers and content:
    - Critical: Sections with "Critical", "Blocker", "MUST FIX"
    - High: Sections headed "High" (this repo's reviewer), "High Priority", "Should Fix"
-   - Bugs: Items mentioning "bug", "race condition", "memory leak", etc., **only outside any severity section**. Never count an item under a Medium, Low, Suggestions or Nitpicks heading, however it is worded.
+   - Nothing else counts: an item under any other heading, or under none, is not urgent, however it is worded.
 4. **Validate the review is non-empty** before analysis
 
-A review whose only findings are Medium has an urgent count of 0, so the loop exits with success. Don't start another round for it.
+A review whose only findings are Medium, Low or outside any Critical or High section has an urgent count of 0, so the loop exits with success. Don't start another round for it.
 
 This approach is more reliable than regex matching because:
 - It handles variations in review formatting
@@ -1207,8 +1205,7 @@ else
       # Matches "## High" (this repo's reviewer), "## High Priority" and "## High-Priority",
       # but not "## Highlights". The old "(High Priority)" pattern missed plain "## High".
       HIGH_COUNT=$(printf '%s' "$SAFE_BODY" | { grep -ciE "^## .*High([^a-z]|$)" || true; })
-      BUG_COUNT=$(printf '%s' "$SAFE_BODY" | { grep -ciE "^### .*(Bug|Potential Bug)" || true; })
-      URGENT_TOTAL=$((CRITICAL_COUNT + HIGH_COUNT + BUG_COUNT))
+      URGENT_TOTAL=$((CRITICAL_COUNT + HIGH_COUNT))
     fi
   fi
 fi
@@ -1233,10 +1230,9 @@ fi
 ## Review Check (Iteration 1 → 2)
 
 **New review received:** 2026-01-15T14:45:23Z
-**Urgent issues remaining:** 3
+**Urgent issues remaining:** 2
   - Critical: 0
   - High: 2
-  - Bugs: 1
 
 Continuing to iteration 2...
 ```
@@ -1247,15 +1243,14 @@ Or if clean:
 
 **Total iterations:** 2
 **Total fixes applied:** 8
-**Final review:** No critical, high, or bug items
+**Final review:** No critical or high items
 
 ### Summary of All Fixes:
-**Iteration 1:** (5 items)
+**Iteration 1:** (4 items)
 - ✅ Fixed duplicate table definition
 - ✅ Added UUID validation
 - ✅ Fixed race condition
 - ✅ Added error handling
-- ✅ Fixed memory leak
 
 **Iteration 2:** (3 items)
 - ✅ Added input sanitization
@@ -1273,7 +1268,7 @@ Or if all remaining issues are skipped:
 **Resolved:** 5 issues
 **Skipped (needs human):** 3 issues
   - [HIGH] src/handler.ts:80 — "Add input validation" (2 attempts, skipped: reviewer disagrees on validation strategy)
-  - [BUG] src/parser.ts:45 — "Null pointer risk" (3 attempts exhausted)
+  - [HIGH] src/parser.ts:45 — "Null pointer risk" (3 attempts exhausted)
   - [HIGH] src/auth/middleware.ts:12 — "Session token handling" (1 attempt, skipped: cannot determine correct approach without domain context)
 
 These issues require manual intervention. Review the state file for full attempt history:
@@ -1435,7 +1430,7 @@ Check `issue_history` in state file. If an issue has 3+ attempts or `status == "
 ⚠️ Skipped issues (exhausted approaches or manually skipped):
 - [HIGH] src/lib/parser.ts:45 - "Complex type inference" (3 attempts exhausted)
   Approaches tried: zod validation, manual type guard, schema inference
-- [BUG] src/api/handler.ts:120 - "Potential race condition" (2 attempts, skipped: cannot determine correct approach)
+- [HIGH] src/api/handler.ts:120 - "Potential race condition" (2 attempts, skipped: cannot determine correct approach)
   Approaches tried: mutex lock, queue-based serialization
 
 These issues require manual intervention. They will not block loop termination.
@@ -1447,7 +1442,7 @@ Continuing with actionable issues...
 ## Loop Stopped - Max Iterations Reached
 
 **Iterations completed:** 5 of 5 max
-**Issues remaining:** 2 (1 high, 1 bug)
+**Issues remaining:** 2 (2 high)
 
 State saved to .claude-pr-fix-state.json
 
@@ -1461,7 +1456,7 @@ State saved to .claude-pr-fix-state.json
 
 **Total rounds:** 6 of 6 ceiling (across all sessions on this PR)
 **This session's iterations:** 2
-**Issues remaining:** 3 (2 high, 1 bug)
+**Issues remaining:** 3 (1 critical, 2 high)
 **Outsider panels run:** before rounds 3 and 5 (see `outsider_panels` in the state file)
 
 **Severity trend (urgent count per round):** 8 → 5 → 6 → 4 → 4 → 3
@@ -1512,7 +1507,7 @@ The review may specify file locations in several formats:
 
 ### Priority Classification
 
-| Review Section | Priority | Todo Prefix | Addressed by Default |
+| Review Section | Priority | Todo Prefix | Addressed |
 |----------------|----------|-------------|----------------------|
 | Critical Issues | Highest | `[CRITICAL]` | Yes |
 | Blockers | Highest | `[CRITICAL]` | Yes |
@@ -1520,52 +1515,22 @@ The review may specify file locations in several formats:
 | High | High | `[HIGH]` | Yes |
 | High Priority | High | `[HIGH]` | Yes |
 | Should Fix | High | `[HIGH]` | Yes |
-| Potential Bugs | Bug | `[BUG]` | Yes |
-| Bug fixes | Bug | `[BUG]` | Yes |
-| Test Coverage | Test | `[TEST]` | Yes |
-| Missing Tests | Test | `[TEST]` | Yes |
-| Recommended Tests | Test | `[TEST]` | Yes |
-| Medium | Medium | `[MEDIUM]` | **No** |
-| Medium Priority | Medium | `[MEDIUM]` | **No** |
-| Suggestions | Medium | `[MEDIUM]` | **No** |
-| Nice to Have | Low | `[LOW]` | **No** |
-| Nitpicks | Low | `[LOW]` | **No** |
-
-### Bug Detection Patterns
-
-For a review written without severity sections, also extract items that mention bugs. Never apply these patterns to an item under a Medium, Low, Suggestions or Nitpicks heading (see "The section decides, not the wording" in Step 4):
-
-| Pattern | Example |
-|---------|---------|
-| "BUG:" prefix | `### BUG: Race condition in...` |
-| "Potential Bug" | `### Potential Bug: Null pointer...` |
-| "will cause" + error | `This will cause a runtime error` |
-| "race condition" | `Race condition in PDF download` |
-| "memory leak" | `Memory leak from unreleased blob URLs` |
-| "null/undefined" issues | `Null reference when...` |
-
-### Test Detection Patterns
-
-Extract test recommendations from these patterns, except under a Medium, Low, Suggestions or Nitpicks heading:
-
-| Pattern | Example |
-|---------|---------|
-| "Missing Tests" section | `## Missing Tests` |
-| "Test Coverage" section | `## 🧪 Test Coverage` |
-| "No test files" | `No test files included for...` |
-| "Recommended Tests" | `**Recommended Tests:**` |
-| "should have tests" | `This function should have tests` |
-| Test file suggestions | `Add to src/lib/__tests__/file.test.ts` |
+| Medium | Medium | none | **Never** |
+| Medium Priority | Medium | none | **Never** |
+| Suggestions | Medium | none | **Never** |
+| Nice to Have | Low | none | **Never** |
+| Nitpicks | Low | none | **Never** |
+| Potential Bugs, Bug fixes, Test Coverage, Missing Tests, Recommended Tests | none | none | **Never** |
+| No severity heading | none | none | **Never** |
 
 ### Skip These Items (Default)
 
 Do not create todos for:
 - Items already marked with `[x]` (completed)
 - Items under "Positive Observations" or "Strengths" sections
-- Medium priority / Suggestions, including bugs and test gaps listed there (use `--all` to include)
-- Low priority / Nitpicks (use `--all` to include)
-- Documentation-only suggestions (use `--include-docs` to include)
-- Code style preferences without functional impact
+- Medium priority / Suggestions, including bugs and test gaps listed there (no flag includes them)
+- Low priority / Nitpicks (no flag includes them)
+- Items outside a Critical or High section, however they are worded (no flag includes them)
 
 ---
 
@@ -1580,17 +1545,17 @@ The skill supports optional arguments:
 | `--workflow=<name>` | Specify review workflow (default: claude-code-review.yml) | `/fix-pr-reviews --loop --workflow=claude-review.yml` |
 | `--max-iterations=<N>` | Max loop iterations **per session** (default: 5) | `/fix-pr-reviews --loop --max-iterations=3` |
 | `--max-rounds=<N>` | Max **total rounds across all sessions** on a PR (default: 6, session-independent ceiling) | `/fix-pr-reviews --loop --max-rounds=8` |
-| `--all` | Include medium/low priority items too | `/fix-pr-reviews --all` |
-| `--critical-only` | Only critical/blockers (skip high, bugs, tests) | `/fix-pr-reviews --critical-only` |
+| `--critical-only` | Only critical/blockers (skip high) | `/fix-pr-reviews --critical-only` |
 | `--no-tests` | Skip writing tests | `/fix-pr-reviews --no-tests` |
 | `--list-only` | Show issues without fixing | `/fix-pr-reviews --list-only` |
-| `--include-docs` | Include documentation suggestions | `/fix-pr-reviews --include-docs` |
 | `--continue` | Resume from saved state file (`.claude-pr-fix-state.json`) | `/fix-pr-reviews --continue` |
 | `--dry-run` | Loop mode: show what would happen without committing | `/fix-pr-reviews --loop --dry-run` |
 | `--reset` | Clear issue history and state file before starting | `/fix-pr-reviews --loop --reset` |
 | `--no-panel` | Loop mode: never run the outsider panel; every round is a plain fix round | `/fix-pr-reviews --loop --no-panel` |
 
-**Default behavior:** Critical + High + Bugs + Tests (skip Medium/Low/Docs)
+**Default behavior:** Critical + High only, documentation findings in those sections included. Medium, Low and items outside a Critical or High section are never fixed, whatever flag is passed.
+
+`--all` and `--include-docs` are retired. If an older caller passes one, say `--all and --include-docs are retired: only Critical and High items are fixed` and run the default scope.
 
 **`--reset` flag behavior:**
 When `--reset` is passed, delete the existing `.claude-pr-fix-state.json` before any other initialization:
@@ -1631,7 +1596,7 @@ Parsing review...
 
 **PR:** #2806 - feat: Add ISO 14067 report frontend integration
 **Review date:** 2026-01-15T12:39:34Z
-**Total items:** 13 (4 critical, 4 high, 2 bugs, 3 tests)
+**Total items:** 8 (4 critical, 4 high)
 
 ### Items to Address:
 1. [CRITICAL] Remove duplicate table definition - types.ts
@@ -1640,7 +1605,7 @@ Parsing review...
 
 [Fixes items one by one with checkpoints]
 
-✅ All 13 items addressed!
+✅ All 8 items addressed!
 
 Would you like me to commit these changes?
 ```
@@ -1687,7 +1652,7 @@ Starting iteration 1...
 - src/types.ts:45 — not re-flagged → status: resolved
 - src/handler.ts:80 — re-flagged → status: re-flagged (1 prior attempt)
 
-Urgent issues remaining: 2 (0 critical, 1 high, 1 bug)
+Urgent issues remaining: 2 (0 critical, 2 high)
 
 ---
 
@@ -1724,7 +1689,7 @@ Urgent issues remaining: 0
 **Skipped:** 0
 
 ### Summary:
-**Iteration 1:** Fixed 8 items (4 critical, 2 high, 2 bugs)
+**Iteration 1:** Fixed 8 items (4 critical, 4 high)
 **Iteration 2:** Fixed 2 re-flagged items with different approaches
 
 The PR is ready for merge!
@@ -1800,7 +1765,7 @@ do not assume clean.
    Attempt 2: Switched to decorator pattern → re-flagged
    Attempt 3: Auto-skipped (3 attempts exhausted)
 
-2. [BUG] src/cache/store.ts:45 — "Potential memory leak"
+2. [HIGH] src/cache/store.ts:45 — "Potential memory leak"
    Attempt 1: Added cleanup in useEffect → re-flagged
    Skipped: Cannot determine correct approach without domain context
 

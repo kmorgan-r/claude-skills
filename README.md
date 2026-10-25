@@ -98,7 +98,8 @@ cp -r find-cold-leads ~/.claude/skills/
 - **Needs** the GitHub CLI (`gh`) authenticated.
 - Invoke `/fix-pr-reviews` (optionally `--loop`) inside a repo with an open PR.
 - **Loop mode stops at 6 total rounds** by default (`--max-rounds=<N>` raises it). Before rounds 3 and 5 it runs an outsider panel (four read-only `Plan` subagents); `--no-panel` turns that off.
-- **Synced from** `climatepoint-eco-report-builder/.claude/skills/fix-pr-reviews/SKILL.md`. The backend repo carries the same file. Change it there and copy it here, so the three stay identical.
+- **Fixes only the review's Critical and High findings.** Medium, Low and anything outside those two sections are never fixed, and no flag brings them in (`--all` and `--include-docs` are retired).
+- **Synced from** `climatepoint-eco-report-builder/.claude/skills/fix-pr-reviews/SKILL.md`. The backend repo and `deadhead` (`.claude/skills/fix-pr-reviews/SKILL.md`) carry the same file. Change it there and copy it here, so the four stay identical. The Critical-and-High-only change was made here first, on 2026-10-25, and is still to be copied to the two climatepoint repos.
 
 ### ship
 - **Part of the [superpowers](https://github.com/obra/superpowers) pipeline.** Delegates
