@@ -1207,7 +1207,7 @@ With 1 and 2 but a skipped issue left, the loop exits with the "Human Review Nee
 
 **On a resume with `confirming` set,** read the run's current `attempt` and `status` (`gh run view "$RUN_ID" --json attempt,status`) and decide:
 - **`confirming` is for an older commit, or the attempt has not moved past `confirming.attempt`** (the re-run never started, or `gh run rerun` failed): clear `confirming` and start again from step 1.
-- **The attempt has moved and the run is still going:** do not re-run. Watch it (the snippet from `gh run watch` on), then fetch with `confirming.rerun_time`.
+- **The attempt has moved and the run is still going:** do not re-run. Watch it with the snippet from its `CONFIRM_MINUTES=` line on (the timeout's setting and guard, then the watch and its `exit 124`), then fetch with `confirming.rerun_time`. Starting at the `gh run watch` line would leave `CONFIRM_MINUTES` unset, and `timeout 0` waits forever.
 - **The attempt has moved and the run has finished:** fetch the bot review posted after `confirming.rerun_time`. If there is none (the run failed, or the workflow's job limit stopped it), clear `confirming` and stop with the "Human Review Needed" heading, as for a confirmation that could not read the whole PR (below).
 
 **Clear `confirming` whenever the confirmation ends**, however it ends: its review read, Human Review Needed, an abort, or the `URGENT_TOTAL=-1` stop. It stays set only after a watch that timed out while the run still goes, when the user chose to resume later.
