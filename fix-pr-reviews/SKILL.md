@@ -70,6 +70,7 @@ The skill supports configuration via environment variables or command arguments:
 | `MAX_LOOP_ITERATIONS` | `5` | Maximum fix iterations **per session** (per-invocation cap; resets on each new `--loop`) |
 | `MAX_TOTAL_ROUNDS` | `6` | Maximum **total rounds across all sessions** on a PR (session-independent; only `--reset` clears it) |
 | `LOOP_WAIT_TIMEOUT` | `15` | Minutes to wait for GitHub Action completion (this repo's review run typically finishes in 3–4 min; the timeout is a safety ceiling, not the expected wait) |
+| `CONFIRM_WAIT_TIMEOUT` | `40` | Minutes to wait for a confirmation review (Loop Step 5), which reads the whole PR and so runs far longer than a review of new commits |
 
 **Two independent caps — why both exist:** `MAX_LOOP_ITERATIONS` counts fixes within one invocation and resets to 1 on every fresh `--loop`. On a hard PR the human aborts and re-invokes, so this cap alone never trips (see issue #3953). `MAX_TOTAL_ROUNDS` counts rounds via `total_rounds` in the state file, which is **never reset except by `--reset`** — so re-invoking `--loop` on the same PR keeps accumulating toward the ceiling. This is the guard that actually fires on long-running PRs.
 
@@ -178,11 +179,11 @@ Using the TodoWrite tool, create a prioritized list of items to address.
 1. **Critical/Blockers** - Must fix before merge
 2. **High Priority** - Should fix before merge
 
-**The section decides, not the wording.** The todo list holds exactly the items listed under a Critical or High heading. An item under any other heading (Medium, Low, Suggestions, Nitpicks, Potential Bugs, Test Coverage), or under no severity heading at all, is not fixed, even when it describes a bug, a race, a null dereference or a missing test. This repo's reviewer gives every finding a failure scenario, Medium ones included, so every Medium reads like a bug. Picking them up by wording makes each round a Medium-fixing round, and since every push re-runs the review (which finds new Mediums each time), the loop never converges. No flag brings Medium items in.
+**The section decides, not the wording.** The todo list holds exactly the items listed under a Critical or High heading. An item under any other heading (Medium, Low, Suggestions, Nitpicks, Potential Bugs, Test Coverage), or under no severity heading at all, is not fixed, even when it describes a bug, a race, a null dereference or a missing test. This repo's reviewer gives every finding a failure scenario, Medium ones included, so every Medium reads like a bug. Picking them up by wording makes each round a Medium-fixing round, and since every push re-runs the review (which finds new Mediums each time), the loop never converges. Only `--all`, and only in a one-off run (no `--loop`), brings in the items outside the Critical and High sections.
 
 **Each fix changes only what its Critical or High item needs.** A fix is never widened to also clear a Medium or Low item in the same code, even when it sits on the next line.
 
-**Never fixed:**
+**Never fixed** (unless `--all` is passed in a one-off run):
 - Medium priority / Suggestions, including bugs and test gaps listed there
 - Low priority / Nitpicks
 - Bugs, test gaps, documentation and style items listed outside a Critical or High section (older review formats' bug and test lists included)
@@ -290,6 +291,7 @@ Loop mode uses `.claude-pr-fix-state.json` to track progress and issue history a
   ],
   "incremental_review": false,
   "confirmed_shas": [],
+  "confirming": null,
   "previous_urgent_count": 8
 }
 ```
@@ -300,6 +302,7 @@ Loop mode uses `.claude-pr-fix-state.json` to track progress and issue history a
 - `checks` — the commands that must pass before a fix is committed, each with the directory it runs in. Read from the repo's own instructions (Loop Step 1, "Repo checks and review reach").
 - `incremental_review` — whether the review workflow reads only the commits pushed since an earlier review. Decides what a finding's absence from a review proves (Loop Step 5).
 - `confirmed_shas` — commits a confirmation review has re-read in full (Loop Step 5), so a resumed session never re-runs one twice.
+- `confirming` — the confirmation review in flight (`{"sha", "run_id", "rerun_time"}`), written before the re-run starts and cleared when its review is read, so a session that stops mid-wait resumes by watching that run rather than starting another. `null` when none is in flight.
 
 **Session-independent fields** (survive re-invocation; only `--reset` clears):
 - `total_rounds` — count of completed rounds across **every** session on this PR. Never reset when `--loop` restarts. In the example above it is `11` while `iteration` is only `2` — the PR was re-driven across many sessions, and `total_rounds` (unlike `iteration`) captures the true effort.
@@ -584,12 +587,14 @@ fi
 
 **Also stop on a release branch.** If the repo's CLAUDE.md or CONTRIBUTING.md says a push to the current branch deploys or releases (for example a branch whose every push ships the app), stop the same way, before any edit. A push there ships the fix before any review reads it.
 
-**Repo checks and review reach.** Before the first fix, fill `checks` and `incremental_review` in the state file. On a resume, fill them when they are missing (`checks` absent or empty, `incremental_review` absent or `null`). A missing `confirmed_shas` counts as `[]`.
+**Repo checks and review reach.** Before the first fix, fill `checks` and `incremental_review` in the state file. On a resume, fill them when they are missing (`checks` absent or empty, `incremental_review` absent or `null`). A missing `confirmed_shas` counts as `[]`, and a missing `confirming` as `null`.
 
-1. **`checks`:** the commands a contributor runs before pushing, each with the directory it runs in. Read them from the repo's CLAUDE.md (its Commands section) or CONTRIBUTING.md. Take the lint, format and type checks for every part of the repo, the test command for each part, and each generator whose output is committed, with the file it reads. `for` lists the paths whose change calls for the command, as globs (`**/*.py`) or directory prefixes (`app/`). A command with no `for` runs whenever the round changed any file. A repo with a Python service at the root and an app in `app/` might give:
+1. **`checks`:** the commands a contributor runs before pushing, each with the directory it runs in. Read them from the repo's CLAUDE.md (its Commands section) or CONTRIBUTING.md. Take the install command for each part of the repo (`kind: "setup"`), the lint, format and type checks for every part, the test command for each part, and each generator whose output is committed, with the file it reads. `for` lists the paths whose change calls for the command, as globs (`**/*.py`) or directory prefixes (`app/`). A command with no `for` runs whenever the round changed any file. A repo with a Python service at the root and an app in `app/` might give:
 
    ```json
    "checks": [
+     {"dir": ".",   "run": "pip install -e '.[dev]' -c ci-constraints.txt", "kind": "setup"},
+     {"dir": "app", "run": "npm ci", "kind": "setup"},
      {"dir": ".",   "run": "ruff check . && ruff format --check . && lint-imports && mypy && mypy --platform win32", "for": ["**/*.py", "pyproject.toml"]},
      {"dir": ".",   "run": "pytest -v -n 2 --dist loadfile <the changed and covering test files>", "for": ["**/*.py", "docs/api/openapi.yaml"], "kind": "tests"},
      {"dir": "app", "run": "npm run validate:fixtures && npm run lint && npm run check:types", "for": ["app/"]},
@@ -650,6 +655,7 @@ jq -n \
     checks: [],
     incremental_review: null,
     confirmed_shas: [],
+    confirming: null,
     previous_urgent_count: null
   }' > .claude-pr-fix-state.json.tmp && mv .claude-pr-fix-state.json.tmp .claude-pr-fix-state.json
 ```
@@ -695,7 +701,7 @@ fi
 
 Run the standard fix workflow (Steps 1-5 above). Between Step 3 (parse the review) and Step 4 (todo list), make these three checks, in this order:
 
-**1. No urgent issues** → exit the loop, by Loop Step 5's "When the loop may exit with success": a skipped issue left in `issue_history` makes it Human Review Needed. When `incremental_review` is true and this review read only new commits, run the confirmation review first (Loop Step 5) and decide on its answer:
+**1. No urgent issues** → exit the loop, by Loop Step 5's "When the loop may exit with success". When `incremental_review` is true and this review read only new commits, run the confirmation review first (Loop Step 5) and decide on its answer. Print this block only when no issue in `issue_history` is `skipped`. With one left, print the Human Review Needed block (check 3) instead, listing every skipped issue:
 
 ```
 ## Loop Complete - No Urgent Issues
@@ -975,7 +981,14 @@ fi
 # Bash calls, so read both names again here.
 BRANCH_NOW=$(git branch --show-current)
 DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')
-STATE_BRANCH=$(jq -r '.branch // empty' .claude-pr-fix-state.json)
+# STATE_BRANCH: the state file's "branch", read with the Read tool and set in
+# THIS call. Not through jq, which can be a shim that prints nothing (see
+# "jq Warning"). For example:
+#   STATE_BRANCH='feat/iso-14067-report-frontend'
+if ! [[ "$STATE_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+  echo "❌ Not pushing: STATE_BRANCH is not set from the state file's branch"
+  exit 1
+fi
 if [ -z "$BRANCH_NOW" ] || [ -z "$DEFAULT_BRANCH" ] || [ "$BRANCH_NOW" = "$DEFAULT_BRANCH" ] || [ "$BRANCH_NOW" != "$STATE_BRANCH" ]; then
   echo "❌ Not pushing: on '${BRANCH_NOW:-a detached HEAD}', which is not the PR branch this loop started on (${STATE_BRANCH:-unknown})"
   exit 1
@@ -1166,13 +1179,15 @@ After fetching the new review, compare each of its Critical and High findings ag
 2. **Issues in `issue_history` with `status: "pending"` NOT among the new review's Critical and High findings:**
    - **The new review read the whole PR:** update `status` to `"resolved"`. The previous approach worked. This includes an issue the new review lists only under Medium or Low: it is no longer urgent, so it is not fixed again.
    - **The new review read only the commits since an earlier review:** leave `status` at `"pending"`. Absence from such a review proves nothing: its reviewer looked only at the new commits, so it never re-read a defect that a fix's edit missed. Only a whole-PR review resolves it (the confirmation review below).
-   - **A `"skipped"` issue keeps `"skipped"`, whatever any review says.** Nothing for it has landed since a review last flagged it. An issue is auto-skipped only when a review flags it again after its third committed attempt, and every other skip (an attempt reverted after a check failed, no different approach left, a panel dispute, a fix outside the PR) commits nothing for it. So the code the reviewer flagged is unchanged, and a review's silence about it proves nothing. It reaches a human through the Human Review Needed exit (below). Once a human has handled it, `--reset` clears it. A panel plan that covers it sets it back to `"pending"` first (Loop Step 2a, Step D), and the pending rules above then apply to the attempt the plan commits.
 
-3. **New Critical or High issues not in `issue_history`:**
+3. **Issues in `issue_history` with `status: "skipped"`, whether or not the new review lists them:**
+   - **Keep `"skipped"`, whatever any review says.** Nothing for it has landed since a review last flagged it. An issue is auto-skipped only when a review flags it again after its third committed attempt, and every other skip (an attempt reverted after a check failed, no different approach left, a panel dispute, a fix outside the PR) commits nothing for it. So the code the reviewer flagged is unchanged, and a review's silence about it proves nothing. It reaches a human through the Human Review Needed exit (below). Once a human has handled it, `--reset` clears it. A panel plan that covers it sets it back to `"pending"` first (Loop Step 2a, Step D), and the pending rules above then apply to the attempt the plan commits.
+
+4. **New Critical or High issues not in `issue_history`:**
    - These are genuinely new findings (possibly regressions from fixes)
    - Add to `issue_history` with empty `attempts` array
 
-4. **Write updated state file** after reconciliation
+5. **Write updated state file** after reconciliation
 
 **Which reviews read the whole PR.** With `incremental_review` false, every review. With it true, a review reads only new commits when its Scope header names a commit range or a commit it reviewed since. Some workflows also print which in the run log, for example `Reviewing the commits since <sha>` or `Reviewing the whole PR` (`gh run view "$RUN_ID" --log | grep -m1 -E 'Reviewing the (commits since|whole PR)'`). When unsure, count it as new commits only.
 
@@ -1183,7 +1198,9 @@ After fetching the new review, compare each of its Critical and High findings ag
 
 With 1 and 2 but a skipped issue left, the loop exits with the "Human Review Needed" heading and lists every skipped issue, never "All Clear".
 
-**Confirmation review (only when `incremental_review` is true).** So when a review of only new commits has an urgent count of 0, re-run the review on that same commit before deciding. A workflow that reviews only new commits reads the whole PR when the commit it last reviewed is this one, which is what a re-run is:
+**Confirmation review (only when `incremental_review` is true).** So when a review of only new commits has an urgent count of 0, re-run the review on that same commit before deciding. A workflow that reviews only new commits reads the whole PR when the commit it last reviewed is this one, which is what a re-run is.
+
+**Before the re-run, write `confirming`** to the state file with the Write tool: `sha` = the PR's head commit, `run_id` = `RUN_ID`, and `rerun_time` = the current UTC time (`date -u +%Y-%m-%dT%H:%M:%SZ`). Then run the snippet with `RERUN_TIME` set to that same `rerun_time`. **On a resume with `confirming` set for the PR's head commit,** do not re-run: watch that `run_id` (skip the snippet's `gh run rerun` and attempt wait) and fetch with its `rerun_time`. With `confirming` set for an older commit, clear it and start again.
 
 ```bash
 # RUN_ID: the review run for the PR's head commit (Loop Step 4). In a new
@@ -1199,7 +1216,11 @@ if ! [[ "$ATTEMPT" =~ ^[0-9]+$ ]]; then
   echo "❌ Cannot read the run's attempt number: $ATTEMPT"
   exit 1
 fi
-RERUN_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# RERUN_TIME: the rerun_time just written to confirming, set in THIS call.
+if ! [[ "$RERUN_TIME" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+  echo "❌ RERUN_TIME is not set to confirming's rerun_time: $RERUN_TIME"
+  exit 1
+fi
 gh run rerun "$RUN_ID" || exit 1
 # The rerun returns before its new attempt starts, and watching then would see
 # the finished attempt and return at once. Wait for the attempt number to move.
@@ -1208,18 +1229,25 @@ for i in $(seq 1 12); do
   [[ "$NOW_ATTEMPT" =~ ^[0-9]+$ ]] && [ "$NOW_ATTEMPT" -gt "$ATTEMPT" ] && break
   sleep 10
 done
-TIMEOUT_MINUTES="${LOOP_WAIT_TIMEOUT:-15}"
-[[ "$TIMEOUT_MINUTES" =~ ^[0-9]+$ ]] || TIMEOUT_MINUTES=15
-timeout $((TIMEOUT_MINUTES * 60)) gh run watch "$RUN_ID" --exit-status
+# A whole-PR review runs far longer than a review of new commits.
+CONFIRM_MINUTES="${CONFIRM_WAIT_TIMEOUT:-40}"
+[[ "$CONFIRM_MINUTES" =~ ^[0-9]+$ ]] || CONFIRM_MINUTES=40
+timeout $((CONFIRM_MINUTES * 60)) gh run watch "$RUN_ID" --exit-status
+WATCH_STATUS=$?
+if [ "$WATCH_STATUS" -eq 124 ]; then
+  echo "⚠️ Confirmation review still running after $CONFIRM_MINUTES min (run $RUN_ID)"
+fi
 # Then fetch the review exactly as above, with RERUN_TIME in place of PUSH_TIME.
 ```
 
+**If the watch times out (exit 124),** handle it as Loop Step 4's timeout: ask whether to keep waiting (another 15 minutes on the same run), to stop and resume later with `--continue` (which watches the stored `confirming` run), or to abort. Never fetch the review while the run is still going: an empty fetch reads as `URGENT_TOTAL=-1` and stops the loop.
+
 Then:
-- **It read the whole PR:** add the commit to `confirmed_shas` and reconcile again, under the whole-PR rule. Count its urgent findings. With 0, the loop exits by the rule above: All Clear, or Human Review Needed while a skipped issue is left. With more, it goes on as after any review: Loop Step 6, where all skipped means Human Review Needed, else the next round.
+- **It read the whole PR:** add the commit to `confirmed_shas`, clear `confirming`, and reconcile again, under the whole-PR rule. Count its urgent findings. With 0, the loop exits by the rule above: All Clear, or Human Review Needed while a skipped issue is left. With more, it goes on as after any review: Loop Step 6, where all skipped means Human Review Needed, else the next round.
 - **It still read only new commits, or no run exists to re-run:** stop with the "Human Review Needed" heading. List every `pending` and `skipped` issue as `not confirmed: the reviewer reads only new commits`.
 - **The commit is already in `confirmed_shas`** (a resumed session): do not re-run. Use the newest bot review posted after that commit's first review.
 
-The confirmation review is not a fix round: it does not advance `iteration` or `total_rounds`.
+The confirmation review is not a fix round: it does not advance `iteration` or `total_rounds`. **Nor is its count compared for regression** (Loop Step 6 item 3). It read the whole PR, while the review before it read only new commits, so a higher count is not a regression. Record its count as `previous_urgent_count`, and append it to `urgent_count_history`.
 
 > **Note on `file:line` matching:** Line numbers may shift after fixes. Match by file path first, then by closest line number and description similarity. If ambiguous, treat as a new issue. This is a known limitation — document in commit message if matching is uncertain.
 
@@ -1342,7 +1370,7 @@ fi
 Continuing to iteration 2...
 ```
 
-Or if clean:
+Or if clean, when Loop Step 5's "When the loop may exit with success" holds (a whole-PR review, no Critical or High finding, and no issue in `issue_history` skipped):
 ```
 ## Loop Complete - All Clear!
 
@@ -1365,7 +1393,7 @@ Or if clean:
 The PR is ready for merge!
 ```
 
-Or if all remaining issues are skipped:
+Or if skipped issues remain, whether or not the latest review still lists them:
 ```
 ## Loop Complete — Human Review Needed
 
@@ -1420,13 +1448,13 @@ fi
 ✅ Safe to continue - starting iteration 3...
 ```
 
-**Pre-commit validation (CRITICAL):** before committing, run each entry of the state file's `checks` (Loop Step 1) whose `for` matches a file the round changed (an entry with no `for` always), in its `dir`:
+**Pre-commit validation (CRITICAL):** before committing, run each entry of the state file's `checks` (Loop Step 1) whose `for` matches a file the round changed (an entry with no `for` always), in its `dir`. A `setup` entry is never run as a check: it runs only when a command cannot run, as below. **A changed file that no entry's `for` matches is still checked:** run every lint, format and type check in `checks` for it, and the tests that read it. A round that changes only `CLAUDE.md` or a workflow file runs them too.
 
 1. **Generators first.** For each `generator` whose input the round changed, run it and add every file it wrote to `MODIFIED_FILES`. Its output belongs to the fix: a contract edit and the client generated from it go in one commit. The files it wrote count as changed for the checks after it.
 2. **Then the checks.** Each lint, format and type check must pass.
-3. **Then the tests** for the code the round changed: the changed test files, and the tests that cover each changed module.
+3. **Then the tests** for the code the round changed: the changed test files, the tests that cover each changed module, and the tests that read a changed file by its path (search the test directories for its name).
 
-**A command that cannot run is not a failing fix.** No `package.json`, a missing script, `command not found`, or a database or service the tests need that is not running: never revert a fix for that.
+**A command that cannot run is not a failing fix.** No `package.json`, a missing script, `command not found`, or a database or service the tests need that is not running: never revert a fix for that. **First run the `setup` entry for its `dir`, once per session, and then the command again.** A fresh session often has nothing installed yet. Only a command that still cannot run counts as unable to run.
 - A lint, format or type check that cannot run stops the loop with state saved, naming the command and its error. Nothing else would check the push.
 - A test run that cannot start is named in the round's output and in the commit body (`Tests not run: <command> — <reason>`). CI is then the test gate.
 
@@ -1502,7 +1530,7 @@ if [ "$URGENT_TOTAL" -eq -1 ]; then
 fi
 ```
 
-If `URGENT_TOTAL >= 0`, compare `previous_urgent_count` from state file with current count.
+If `URGENT_TOTAL >= 0`, compare `previous_urgent_count` from state file with current count. **Skip the comparison when the current count comes from a confirmation review** (Loop Step 5): it read the whole PR and the count before it did not, so the two are not like for like.
 
 **Handle null/empty previous_urgent_count on first iteration:**
 ```bash
@@ -1624,22 +1652,22 @@ The review may specify file locations in several formats:
 | High | High | `[HIGH]` | Yes |
 | High Priority | High | `[HIGH]` | Yes |
 | Should Fix | High | `[HIGH]` | Yes |
-| Medium | Medium | none | **Never** |
-| Medium Priority | Medium | none | **Never** |
-| Suggestions | Medium | none | **Never** |
-| Nice to Have | Low | none | **Never** |
-| Nitpicks | Low | none | **Never** |
-| Potential Bugs, Bug fixes, Test Coverage, Missing Tests, Recommended Tests | none | none | **Never** |
-| No severity heading | none | none | **Never** |
+| Medium | Medium | none | **Only `--all`, one-off run** |
+| Medium Priority | Medium | none | **Only `--all`, one-off run** |
+| Suggestions | Medium | none | **Only `--all`, one-off run** |
+| Nice to Have | Low | none | **Only `--all`, one-off run** |
+| Nitpicks | Low | none | **Only `--all`, one-off run** |
+| Potential Bugs, Bug fixes, Test Coverage, Missing Tests, Recommended Tests | none | none | **Only `--all`, one-off run** |
+| No severity heading | none | none | **Only `--all`, one-off run** |
 
 ### Skip These Items (Default)
 
 Do not create todos for:
 - Items already marked with `[x]` (completed)
 - Items under "Positive Observations" or "Strengths" sections
-- Medium priority / Suggestions, including bugs and test gaps listed there (no flag includes them)
-- Low priority / Nitpicks (no flag includes them)
-- Items outside a Critical or High section, however they are worded (no flag includes them)
+- Medium priority / Suggestions, including bugs and test gaps listed there (only `--all`, in a one-off run, includes them)
+- Low priority / Nitpicks (only `--all`, in a one-off run)
+- Items outside a Critical or High section, however they are worded (only `--all`, in a one-off run)
 
 ---
 
@@ -1654,6 +1682,7 @@ The skill supports optional arguments:
 | `--workflow=<name>` | Specify review workflow (default: claude-code-review.yml) | `/fix-pr-reviews --loop --workflow=claude-review.yml` |
 | `--max-iterations=<N>` | Max loop iterations **per session** (default: 5) | `/fix-pr-reviews --loop --max-iterations=3` |
 | `--max-rounds=<N>` | Max **total rounds across all sessions** on a PR (default: 6, session-independent ceiling) | `/fix-pr-reviews --loop --max-rounds=8` |
+| `--all` | **One-off runs only:** also fix every other item the review lists (Medium, Low, and items under no severity heading). Loop mode refuses it | `/fix-pr-reviews --all` |
 | `--critical-only` | Only critical/blockers (skip high) | `/fix-pr-reviews --critical-only` |
 | `--no-tests` | Skip writing tests | `/fix-pr-reviews --no-tests` |
 | `--list-only` | Show issues without fixing | `/fix-pr-reviews --list-only` |
@@ -1662,9 +1691,11 @@ The skill supports optional arguments:
 | `--reset` | Clear issue history and state file before starting | `/fix-pr-reviews --loop --reset` |
 | `--no-panel` | Loop mode: never run the outsider panel; every round is a plain fix round | `/fix-pr-reviews --loop --no-panel` |
 
-**Default behavior:** Critical + High only, documentation findings in those sections included. Medium, Low and items outside a Critical or High section are never fixed, whatever flag is passed.
+**Default behavior:** Critical + High only, documentation findings in those sections included. Medium, Low and items outside a Critical or High section are not fixed.
 
-`--all` and `--include-docs` are retired. If an older caller passes one, say `--all and --include-docs are retired: only Critical and High items are fixed` and run the default scope.
+**`--all` works in a one-off run only.** It brings in every other item the review lists, for that one run. With `--loop` it is refused: say `--all is for one-off runs: loop mode fixes only Critical and High` and run loop mode with the default scope. Every push re-runs the review, which finds new Mediums each time, so a loop that fixed them would never converge.
+
+`--include-docs` is retired. If an older caller passes it, say `--include-docs is retired: documentation findings in the Critical and High sections are always fixed` and go on.
 
 **`--reset` flag behavior:**
 When `--reset` is passed, delete the existing `.claude-pr-fix-state.json` before any other initialization:
@@ -2018,7 +2049,7 @@ Quick reference for all error states and their recovery procedures.
 |-------|-----------|----------|
 | **Check failure** | A lint, format or type check in `checks` exits non-zero | Revert file, mark issue [SKIP-MANUAL], continue |
 | **Type ratchet improvement** | `npm run check:types` prints `Type errors decreased` | Re-baseline with `npm run baseline:types`, re-run `npm run check:types`, then commit `type-baseline.json` with the fix |
-| **Check cannot run** | No `package.json`, a missing script, `command not found` | Not a regression: never revert. Stop with state saved, naming the command |
+| **Check cannot run** | No `package.json`, a missing script, `command not found` | Not a regression: never revert. Run the `setup` entry for its `dir` once, then the check again. Still unable: a lint, format or type check stops the loop with state saved, naming the command; a test command is named in the commit body and CI is the test gate |
 | **Tests cannot start** | A database or service the tests need is not running | Name it in the round output and the commit body (`Tests not run: …`); CI is the test gate |
 | **On the default branch** | `git branch --show-current` equals the repo's default branch, or is empty | Stop before any edit (Loop Step 1); never commit or push there |
 | **Commit failure** | `git commit` exits non-zero | Check for empty staging, hooks failure; fix and retry |
