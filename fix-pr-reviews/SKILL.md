@@ -1166,17 +1166,13 @@ After fetching the new review, compare each of its Critical and High findings ag
 2. **Issues in `issue_history` with `status: "pending"` NOT among the new review's Critical and High findings:**
    - **The new review read the whole PR:** update `status` to `"resolved"`. The previous approach worked. This includes an issue the new review lists only under Medium or Low: it is no longer urgent, so it is not fixed again.
    - **The new review read only the commits since an earlier review:** leave `status` at `"pending"`. Absence from such a review proves nothing: its reviewer looked only at the new commits, so it never re-read a defect that a fix's edit missed. Only a whole-PR review resolves it (the confirmation review below).
+   - **A `"skipped"` issue keeps `"skipped"`, whatever any review says.** Nothing for it has landed since a review last flagged it. An issue is auto-skipped only when a review flags it again after its third committed attempt, and every other skip (an attempt reverted after a check failed, no different approach left, a panel dispute, a fix outside the PR) commits nothing for it. So the code the reviewer flagged is unchanged, and a review's silence about it proves nothing. It reaches a human through the Human Review Needed exit (below). Once a human has handled it, `--reset` clears it. A panel plan that covers it sets it back to `"pending"` first (Loop Step 2a, Step D), and the pending rules above then apply to the attempt the plan commits.
 
-3. **Issues in `issue_history` with `status: "skipped"` NOT among the new review's Critical and High findings:** what a review's silence proves depends on whether a fix for the issue was ever committed. One was when any of its attempts has outcome `"pending"` or `"re-flagged"`, as an issue auto-skipped after 3 attempts has.
-   - **A fix was committed, and the new review read the whole PR:** update `status` to `"resolved"`, as for a pending issue. The last committed attempt worked.
-   - **A fix was committed, and the new review read only new commits:** leave `status` at `"skipped"`. Only a whole-PR review resolves it.
-   - **No fix was ever committed** (every attempt was reverted as `"lint-failure"` or recorded as `"skipped"`, or the issue was skipped with no attempt at all): leave `status` at `"skipped"`, whatever any review says. The code the reviewer flagged is unchanged, so a review's silence about it proves nothing. It reaches a human through the Human Review Needed exit (below). Once a human has handled it, `--reset` clears it.
-
-4. **New Critical or High issues not in `issue_history`:**
+3. **New Critical or High issues not in `issue_history`:**
    - These are genuinely new findings (possibly regressions from fixes)
    - Add to `issue_history` with empty `attempts` array
 
-5. **Write updated state file** after reconciliation
+4. **Write updated state file** after reconciliation
 
 **Which reviews read the whole PR.** With `incremental_review` false, every review. With it true, a review reads only new commits when its Scope header names a commit range or a commit it reviewed since. Some workflows also print which in the run log, for example `Reviewing the commits since <sha>` or `Reviewing the whole PR` (`gh run view "$RUN_ID" --log | grep -m1 -E 'Reviewing the (commits since|whole PR)'`). When unsure, count it as new commits only.
 
