@@ -695,7 +695,7 @@ fi
 
 Run the standard fix workflow (Steps 1-5 above). Between Step 3 (parse the review) and Step 4 (todo list), make these three checks, in this order:
 
-**1. No urgent issues** → exit the loop. When `incremental_review` is true and this review read only new commits, run the confirmation review first (Loop Step 5) and decide on its answer:
+**1. No urgent issues** → exit the loop, by Loop Step 5's "When the loop may exit with success": a skipped issue left in `issue_history` makes it Human Review Needed. When `incremental_review` is true and this review read only new commits, run the confirmation review first (Loop Step 5) and decide on its answer:
 
 ```
 ## Loop Complete - No Urgent Issues
@@ -1163,9 +1163,10 @@ After fetching the new review, compare each of its Critical and High findings ag
    - Update `status` from `"pending"` to `"re-flagged"`
    - The issue was not resolved by the previous approach
 
-2. **Issues in `issue_history` with `status: "pending"` or `"skipped"` NOT among the new review's Critical and High findings:**
-   - **The new review read the whole PR:** update `status` to `"resolved"`. The previous approach worked, or the defect is gone. This includes an issue the new review lists only under Medium or Low: it is no longer urgent, so it is not fixed again.
-   - **The new review read only the commits since an earlier review:** leave `status` as it is. Absence from such a review proves nothing. Its reviewer looked only at the new commits, so it never re-read a skipped issue (no edit for it landed) or a defect that a fix's edit missed. Only a whole-PR review resolves these (the confirmation review below).
+2. **Issues in `issue_history` with `status: "pending"` NOT among the new review's Critical and High findings:**
+   - **The new review read the whole PR:** update `status` to `"resolved"`. The previous approach worked. This includes an issue the new review lists only under Medium or Low: it is no longer urgent, so it is not fixed again.
+   - **The new review read only the commits since an earlier review:** leave `status` at `"pending"`. Absence from such a review proves nothing: its reviewer looked only at the new commits, so it never re-read a defect that a fix's edit missed. Only a whole-PR review resolves it (the confirmation review below).
+   - **A `"skipped"` issue keeps `"skipped"`, whatever any review says.** No edit for it landed, so the code the reviewer flagged is unchanged, and a review's silence about it proves nothing. It reaches a human through the Human Review Needed exit (below).
 
 3. **New Critical or High issues not in `issue_history`:**
    - These are genuinely new findings (possibly regressions from fixes)
@@ -1175,7 +1176,14 @@ After fetching the new review, compare each of its Critical and High findings ag
 
 **Which reviews read the whole PR.** With `incremental_review` false, every review. With it true, a review reads only new commits when its Scope header names a commit range or a commit it reviewed since. Some workflows also print which in the run log, for example `Reviewing the commits since <sha>` or `Reviewing the whole PR` (`gh run view "$RUN_ID" --log | grep -m1 -E 'Reviewing the (commits since|whole PR)'`). When unsure, count it as new commits only.
 
-**Confirmation review (only when `incremental_review` is true).** The loop exits with success only on a review that read the whole PR and lists no Critical or High finding. So when a review of only new commits has an urgent count of 0, re-run the review on that same commit before deciding. A workflow that reviews only new commits reads the whole PR when the commit it last reviewed is this one, which is what a re-run is:
+**When the loop may exit with success.** All three must hold:
+1. The deciding review read the whole PR (always so when `incremental_review` is false).
+2. It lists no Critical or High finding.
+3. No issue in `issue_history` is `skipped`.
+
+With 1 and 2 but a skipped issue left, the loop exits with the "Human Review Needed" heading and lists every skipped issue, never "All Clear".
+
+**Confirmation review (only when `incremental_review` is true).** So when a review of only new commits has an urgent count of 0, re-run the review on that same commit before deciding. A workflow that reviews only new commits reads the whole PR when the commit it last reviewed is this one, which is what a re-run is:
 
 ```bash
 # RUN_ID: the review run for the PR's head commit (Loop Step 4). In a new
@@ -1207,7 +1215,7 @@ timeout $((TIMEOUT_MINUTES * 60)) gh run watch "$RUN_ID" --exit-status
 ```
 
 Then:
-- **It read the whole PR:** add the commit to `confirmed_shas` and reconcile again, under the whole-PR rule. Count its urgent findings. With 0, the loop exits All Clear. With more, it goes on as after any review: Loop Step 6, where all skipped means Human Review Needed, else the next round.
+- **It read the whole PR:** add the commit to `confirmed_shas` and reconcile again, under the whole-PR rule. Count its urgent findings. With 0, the loop exits by the rule above: All Clear, or Human Review Needed while a skipped issue is left. With more, it goes on as after any review: Loop Step 6, where all skipped means Human Review Needed, else the next round.
 - **It still read only new commits, or no run exists to re-run:** stop with the "Human Review Needed" heading. List every `pending` and `skipped` issue as `not confirmed: the reviewer reads only new commits`.
 - **The commit is already in `confirmed_shas`** (a resumed session): do not re-run. Use the newest bot review posted after that commit's first review.
 
@@ -1233,7 +1241,7 @@ Rather than relying on fragile grep patterns, Claude should **parse the review b
    - Nothing else counts: an item under any other heading, or under none, is not urgent, however it is worded.
 4. **Validate the review is non-empty** before analysis
 
-A review whose only findings are Medium, Low or outside any Critical or High section has an urgent count of 0, so the loop exits with success. Don't start another round for it.
+A review whose only findings are Medium, Low or outside any Critical or High section has an urgent count of 0, so the loop exits, by the rule in Loop Step 5's "When the loop may exit with success". Don't start another round for it.
 
 This approach is more reliable than regex matching because:
 - It handles variations in review formatting
@@ -1534,7 +1542,7 @@ Check `issue_history` in state file. If an issue has 3+ attempts or `status == "
 - [HIGH] src/api/handler.ts:120 - "Potential race condition" (2 attempts, skipped: cannot determine correct approach)
   Approaches tried: mutex lock, queue-based serialization
 
-These issues require manual intervention. They will not block loop termination.
+These issues require manual intervention. They do not keep the loop running: it ends with Human Review Needed, listing them.
 Continuing with actionable issues...
 ```
 
@@ -1870,8 +1878,8 @@ do not assume clean.
    Attempt 1: Added cleanup in useEffect → re-flagged
    Skipped: Cannot determine correct approach without domain context
 
-These issues are now skipped and won't block loop termination.
-The loop will exit when no actionable issues remain.
+These issues are now skipped and do not keep the loop running.
+When no actionable issues remain, the loop exits with Human Review Needed, listing them.
 ```
 
 If the outsider panel is due before the next round (Loop Step 2a), these issues go to the panel first. A panel plan that covers an exhausted issue gives it one more attempt.
