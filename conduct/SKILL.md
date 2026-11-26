@@ -1,9 +1,15 @@
 ---
-name: ship
+name: conduct
 description: Conductor that drives the post-brainstorm dev pipeline hands-off — spec-review, plan, plan-review, implementation, PR, fix-pr-reviews loop — stopping only on failure, a DB-deploy gate decision, or final merge. Use after /superpowers:brainstorming when a committed spec exists, or to resume an in-progress pipeline.
 ---
 
-# Ship — Pipeline Conductor
+# Conduct — Pipeline Conductor
+
+> Renamed from `/ship`, because Claude Code now has a built-in `/ship`. The
+> runtime names keep `ship` — `.claude-ship-state.json`,
+> `.claude/worktrees/ship-*`, `docs/superpowers/handoffs/ship-<slug>.md` and the
+> `ship-repair` skill — so a pipeline started under `/ship` resumes unchanged.
+> "ship" in the text below means this skill.
 
 Drives the mechanical tail of development after brainstorming. Invoked once;
 runs phases P0–P7 (with P6.5 db-gates between P6 and P7) hands-off, resuming after
@@ -69,7 +75,7 @@ Read `.claude-ship-state.json`:
   dispatched nothing means a block site is missing its marker write.
   The clear must hang on
   that explicit confirmation and nothing else: this branch is a dead end and there is
-  no `/ship resume` verb, so on a later re-invoke ship sees an ordinary `in-progress`
+  no `/conduct resume` verb, so on a later re-invoke ship sees an ordinary `in-progress`
   state and cannot detect the blocked→cleared transition at all. Then
   continue at the handler for `phase` in this same invoke — do not clear and stop — but
   route in as a fresh invoke would: if `repair.in_flight` is true, run the
@@ -200,7 +206,7 @@ Read `.claude-ship-state.json`:
   which spec to use (default: most recent; otherwise ask), then start at **P0**.
 - **Absent + no spec** → offer to run `/superpowers:brainstorming` first.
 
-`/ship --no-repair` sets `repair_enabled: false` in state on the invocation carrying
+`/conduct --no-repair` sets `repair_enabled: false` in state on the invocation carrying
 it, and it persists there — repair stays off across compaction, `/clear`, and fleet
 respawn until explicitly re-enabled. Limit: `ship-fleet` spawns from a stored
 `bootstrap` string and is not edited by this design, so disabling repair fleet-wide
@@ -320,7 +326,7 @@ and `"anthropic"` otherwise, including when the variable is unset entirely.
 `~/.claude/advisor-bridge.json` reads as `false`). `available` is their
 conjunction, and it is the only field the Advisor calls section reads. P0
 writes it and nothing rewrites it: nothing that happens during a run changes
-either input. A state file written by a pre-change `/ship` has no
+either input. A state file written by a pre-change `/conduct` has no
 `advisor_routing` key; a conductor that reaches an Advisor calls site without
 one probes once there (per that section) and writes the block with its next
 state write — never more than once.
@@ -489,7 +495,7 @@ strictly needed costs one read-only dispatch and changes no state; skipping it c
 stop. This guards EVERY applying dispatch, not just the second one — a conductor resumed
 after compaction re-enters this phase at the top, and without the check here it would
 dispatch a third pass unconditionally, which is the exact scenario `review_passes` exists
-for. A state file written by a pre-change `/ship` has no `review_passes` key; read an absent
+for. A state file written by a pre-change `/conduct` has no `review_passes` key; read an absent
 key as `0`.
 
 Then invoke `reviewing-plans` via the Skill tool with args `auto --max-reviewers 3 <spec-path>`,
@@ -666,7 +672,7 @@ pass sequence, so the "same pass sequence as P1 (steps 1–5)" reference below d
 it, and step 4's ceiling check guards only the `--diff` dispatch, never this first
 full-panel one. A conductor resumed after compaction re-enters this phase at the top, and
 without the check here it would dispatch a third pass unconditionally. A state file written
-by a pre-change `/ship` has no `review_passes` key; read an absent key as `0`.
+by a pre-change `/conduct` has no `review_passes` key; read an absent key as `0`.
 
 Then invoke `reviewing-plans` via the Skill tool with args `auto <plan-path>` — the
 default 5-reviewer panel, NOT P1's `--max-reviewers 3` — and increment
@@ -754,7 +760,7 @@ one. TWO cases must block (not silently advance):
    runs them is worse than one with none.
 In either case, do NOT advance: set `status:"blocked"` with blocker `P4 could not
 verify the implementation; run the change's tests manually (or confirm the change
-is sound), then re-invoke /ship to advance`, and stop. The human ack is the
+is sound), then re-invoke /conduct to advance`, and stop. The human ack is the
 verification of last resort.
 Any failure → **attempt a repair before halting.** Run the repair-dispatch decision
 (see Repair). If it allows: perform **every** state write the Repair section's
@@ -775,7 +781,7 @@ failing output summary to `blockers`, stop; a failing re-run WITH attempts left 
 to the repair-dispatch decision for the next attempt. If the decision does not allow a dispatch
 → `status:"blocked"` with its blocker text, stop. **The zero-verification guard above
 is exempt: it is Tier 3 and blocks with no repair attempt.**
-**P4-blocked resume:** re-invoking `/ship` resumes the failed task inside
+**P4-blocked resume:** re-invoking `/conduct` resumes the failed task inside
 `subagent-driven-development` (it tracks task-level progress) — do not restart the
 whole plan. On success advance to P5.
 
@@ -864,16 +870,45 @@ DB deploy gates (apply migration to prod, SQL/pgTAP harness, edge-fn deploy,
 makes them block or defer LOUDLY. It runs only after P6 reaches all-clear. On
 entering, set `phase:"db-gates"` in state (so every sub-outcome below resumes here).
 
+**Merging now applies and deploys (since 2026-10-20).** Every new migration's
+leading comments say `-- apply-on-merge: yes` or `-- apply-on-merge: hold <reason>`
+(`.claude/rules/database.md`, Migrations; `check:migration-apply-header` fails the
+PR otherwise). On merge, `edge-fn-deploy.yml` ("Supabase Deploy") applies the `yes`
+migrations not yet in the ledger, then deploys the changed edge functions. That
+changes what **defer** leaves for a person, not this decision:
+- The header is chosen here, with the same additive-only rails as apply-now
+  (below): the old frontend is still live while the migrate job runs, and Vercel
+  publishes the new one with no ordering against it. A migration that fails a rail,
+  that the new frontend needs before it goes live, or that must follow an edge
+  deploy, is `hold` (or apply-now), never `yes`.
+- A deferred `yes` migration and the changed edge functions need no manual step:
+  the checklist item is "the merge's Supabase Deploy run is green". A `hold`
+  migration and every secret remain manual, as below.
+
 **Detect** the branch's deployable DB artifacts vs the default branch
 (`$DEFAULT_BRANCH` from state; `$BASE = git merge-base "$DEFAULT_BRANCH" HEAD`):
 ```bash
-# path-B-automatable: migrations + SQL test harness
-git diff --name-only --diff-filter=d "$BASE"..HEAD -- 'supabase/migrations/*' 'supabase/tests/*'
-# deploy/secret gates: surfaced, NEVER auto-applied by ship
-git diff --name-only --diff-filter=d "$BASE"..HEAD -- 'supabase/functions/*' 'supabase/config.toml'
+# migrations with their git status (A = added by this PR), + SQL test harness
+git diff --name-status "$BASE"..HEAD -- 'supabase/migrations/*' 'supabase/tests/*'
+# edge functions and their pins: deployed by the merge, NEVER by ship
+git diff --name-only "$BASE"..HEAD -- 'supabase/functions/*' 'supabase/config.toml'
 ```
-Both empty → `phase_log` note `P6.5 no DB artifacts`, advance to P7. Any present →
-this phase MUST resolve before close-out; ship does NOT route around it.
+Both lists empty → `phase_log` note `P6.5 no DB artifacts`, advance to P7. Only
+`supabase/tests/*` changed → nothing deploys (the Lint `pgtap` job already ran the
+suites): `phase_log` note `P6.5 tests only`, advance to P7. Anything else → this
+phase MUST resolve before close-out; ship does NOT route around it.
+
+The **one explicit decision** (below) names what needs a person:
+- a migration whose line does not start with `A`: it may already be in production,
+  and the migrate job fails every later run once a `yes` file differs from the SQL
+  it applied (`scripts/apply-merged-migrations.mjs`; remedies in
+  `.claude/rules/database.md`, Migrations);
+- a `hold` migration (quote its reason), and every `yes` migration this PR adds
+  that sorts after it, which the merge applies without it;
+- a function change (name each secret it reads that may not be set): the merge
+  deploys it minutes later;
+- a `config.toml` change (quote each changed line): it holds the `verify_jwt`
+  pins, and the merge redeploys every function with it.
 
 **One explicit decision.** Present the detected artifacts + the path-B runbook,
 then ask the human ONE decision. Never auto-pick: this is the single human gate in
@@ -907,6 +942,9 @@ downgrades this to defer (never force an unsafe prod write):
      name is additive and safe; a replacement is not).
    - Data-mutating DML — `DELETE`, `TRUNCATE`, `UPDATE` — destructive regardless of
      merge order.
+   - A changed migration: any migration line in Detect above that does not start
+     with `A`. It may already be in production, and rail 3's idempotency guard
+     would see its version applied, skip it and report success.
    - Permission-broadening — any `GRANT … TO anon|authenticated|public`,
      `CREATE POLICY`, or `ALTER POLICY`. These widen who can read/write prod data
      and are the exact statements the post-check (`anon` absent where required) exists
@@ -964,7 +1002,7 @@ PR triggers no rollback obligation). Ship will NOT set `done` until the human ac
 it ran (see First action / P7).
 
 **abort.** `status:"blocked"`, blocker `DB gate aborted by human — resolve DB
-deploy manually, then re-invoke /ship`, stop.
+deploy manually, then re-invoke /conduct`, stop.
 
 ### P7 awaiting-merge
 
@@ -977,7 +1015,7 @@ post-check results, OR the deferred gate checklist — and, if a migration was
 applied ahead of merge, an **applied-but-unmerged rollback flag** naming the paired
 rollback (`db_gate.rollback`) to run if the PR is abandoned) and commit it. Report
 the PR URL + status. **STOP — the human merges manually; the conductor never
-merges.** On a later `/ship` invoke, check `gh pr view <pr> --json state`:
+merges.** On a later `/conduct` invoke, check `gh pr view <pr> --json state`:
 - `MERGED` **and** the gate is clean (`db_gate` null, or `status` `applied`/`acked`
   with an empty `pending_deploys`) → set `status:"done"` and stop.
 - `MERGED` but `db_gate` is still deferred/unacked (`status == "deferred"` OR a
@@ -1157,7 +1195,7 @@ the measurement, not this estimate), so this section is a whitelist of call
 sites, not a licence. It also overrides the generic SessionStart nudge for
 ship runs: the bridge's hook asks for advisor calls "before substantive work",
 and a conductor executing a prescriptive pipeline would either ignore it at
-the moments that matter or over-call at a dollar a time — inside a `/ship`
+the moments that matter or over-call at a dollar a time — inside a `/conduct`
 run, the two sites below are the whole allowance.
 
 **Site 1 — immediately before a P1/P3 Tier-2 repair dispatch.** The
@@ -1176,7 +1214,7 @@ unrecognized output). Their blocks go to a human who must unblock on a
 judgment about review quality, produced by local-model reviews.
 
 **Mechanics, both sites.** If `advisor_routing` is absent from state (a run
-started by a pre-change `/ship`), run the P0 probe once here and write the
+started by a pre-change `/conduct`), run the P0 probe once here and write the
 block with the next state write — never more than once. If the block says
 `available: false`, stop: both sites are skipped and this section is done.
 Otherwise, before calling, scan `phase_log` for an entry

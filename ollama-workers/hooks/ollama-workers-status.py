@@ -106,14 +106,14 @@ elif result.get("reason") in ("primary checkout", "not a git worktree"):
     # No fallback offered here. The old text put "workers being on changes
     # nothing here" next to the Anthropic fallback, and sessions started in a
     # primary checkout read that as permission: over 14 days they sent 282
-    # implementer tasks to Anthropic and 44 to the worker, most of them /ship
+    # implementer tasks to Anthropic and 44 to the worker, most of them /conduct
     # P4 runs that said "this checkout is the primary, so ollama workers are
     # not dispatchable here" and never made a worktree. Declaring the worktree
     # preference is what lets superpowers:using-git-worktrees skip its consent
     # question (its Step 0 honours a declared preference).
     print(
         f"{header} This session started in a {result['reason']}, which the worker "
-        f"refuses as -Cwd. That describes this directory, not the workers. /ship "
+        f"refuses as -Cwd. That describes this directory, not the workers. /conduct "
         f"moves its own pipeline into a linked worktree at P0. Before executing "
         f"any other superpowers plan from here, create a linked worktree without "
         f"asking - that is the user's declared preference while workers are on "

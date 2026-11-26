@@ -123,7 +123,7 @@ every task to Anthropic. Check it without dispatching with
 
 While workers are on, that move is the user's declared worktree preference, so
 `superpowers:using-git-worktrees` Step 0 creates the worktree without asking.
-`/ship` makes the move itself at P0 (its Worktree mode). `/orchestrate` and
+`/conduct` makes the move itself at P0 (its Worktree mode). `/orchestrate` and
 `ship-fleet` start every session in its own linked worktree already, so each
 session dispatches with `-Cwd` set to its own worktree. `maxConcurrent` is one
 limit for the whole machine, shared by every session: set it to how many

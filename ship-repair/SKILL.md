@@ -7,7 +7,7 @@ description: Ship's delegated repair pass, invoked only when ship hits a repaira
 
 `ship-repair` exists so the repair logic — and, above all, the gate-weakening
 scan below — lives in exactly one place instead of being copied into four
-sections of `ship/SKILL.md` and drifting. It is paid for only on the pipelines
+sections of `conduct/SKILL.md` and drifting. It is paid for only on the pipelines
 that actually trip a gate; ship without a hook into this skill never invokes
 it at all.
 
