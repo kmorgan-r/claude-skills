@@ -9,7 +9,7 @@
   {"query": "write the morning handoff for the overnight run: what merged, what's blocked, what needs a decision from me", "should_trigger": true},
   {"query": "can you run 3 claude sessions in windows terminal tabs, one per issue, each in its own git worktree? I want to be able to take over any of them mid-flight", "should_trigger": true},
   {"query": "spin up sessions for issues 101 and 102 and babysit their PRs until they're merged - I want to watch them work, not have them hidden in the background", "should_trigger": true},
-  {"query": "run /ship on issues 65 67 72 in parallel, headless - I don't need to watch them, just tell me when the PRs are up", "should_trigger": false},
+  {"query": "run /conduct on issues 65 67 72 in parallel, headless - I don't need to watch them, just tell me when the PRs are up", "should_trigger": false},
   {"query": "go through the review comments on PR #112 and fix them", "should_trigger": false},
   {"query": "how do git worktrees work? I want to check out two branches of the same repo at once on my own machine", "should_trigger": false},
   {"query": "dispatch 3 subagents to investigate these three independent bugs in parallel and report back what they find", "should_trigger": false},

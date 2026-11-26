@@ -11,8 +11,8 @@ follows at runtime) plus any bundled scripts, references, and evals.
 | [`find-cold-leads`](./find-cold-leads) | Finds and **qualifies** B2B cold leads on free signals, spends scarce Apollo enrichment credits only on rows that fit the ICP, tags each with a region-aware compliance posture, and exports a classifier-ready / Odoo-ready sheet. |
 | [`linkedin-outreach-odoo`](./linkedin-outreach-odoo) | Picks up where `find-cold-leads` leaves off: reads eligible `mailing.contact` leads from Odoo, drafts a personalized LinkedIn connection note per lead, sends connection requests via the ConnectSafely API (dry-run by default), and writes outreach state back to Odoo. |
 | [`fix-pr-reviews`](./fix-pr-reviews) | Fetches the most recent GitHub PR review comments and systematically addresses each one — no copy-pasting from the PR. Supports a `--loop` mode that, before rounds 3 and 5, calls in a panel of four fresh-context expert subagents to plan a better approach instead of retrying the same fix. |
-| [`ship`](./ship) | Conductor that drives the post-brainstorm dev pipeline hands-off — spec-review, plan, plan-review, implementation, PR, then the `fix-pr-reviews` loop — resuming across `/clear` via a state file, stopping only on failure or final merge. |
-| [`ship-fleet`](./ship-fleet) | Runs up to 10 `/ship` pipelines in parallel: one headless Claude Code instance per GitHub issue, each in its own git worktree, coordinated by a fleet manifest and a polling monitor with crash recovery. Human gates (merge, DB acks) stay human. **Windows-only** (PowerShell). |
+| [`conduct`](./conduct) | Conductor that drives the post-brainstorm dev pipeline hands-off — spec-review, plan, plan-review, implementation, PR, then the `fix-pr-reviews` loop — resuming across `/clear` via a state file, stopping only on failure or final merge. |
+| [`ship-fleet`](./ship-fleet) | Runs up to 10 `/conduct` pipelines in parallel: one headless Claude Code instance per GitHub issue, each in its own git worktree, coordinated by a fleet manifest and a polling monitor with crash recovery. Human gates (merge, DB acks) stay human. **Windows-only** (PowerShell). |
 | [`reviewing-plans`](./reviewing-plans) | Reviews a written implementation plan before execution: dispatches 2–5 domain-specific reviewer agents in parallel, consolidates findings, and applies approved fixes to the plan file. |
 | [`esg-longitudinal`](./esg-longitudinal) | Tracks a company's ESG / CSR / sustainability commitments over time using **free** public data: finds sustainability/annual report PDFs, extracts targets and metrics into a tidy time-series with source + period + verbatim quote per value, saves a timestamped snapshot, and diffs against earlier snapshots to surface what changed. Re-runnable next year; scales from one company toward tens of thousands. |
 | [`epd-expiry-leads`](./epd-expiry-leads) | Finds manufacturers whose Environmental Product Declarations are about to expire and turns them into a ranked sales list. Reads the NSF listings API and the EPD PDFs, applies the Buy Clean rubric per manufacturer, and exports a workbook with the first-party contact each PDF names, plus a handoff file for `find-cold-leads`. |
@@ -101,7 +101,10 @@ cp -r find-cold-leads ~/.claude/skills/
 - **Fixes only the review's Critical and High findings.** Medium, Low and anything outside those two sections are not fixed. `--all` brings them in for a one-off run only; loop mode refuses it, and `--include-docs` is retired.
 - **Synced from** `climatepoint-eco-report-builder/.claude/skills/fix-pr-reviews/SKILL.md`. The backend repo and `deadhead` (`.claude/skills/fix-pr-reviews/SKILL.md`) carry the same file. Change it there and copy it here, so the four stay identical. The Critical-and-High-only change was made here first, on 2026-10-25, and is still to be copied to the two climatepoint repos.
 
-### ship
+### conduct
+- **Renamed from `ship`**, because Claude Code now has a built-in `/ship`. Runtime names
+  keep the old prefix (`.claude-ship-state.json`, `ship-*` worktrees, `ship-repair`), so
+  in-flight pipelines resume. After pulling, replace `~/.claude/skills/ship` with `conduct`.
 - **Part of the [superpowers](https://github.com/obra/superpowers) pipeline.** Delegates
   to other skills — `reviewing-plans` (P1, P3), `writing-plans` (P2),
   `subagent-driven-development` (P4), `finishing-a-development-branch` (P5), and
@@ -111,11 +114,11 @@ cp -r find-cold-leads ~/.claude/skills/
 - **P4 exit gate** runs the `lint` and `check:types` npm scripts *when the repo
   defines them* (absent scripts are skipped, not treated as failures) plus the
   change's own test files — so it works across repos without those scripts.
-- Invoke `/ship` once; it runs phases P0–P7 hands-off.
+- Invoke `/conduct` once; it runs phases P0–P7 hands-off.
 
 ### ship-fleet
-- **Builds on [`ship`](./ship)** — install `ship` (and the skills it delegates to)
-  first; each fleet instance runs the full `/ship` pipeline headless. Fleet consumes
+- **Builds on [`conduct`](./conduct)** — install `conduct` (and the skills it delegates to)
+  first; each fleet instance runs the full `/conduct` pipeline headless. Fleet consumes
   only ship's documented state-file contract; ship is never modified.
 - **Needs** Windows with PowerShell 7 (`pwsh`) on PATH and the GitHub CLI (`gh`)
   authenticated. Spawn/liveness/kill mechanics are PowerShell — not portable to
@@ -301,7 +304,7 @@ cp -r find-cold-leads ~/.claude/skills/
 - **The interactive counterpart to [`ship-fleet`](./ship-fleet).** Fleet spawns headless
   `claude -p` processes you can only watch; orchestrate opens each session as a real
   Windows Terminal tab you can read and type into mid-flight. Use fleet for a hands-off
-  batch of `/ship` pipelines, orchestrate when you want to stay in the loop.
+  batch of `/conduct` pipelines, orchestrate when you want to stay in the loop.
 - **Needs** Windows with `wt.exe` (Windows Terminal), `git`, and the GitHub CLI (`gh`)
   authenticated. Tab launch and the profile check are Windows Terminal specifics — not
   portable as written. Peers are addressed through `ListAgents`; `ReadNotifications` is
